@@ -264,21 +264,38 @@ func ReconcilePeers(iface string, peers []Node, localPub wgtypes.Key, fleetPSK *
 	return nil
 }
 
-// DetectEndpoint returns the first public IPv4 address on the host.
-func DetectEndpoint() (string, error) {
-	addrs, err := net.InterfaceAddrs()
+// resolveInterfaceIP returns the first IPv4 address on the named interface.
+func resolveInterfaceIP(name string) (string, error) {
+	iface, err := net.InterfaceByName(name)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("interface %s: %w", name, err)
 	}
-	for _, addr := range addrs {
-		ipNet, ok := addr.(*net.IPNet)
-		if !ok || ipNet.IP.IsLoopback() || ipNet.IP.To4() == nil {
-			continue
-		}
-		if ipNet.IP.IsPrivate() {
+	addrs, err := iface.Addrs()
+	if err != nil {
+		return "", fmt.Errorf("addresses for %s: %w", name, err)
+	}
+	for _, a := range addrs {
+		ipNet, ok := a.(*net.IPNet)
+		if !ok || ipNet.IP.To4() == nil {
 			continue
 		}
 		return ipNet.IP.String(), nil
 	}
-	return "", fmt.Errorf("no public IPv4 address found")
+	return "", fmt.Errorf("no IPv4 address on interface %s", name)
+}
+
+// resolveDefaultRouteIP returns the source IPv4 address the kernel would use
+// for outbound traffic. Uses the standard net.Dial("udp4") trick — no packets
+// are sent; the kernel just resolves the route.
+func resolveDefaultRouteIP() (string, error) {
+	conn, err := net.Dial("udp4", "8.8.8.8:80")
+	if err != nil {
+		return "", fmt.Errorf("resolve default route: %w", err)
+	}
+	defer conn.Close()
+	host, _, err := net.SplitHostPort(conn.LocalAddr().String())
+	if err != nil {
+		return "", fmt.Errorf("parse local addr: %w", err)
+	}
+	return host, nil
 }

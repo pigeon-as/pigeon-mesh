@@ -32,14 +32,42 @@ func TestValidate_RequiresWgPSK(t *testing.T) {
 }
 
 func TestValidate_OK(t *testing.T) {
-	cfg := Config{Seeds: []string{"1.2.3.4"}, GossipKey: validKey32, WgPSK: validKey32, ListenPort: 51820}
+	cfg := Config{Seeds: []string{"1.2.3.4"}, GossipKey: validKey32, WgPSK: validKey32, ListenPort: 51820, EndpointAddress: "10.0.0.1"}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
+func TestValidate_OKWithInterface(t *testing.T) {
+	cfg := Config{Seeds: []string{"1.2.3.4"}, GossipKey: validKey32, WgPSK: validKey32, ListenPort: 51820, EndpointInterface: "eth0"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidate_OKNoEndpoint(t *testing.T) {
+	cfg := Config{Seeds: []string{"1.2.3.4"}, GossipKey: validKey32, WgPSK: validKey32, ListenPort: 51820}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("unexpected error: %v (neither endpoint field is required)", err)
+	}
+}
+
+func TestValidate_EndpointMutuallyExclusive(t *testing.T) {
+	cfg := Config{Seeds: []string{"1.2.3.4"}, GossipKey: validKey32, WgPSK: validKey32, ListenPort: 51820, EndpointAddress: "10.0.0.1", EndpointInterface: "eth0"}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error when both endpoint_address and endpoint_interface are set")
+	}
+}
+
+func TestValidate_EndpointAddressInvalid(t *testing.T) {
+	cfg := Config{Seeds: []string{"1.2.3.4"}, GossipKey: validKey32, WgPSK: validKey32, ListenPort: 51820, EndpointAddress: "not-an-ip"}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for invalid endpoint_address")
+	}
+}
+
 func TestValidate_PortRange(t *testing.T) {
-	cfg := Config{Seeds: []string{"1.2.3.4"}, GossipKey: validKey32, WgPSK: validKey32, ListenPort: 0}
+	cfg := Config{Seeds: []string{"1.2.3.4"}, GossipKey: validKey32, WgPSK: validKey32, ListenPort: 0, EndpointAddress: "10.0.0.1"}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected error for listen_port 0")
 	}
@@ -66,11 +94,12 @@ func TestValidate_WgPSKBadLength(t *testing.T) {
 
 func TestValidate_InterfaceTooLong(t *testing.T) {
 	cfg := Config{
-		Seeds:      []string{"1.2.3.4"},
-		GossipKey:  validKey32,
-		WgPSK:      validKey32,
-		ListenPort: 51820,
-		Interface:  "this-name-is-way-too-long",
+		Seeds:           []string{"1.2.3.4"},
+		GossipKey:       validKey32,
+		WgPSK:           validKey32,
+		ListenPort:      51820,
+		EndpointAddress: "10.0.0.1",
+		Interface:       "this-name-is-way-too-long",
 	}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected error for interface name > 15 chars")

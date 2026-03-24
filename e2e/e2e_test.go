@@ -77,14 +77,14 @@ func TestMain(m *testing.M) {
 func baseConfig(t *testing.T) map[string]interface{} {
 	t.Helper()
 	return map[string]interface{}{
-		"interface":   "wg-e2e",
-		"seeds":       []string{"127.0.0.1"},
-		"gossip_key":  validKey,
-		"wg_psk":      validKey,
-		"listen_port": 51820,
-		"endpoint":    "127.0.0.1",
-		"data_dir":    filepath.Join(t.TempDir(), "data"),
-		"log_level":   "debug",
+		"interface":        "wg-e2e",
+		"seeds":            []string{"127.0.0.1"},
+		"gossip_key":       validKey,
+		"wg_psk":           validKey,
+		"listen_port":      51820,
+		"endpoint_address": "127.0.0.1",
+		"data_dir":         filepath.Join(t.TempDir(), "data"),
+		"log_level":        "debug",
 	}
 }
 

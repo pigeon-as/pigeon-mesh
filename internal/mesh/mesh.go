@@ -23,14 +23,15 @@ const (
 )
 
 type Config struct {
-	Interface  string
-	Seeds      []string
-	GossipKey  string
-	WgPSK      string
-	ListenPort int
-	Hostname   string
-	Endpoint   string
-	DataDir    string
+	Interface         string
+	Seeds             []string
+	GossipKey         string
+	WgPSK             string
+	ListenPort        int
+	Hostname          string
+	EndpointAddress   string
+	EndpointInterface string
+	DataDir           string
 }
 
 type Mesh struct {
@@ -56,12 +57,19 @@ func New(logger *slog.Logger, cfg Config) (*Mesh, error) {
 	}
 	overlayAddr := netip.PrefixFrom(overlayIP, 128).String()
 
-	endpoint := cfg.Endpoint
-	if endpoint == "" {
-		endpoint, err = DetectEndpoint()
+	endpoint := cfg.EndpointAddress
+	if endpoint == "" && cfg.EndpointInterface != "" {
+		endpoint, err = resolveInterfaceIP(cfg.EndpointInterface)
 		if err != nil {
-			return nil, fmt.Errorf("detect endpoint: %w", err)
+			return nil, fmt.Errorf("resolve endpoint from interface %s: %w", cfg.EndpointInterface, err)
 		}
+	}
+	if endpoint == "" {
+		endpoint, err = resolveDefaultRouteIP()
+		if err != nil {
+			return nil, fmt.Errorf("resolve endpoint via default route: %w", err)
+		}
+		logger.Info("endpoint resolved via default route", "ip", endpoint)
 	}
 
 	local := Node{
