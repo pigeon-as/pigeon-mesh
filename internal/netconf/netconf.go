@@ -14,12 +14,27 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// SetupNftables creates CGNAT masquerade rules in its own table (pigeon-mesh-nat).
+const (
+	tableNAT       = "pigeon-mesh-nat"
+	tableTranspose = "pigeon-transpose"
+
+	// IPv6 header byte offsets for src/dst address fields.
+	ipv6SrcOffset = 8
+	ipv6DstOffset = 24
+
+	// Byte offsets within a 16-byte IPv6 address for pigeon's
+	// 32-bit network and host fields (fdaa:[net32]:[host32]:...).
+	addrNetField  = 2
+	addrHostField = 6
+	fieldLen      = 4
+)
+
+// SetupNftables creates CGNAT masquerade rules in its own table.
 func SetupNftables(iface, egressCIDR string) error {
 	cleanup := &nftables.Conn{}
 	cleanup.DelTable(&nftables.Table{
 		Family: nftables.TableFamilyINet,
-		Name:   "pigeon-mesh-nat",
+		Name:   tableNAT,
 	})
 	_ = cleanup.Flush()
 
@@ -40,7 +55,7 @@ func SetupNftables(iface, egressCIDR string) error {
 
 	natTable := conn.AddTable(&nftables.Table{
 		Family: nftables.TableFamilyINet,
-		Name:   "pigeon-mesh-nat",
+		Name:   tableNAT,
 	})
 	chain := conn.AddChain(&nftables.Chain{
 		Name:     "postrouting",
@@ -104,14 +119,14 @@ func SetupTranspose(iface string) error {
 	cleanup := &nftables.Conn{}
 	cleanup.DelTable(&nftables.Table{
 		Family: nftables.TableFamilyNetdev,
-		Name:   "pigeon-transpose",
+		Name:   tableTranspose,
 	})
 	_ = cleanup.Flush()
 
 	conn := &nftables.Conn{}
 	table := conn.AddTable(&nftables.Table{
 		Family: nftables.TableFamilyNetdev,
-		Name:   "pigeon-transpose",
+		Name:   tableTranspose,
 	})
 
 	hooks := []struct {
@@ -131,8 +146,8 @@ func SetupTranspose(iface string) error {
 			Device:   iface,
 		})
 
-		conn.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: transposeExprs(8)})  // src
-		conn.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: transposeExprs(24)}) // dst
+		conn.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: transposeExprs(ipv6SrcOffset)})
+		conn.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: transposeExprs(ipv6DstOffset)})
 	}
 
 	if err := conn.Flush(); err != nil {
@@ -141,17 +156,17 @@ func SetupTranspose(iface string) error {
 	return nil
 }
 
-// transposeExprs: meta protocol ip6 → check fdaa:: prefix → swap bytes 2-5 ↔ 6-9.
-// addrOffset: 8 for src, 24 for dst. No checksum fixup needed (16-bit-aligned swap).
+// transposeExprs swaps network ↔ host fields in a pigeon ULA address.
+// No checksum fixup needed (16-bit-aligned swap).
 func transposeExprs(addrOffset uint32) []expr.Any {
 	return []expr.Any{
 		&expr.Meta{Key: expr.MetaKeyPROTOCOL, Register: 1},
-		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{0x86, 0xDD}},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{0x86, 0xDD}},          // EtherType IPv6
 		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: addrOffset, Len: 2},
-		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{0xfd, 0xaa}},
-		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: addrOffset + 2, Len: 4},
-		&expr.Payload{DestRegister: 2, Base: expr.PayloadBaseNetworkHeader, Offset: addrOffset + 6, Len: 4},
-		&expr.Payload{OperationType: expr.PayloadWrite, SourceRegister: 2, Base: expr.PayloadBaseNetworkHeader, Offset: addrOffset + 2, Len: 4, CsumType: expr.CsumTypeNone},
-		&expr.Payload{OperationType: expr.PayloadWrite, SourceRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: addrOffset + 6, Len: 4, CsumType: expr.CsumTypeNone},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{0xfd, 0xaa}},          // fdaa:: prefix
+		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: addrOffset + addrNetField, Len: fieldLen},
+		&expr.Payload{DestRegister: 2, Base: expr.PayloadBaseNetworkHeader, Offset: addrOffset + addrHostField, Len: fieldLen},
+		&expr.Payload{OperationType: expr.PayloadWrite, SourceRegister: 2, Base: expr.PayloadBaseNetworkHeader, Offset: addrOffset + addrNetField, Len: fieldLen, CsumType: expr.CsumTypeNone},
+		&expr.Payload{OperationType: expr.PayloadWrite, SourceRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: addrOffset + addrHostField, Len: fieldLen, CsumType: expr.CsumTypeNone},
 	}
 }

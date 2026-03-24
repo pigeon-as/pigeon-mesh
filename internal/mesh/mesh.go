@@ -14,6 +14,12 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
+const (
+	memberlistPort     = 7946
+	reconcileInterval  = 30 * time.Second
+	leaveTimeout       = 5 * time.Second
+)
+
 type Config struct {
 	Interface   string
 	Seeds       []string
@@ -102,8 +108,8 @@ func New(logger *slog.Logger, cfg Config) (*Mesh, error) {
 
 	mlCfg := memberlist.DefaultWANConfig()
 	mlCfg.Name = cfg.Hostname
-	mlCfg.BindPort = 7946
-	mlCfg.AdvertisePort = 7946
+	mlCfg.BindPort = memberlistPort
+	mlCfg.AdvertisePort = memberlistPort
 	mlCfg.Delegate = &delegate{meta: meta}
 	mlCfg.Events = &eventDelegate{ch: events}
 	mlCfg.LogOutput = io.Discard
@@ -151,7 +157,7 @@ func (m *Mesh) Run(ctx context.Context) {
 		m.logger.Error("initial peer reconcile", "err", err)
 	}
 
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(reconcileInterval)
 	defer ticker.Stop()
 
 	for {
@@ -190,7 +196,7 @@ func (m *Mesh) Peers() []Node {
 }
 
 func (m *Mesh) Leave() error {
-	return m.list.Leave(5 * time.Second)
+	return m.list.Leave(leaveTimeout)
 }
 
 type delegate struct {

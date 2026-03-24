@@ -24,27 +24,21 @@ var (
 
 func main() {
 	flag.Parse()
-	os.Exit(run())
-}
 
-func run() int {
 	if *showVer {
-		fmt.Println("pigeon-mesh v0.2.0")
-		return 0
+		fmt.Println("pigeon-mesh v0.0.1-beta.1")
+		return
 	}
-	return runDaemon()
-}
 
-func runDaemon() int {
 	if *configFile == "" {
 		fmt.Fprintln(os.Stderr, "error: --config is required")
-		return 1
+		os.Exit(1)
 	}
 
 	cfg, err := config.Load(*configFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		return 1
+		os.Exit(1)
 	}
 
 	if *logLevel != "" {
@@ -53,11 +47,17 @@ func runDaemon() int {
 
 	if err := cfg.Validate(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		return 1
+		os.Exit(1)
+	}
+
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(cfg.LogLevel)); err != nil {
+		fmt.Fprintf(os.Stderr, "error: invalid log-level %q: %v\n", cfg.LogLevel, err)
+		os.Exit(1)
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: parseLevel(cfg.LogLevel),
+		Level: level,
 	}))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -66,18 +66,18 @@ func runDaemon() int {
 	hostname, err := os.Hostname()
 	if err != nil {
 		logger.Error("get hostname", "err", err)
-		return 1
+		os.Exit(1)
 	}
 
 	if err := netconf.VerifySysctl(); err != nil {
 		logger.Error("verify sysctl", "err", err)
-		return 1
+		os.Exit(1)
 	}
 	logger.Info("sysctl verified")
 
 	if err := netconf.SetupNftables(cfg.Interface, cfg.EgressCIDR); err != nil {
 		logger.Error("setup nftables", "err", err)
-		return 1
+		os.Exit(1)
 	}
 	logger.Info("nftables configured", "egress_cidr", cfg.EgressCIDR)
 
@@ -94,13 +94,13 @@ func runDaemon() int {
 	})
 	if err != nil {
 		logger.Error("start mesh", "err", err)
-		return 1
+		os.Exit(1)
 	}
 	defer m.Leave()
 
 	if err := netconf.SetupTranspose(cfg.Interface); err != nil {
 		logger.Error("setup transpose", "err", err)
-		return 1
+		os.Exit(1)
 	}
 	logger.Info("address transposition configured")
 
@@ -108,18 +108,4 @@ func runDaemon() int {
 
 	<-ctx.Done()
 	logger.Info("shutting down")
-	return 0
-}
-
-func parseLevel(s string) slog.Level {
-	switch s {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
 }

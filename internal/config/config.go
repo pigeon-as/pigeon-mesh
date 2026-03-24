@@ -7,6 +7,15 @@ import (
 	"os"
 )
 
+const (
+	defaultInterface  = "wg0"
+	defaultListenPort = 51820
+	defaultDataDir    = "/var/lib/pigeon-mesh"
+	defaultLogLevel   = "info"
+	maxIfaceNameLen   = 15 // IFNAMSIZ - 1
+	wgPSKLen          = 32 // Curve25519
+)
+
 type Config struct {
 	Interface   string   `json:"interface"`
 	Seeds       []string `json:"seeds"`
@@ -43,16 +52,16 @@ func Defaults() Config {
 
 func applyDefaults(cfg *Config) {
 	if cfg.Interface == "" {
-		cfg.Interface = "wg0"
+		cfg.Interface = defaultInterface
 	}
 	if cfg.ListenPort == 0 {
-		cfg.ListenPort = 51820
+		cfg.ListenPort = defaultListenPort
 	}
 	if cfg.DataDir == "" {
-		cfg.DataDir = "/var/lib/pigeon-mesh"
+		cfg.DataDir = defaultDataDir
 	}
 	if cfg.LogLevel == "" {
-		cfg.LogLevel = "info"
+		cfg.LogLevel = defaultLogLevel
 	}
 }
 
@@ -77,11 +86,11 @@ func (c Config) Validate() error {
 	if err != nil {
 		return fmt.Errorf("wg_psk: invalid base64: %w", err)
 	}
-	if len(pskRaw) != 32 {
-		return fmt.Errorf("wg_psk: must be 32 bytes, got %d", len(pskRaw))
+	if len(pskRaw) != wgPSKLen {
+		return fmt.Errorf("wg_psk: must be %d bytes, got %d", wgPSKLen, len(pskRaw))
 	}
-	if len(c.Interface) > 15 {
-		return fmt.Errorf("interface: name too long (%d chars, max 15)", len(c.Interface))
+	if len(c.Interface) > maxIfaceNameLen {
+		return fmt.Errorf("interface: name too long (%d chars, max %d)", len(c.Interface), maxIfaceNameLen)
 	}
 	return nil
 }

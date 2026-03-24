@@ -23,6 +23,12 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
+const (
+	defaultWgPort = 51820
+	keepalive     = 25 * time.Second
+	hkdfPSKInfo   = "pigeon-mesh wireguard pairwise psk v1"
+)
+
 // LoadOrGenerateKey loads a WireGuard private key from dataDir/privkey,
 // or generates a new one if not found. If dataDir is empty, generates
 // an ephemeral key (not persisted).
@@ -162,7 +168,11 @@ func SetupInterface(iface string, privKey wgtypes.Key, overlayAddr string, liste
 		return fmt.Errorf("bring up: %w", err)
 	}
 
-	_, dst, _ := net.ParseCIDR("fdaa::/16")
+	meshPrefix := addr.PigeonULARange()
+	dst := &net.IPNet{
+		IP:   meshPrefix.Addr().AsSlice(),
+		Mask: net.CIDRMask(meshPrefix.Bits(), 128),
+	}
 	if err := netlink.RouteReplace(&netlink.Route{
 		LinkIndex: link.Attrs().Index,
 		Dst:       dst,
@@ -184,7 +194,7 @@ func DerivePairPSK(fleetPSK wgtypes.Key, localPub, remotePub wgtypes.Key) (wgtyp
 	salt = append(salt, a...)
 	salt = append(salt, b...)
 
-	r := hkdf.New(sha256.New, fleetPSK[:], salt, []byte("pigeon-mesh wireguard pairwise psk v1"))
+	r := hkdf.New(sha256.New, fleetPSK[:], salt, []byte(hkdfPSKInfo))
 	var key wgtypes.Key
 	if _, err := io.ReadFull(r, key[:]); err != nil {
 		return wgtypes.Key{}, fmt.Errorf("hkdf read: %w", err)
@@ -201,7 +211,6 @@ func ReconcilePeers(iface string, peers []Node, localPub wgtypes.Key, fleetPSK *
 	defer client.Close()
 
 	desired := make(map[wgtypes.Key]struct{}, len(peers))
-	keepalive := 25 * time.Second
 
 	var peerConfigs []wgtypes.PeerConfig
 	for _, p := range peers {
@@ -223,7 +232,7 @@ func ReconcilePeers(iface string, peers []Node, localPub wgtypes.Key, fleetPSK *
 
 		port := p.WgPort
 		if port == 0 {
-			port = 51820
+			port = defaultWgPort
 		}
 		endpoint, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", p.Endpoint, port))
 		if err != nil {
@@ -239,12 +248,13 @@ func ReconcilePeers(iface string, peers []Node, localPub wgtypes.Key, fleetPSK *
 			psk = &k
 		}
 
+		ka := keepalive
 		peerConfigs = append(peerConfigs, wgtypes.PeerConfig{
 			PublicKey:                   pubKey,
 			PresharedKey:                psk,
 			Endpoint:                    endpoint,
 			AllowedIPs:                  allowedIPs,
-			PersistentKeepaliveInterval: &keepalive,
+			PersistentKeepaliveInterval: &ka,
 			ReplaceAllowedIPs:           true,
 		})
 	}
