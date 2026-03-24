@@ -32,9 +32,20 @@ func TestValidate_RequiresWgPSK(t *testing.T) {
 }
 
 func TestValidate_OK(t *testing.T) {
-	cfg := Config{Seeds: []string{"1.2.3.4"}, GossipKey: validKey32, WgPSK: validKey32}
+	cfg := Config{Seeds: []string{"1.2.3.4"}, GossipKey: validKey32, WgPSK: validKey32, ListenPort: 51820}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidate_PortRange(t *testing.T) {
+	cfg := Config{Seeds: []string{"1.2.3.4"}, GossipKey: validKey32, WgPSK: validKey32, ListenPort: 0}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for listen_port 0")
+	}
+	cfg.ListenPort = 70000
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for listen_port > 65535")
 	}
 }
 
@@ -55,10 +66,11 @@ func TestValidate_WgPSKBadLength(t *testing.T) {
 
 func TestValidate_InterfaceTooLong(t *testing.T) {
 	cfg := Config{
-		Seeds:     []string{"1.2.3.4"},
-		GossipKey: validKey32,
-		WgPSK:     validKey32,
-		Interface: "this-name-is-way-too-long",
+		Seeds:      []string{"1.2.3.4"},
+		GossipKey:  validKey32,
+		WgPSK:      validKey32,
+		ListenPort: 51820,
+		Interface:  "this-name-is-way-too-long",
 	}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected error for interface name > 15 chars")
