@@ -82,14 +82,15 @@ func main() {
 	logger.Info("nftables configured", "egress_cidr", cfg.EgressCIDR)
 
 	m, err := mesh.New(logger, mesh.Config{
-		Interface:  cfg.Interface,
-		Seeds:      cfg.Seeds,
-		GossipKey:  cfg.GossipKey,
-		WgPSK:      cfg.WgPSK,
-		ListenPort: cfg.ListenPort,
-		Hostname:   hostname,
-		Endpoint:   cfg.Endpoint,
-		DataDir:    cfg.DataDir,
+		Interface:         cfg.Interface,
+		Seeds:             cfg.Seeds,
+		GossipKey:         cfg.GossipKey,
+		WgPSK:             cfg.WgPSK,
+		ListenPort:        cfg.ListenPort,
+		Hostname:          hostname,
+		EndpointAddress:   cfg.EndpointAddress,
+		EndpointInterface: cfg.EndpointInterface,
+		DataDir:           cfg.DataDir,
 	})
 	if err != nil {
 		logger.Error("start mesh", "err", err)

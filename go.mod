@@ -5,7 +5,7 @@ go 1.25.6
 require (
 	github.com/google/nftables v0.3.0
 	github.com/hashicorp/memberlist v0.5.4
-	github.com/pigeon-as/pigeon-addr-plan v0.0.1-beta.1
+	github.com/pigeon-as/pigeon-addr-plan v0.0.1-beta.2
 	github.com/vishvananda/netlink v1.3.1
 	golang.org/x/crypto v0.48.0
 	golang.org/x/sys v0.41.0
@@ -35,5 +35,3 @@ require (
 	golang.org/x/tools v0.38.0 // indirect
 	golang.zx2c4.com/wireguard v0.0.0-20231211153847-12269c276173 // indirect
 )
-
-replace github.com/pigeon-as/pigeon-addr-plan => ../pigeon-addr-plan

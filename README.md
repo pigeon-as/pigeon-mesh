@@ -24,12 +24,12 @@ Example config:
   "seeds": ["10.0.0.1", "10.0.0.2"],
   "gossip_key": "base64...",
   "wg_psk": "base64...",
-  "endpoint": "1.2.3.4",
+  "endpoint_interface": "eth0",
   "egress_cidr": "100.64.0.0/24"
 }
 ```
 
-Required fields: `seeds`, `gossip_key`, `wg_psk`. Optional fields: `interface` (`wg0`), `listen_port` (`51820`), `data_dir` (`/var/lib/pigeon-mesh`), `log_level` (`info`), `endpoint`, `egress_cidr`.
+Required fields: `seeds`, `gossip_key`, `wg_psk`. Optional fields: `endpoint_address` or `endpoint_interface` (mutually exclusive — if neither is set, the endpoint is resolved via the kernel's default route), `interface` (`wg0`), `listen_port` (`51820`), `data_dir` (`/var/lib/pigeon-mesh`), `log_level` (`info`), `egress_cidr`.
 
 WireGuard private keys are persisted to `<data_dir>/privkey` and reused across restarts. Overlay address is always derived from hostname via `pigeon-addr-plan.PigeonHostIP`.
 

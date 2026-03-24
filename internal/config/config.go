@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 )
 
@@ -17,15 +18,16 @@ const (
 )
 
 type Config struct {
-	Interface  string   `json:"interface"`
-	Seeds      []string `json:"seeds"`
-	GossipKey  string   `json:"gossip_key"`
-	WgPSK      string   `json:"wg_psk"`
-	ListenPort int      `json:"listen_port"`
-	Endpoint   string   `json:"endpoint"`
-	EgressCIDR string   `json:"egress_cidr"`
-	DataDir    string   `json:"data_dir"`
-	LogLevel   string   `json:"log_level"`
+	Interface         string   `json:"interface"`
+	Seeds             []string `json:"seeds"`
+	GossipKey         string   `json:"gossip_key"`
+	WgPSK             string   `json:"wg_psk"`
+	ListenPort        int      `json:"listen_port"`
+	EndpointAddress   string   `json:"endpoint_address"`
+	EndpointInterface string   `json:"endpoint_interface"`
+	EgressCIDR        string   `json:"egress_cidr"`
+	DataDir           string   `json:"data_dir"`
+	LogLevel          string   `json:"log_level"`
 }
 
 func Load(path string) (Config, error) {
@@ -93,6 +95,17 @@ func (c Config) Validate() error {
 	}
 	if len(c.Interface) > maxIfaceNameLen {
 		return fmt.Errorf("interface: name too long (%d chars, max %d)", len(c.Interface), maxIfaceNameLen)
+	}
+	if c.EndpointAddress != "" && c.EndpointInterface != "" {
+		return fmt.Errorf("endpoint_address and endpoint_interface are mutually exclusive")
+	}
+	if c.EndpointAddress != "" {
+		if ip := net.ParseIP(c.EndpointAddress); ip == nil {
+			return fmt.Errorf("endpoint_address: invalid IP %q", c.EndpointAddress)
+		}
+	}
+	if c.EndpointInterface != "" && len(c.EndpointInterface) > maxIfaceNameLen {
+		return fmt.Errorf("endpoint_interface: name too long (%d chars, max %d)", len(c.EndpointInterface), maxIfaceNameLen)
 	}
 	return nil
 }
