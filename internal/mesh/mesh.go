@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/netip"
 	"time"
 
 	"github.com/hashicorp/memberlist"
+	addr "github.com/pigeon-as/pigeon-addr-plan"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
@@ -21,15 +23,14 @@ const (
 )
 
 type Config struct {
-	Interface   string
-	Seeds       []string
-	GossipKey   string
-	WgPSK       string
-	ListenPort  int
-	Hostname    string
-	OverlayAddr string
-	Endpoint    string
-	DataDir     string
+	Interface  string
+	Seeds      []string
+	GossipKey  string
+	WgPSK      string
+	ListenPort int
+	Hostname   string
+	Endpoint   string
+	DataDir    string
 }
 
 type Mesh struct {
@@ -49,13 +50,11 @@ func New(logger *slog.Logger, cfg Config) (*Mesh, error) {
 		return nil, fmt.Errorf("load/generate keypair: %w", err)
 	}
 
-	overlayAddr := cfg.OverlayAddr
-	if overlayAddr == "" {
-		overlayAddr, err = OverlayAddr(cfg.Hostname)
-		if err != nil {
-			return nil, fmt.Errorf("derive overlay addr: %w", err)
-		}
+	overlayIP, err := addr.PigeonHostIP(cfg.Hostname)
+	if err != nil {
+		return nil, fmt.Errorf("derive overlay addr: %w", err)
 	}
+	overlayAddr := netip.PrefixFrom(overlayIP, 128).String()
 
 	endpoint := cfg.Endpoint
 	if endpoint == "" {

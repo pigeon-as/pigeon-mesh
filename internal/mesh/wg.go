@@ -10,7 +10,6 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -95,24 +94,6 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 		return err
 	}
 	return nil
-}
-
-// OverlayAddr computes the app-view overlay address (fdaa:0:0:HHHH:HHHH::1/128)
-// from a hostname.
-func OverlayAddr(hostname string) (string, error) {
-	host, err := addr.HashPrefix(addr.PigeonULARange(), addr.NetworkBits, hostname)
-	if err != nil {
-		return "", fmt.Errorf("hash host prefix: %w", err)
-	}
-	ip, err := addr.HostAddr(host, 1)
-	if err != nil {
-		return "", fmt.Errorf("host addr: %w", err)
-	}
-	ip, ok := addr.TransposePigeonULA(ip)
-	if !ok {
-		return "", fmt.Errorf("transpose %s: not a pigeon ULA address", ip)
-	}
-	return netip.PrefixFrom(ip, 128).String(), nil
 }
 
 // SetupInterface creates (or reconfigures) the WireGuard interface.
@@ -220,15 +201,17 @@ func ReconcilePeers(iface string, peers []Node, localPub wgtypes.Key, fleetPSK *
 		}
 		desired[pubKey] = struct{}{}
 
-		route, err := peerRoute(p.Name)
+		wirePrefix, err := addr.PigeonHostRoute(p.Name)
 		if err != nil {
 			return fmt.Errorf("peer route %s: %w", p.Name, err)
 		}
-		_, routeNet, err := net.ParseCIDR(route)
-		if err != nil {
-			return fmt.Errorf("parse peer route %s: %w", p.Name, err)
-		}
-		allowedIPs := []net.IPNet{*routeNet}
+		ones := wirePrefix.Bits()
+		ipAddr := wirePrefix.Addr()
+		ipBytes := ipAddr.As16()
+		allowedIPs := []net.IPNet{{
+			IP:   net.IP(ipBytes[:]),
+			Mask: net.CIDRMask(ones, 128),
+		}}
 
 		port := p.WgPort
 		if port == 0 {
@@ -298,13 +281,4 @@ func DetectEndpoint() (string, error) {
 		return ipNet.IP.String(), nil
 	}
 	return "", fmt.Errorf("no public IPv4 address found")
-}
-
-// peerRoute returns the AllowedIPs prefix (fdaa:HHHH:HHHH::/48) for a peer.
-func peerRoute(name string) (string, error) {
-	host, err := addr.HashPrefix(addr.PigeonULARange(), addr.NetworkBits, name)
-	if err != nil {
-		return "", fmt.Errorf("hash host prefix for %s: %w", name, err)
-	}
-	return host.String(), nil
 }

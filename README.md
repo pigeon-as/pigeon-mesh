@@ -24,15 +24,14 @@ Example config:
   "seeds": ["10.0.0.1", "10.0.0.2"],
   "gossip_key": "base64...",
   "wg_psk": "base64...",
-  "overlay_addr": "fdaa:abcd:ef01::1/128",
   "endpoint": "1.2.3.4",
   "egress_cidr": "100.64.0.0/24"
 }
 ```
 
-Required fields: `seeds`, `gossip_key`, `wg_psk`. Optional fields: `interface` (`wg0`), `listen_port` (`51820`), `data_dir` (`/var/lib/pigeon-mesh`), `log_level` (`info`), `overlay_addr`, `endpoint`, `egress_cidr`.
+Required fields: `seeds`, `gossip_key`, `wg_psk`. Optional fields: `interface` (`wg0`), `listen_port` (`51820`), `data_dir` (`/var/lib/pigeon-mesh`), `log_level` (`info`), `endpoint`, `egress_cidr`.
 
-WireGuard private keys are persisted to `<data_dir>/privkey` and reused across restarts. Overlay address is derived from hostname by default, or set explicitly via `overlay_addr` for Terraform-managed deployments.
+WireGuard private keys are persisted to `<data_dir>/privkey` and reused across restarts. Overlay address is always derived from hostname via `pigeon-addr-plan.PigeonHostIP`.
 
 ## Build
 
