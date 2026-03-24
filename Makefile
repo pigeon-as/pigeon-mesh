@@ -15,3 +15,6 @@ test:
 
 vet:
 	go vet ./...
+
+e2e: build
+	sudo go test -tags=e2e -v -count=1 ./e2e
