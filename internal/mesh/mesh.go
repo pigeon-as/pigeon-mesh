@@ -180,7 +180,7 @@ func (m *Mesh) Run(ctx context.Context) {
 
 func (m *Mesh) Peers() []Node {
 	members := m.list.Members()
-	peers := make([]Node, 0, len(members)-1)
+	peers := make([]Node, 0, max(len(members)-1, 0))
 	for _, member := range members {
 		if member.Name == m.local.Name {
 			continue
@@ -190,6 +190,7 @@ func (m *Mesh) Peers() []Node {
 			m.logger.Warn("decode peer meta", "peer", member.Name, "err", err)
 			continue
 		}
+		node.Name = member.Name
 		peers = append(peers, node)
 	}
 	return peers

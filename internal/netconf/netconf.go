@@ -48,7 +48,8 @@ func SetupNftables(iface, egressCIDR string) error {
 	if err != nil {
 		return fmt.Errorf("parse egress CIDR: %w", err)
 	}
-	ip4 := ipNet.IP.To4()
+	networkIP := ipNet.IP.Mask(ipNet.Mask)
+	ip4 := networkIP.To4()
 	if ip4 == nil {
 		return fmt.Errorf("egress CIDR must be IPv4: %s", egressCIDR)
 	}
