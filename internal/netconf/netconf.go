@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/nftables"
 	"github.com/google/nftables/expr"
+	addr "github.com/pigeon-as/pigeon-addr-plan"
 	"golang.org/x/sys/unix"
 )
 
@@ -160,11 +161,15 @@ func SetupTranspose(iface string) error {
 // transposeExprs swaps network ↔ host fields in a pigeon ULA address.
 // No checksum fixup needed (16-bit-aligned swap).
 func transposeExprs(addrOffset uint32) []expr.Any {
+	ula := addr.PigeonULARange()
+	prefixBytes := ula.Bits() / 8
+	raw := ula.Addr().As16()
+
 	return []expr.Any{
 		&expr.Meta{Key: expr.MetaKeyPROTOCOL, Register: 1},
 		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{0x86, 0xDD}}, // EtherType IPv6
-		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: addrOffset, Len: 2},
-		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{0xfd, 0xaa}}, // fdaa:: prefix
+		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: addrOffset, Len: uint32(prefixBytes)},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: raw[:prefixBytes]},
 		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: addrOffset + addrNetField, Len: fieldLen},
 		&expr.Payload{DestRegister: 2, Base: expr.PayloadBaseNetworkHeader, Offset: addrOffset + addrHostField, Len: fieldLen},
 		&expr.Payload{OperationType: expr.PayloadWrite, SourceRegister: 2, Base: expr.PayloadBaseNetworkHeader, Offset: addrOffset + addrNetField, Len: fieldLen, CsumType: expr.CsumTypeNone},
