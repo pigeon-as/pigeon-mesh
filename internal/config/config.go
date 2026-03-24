@@ -89,6 +89,9 @@ func (c Config) Validate() error {
 	if len(pskRaw) != wgPSKLen {
 		return fmt.Errorf("wg_psk: must be %d bytes, got %d", wgPSKLen, len(pskRaw))
 	}
+	if c.ListenPort < 1 || c.ListenPort > 65535 {
+		return fmt.Errorf("listen_port: must be between 1 and 65535, got %d", c.ListenPort)
+	}
 	if len(c.Interface) > maxIfaceNameLen {
 		return fmt.Errorf("interface: name too long (%d chars, max %d)", len(c.Interface), maxIfaceNameLen)
 	}

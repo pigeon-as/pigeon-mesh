@@ -234,7 +234,7 @@ func ReconcilePeers(iface string, peers []Node, localPub wgtypes.Key, fleetPSK *
 		if port == 0 {
 			port = defaultWgPort
 		}
-		endpoint, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", p.Endpoint, port))
+		endpoint, err := net.ResolveUDPAddr("udp", net.JoinHostPort(p.Endpoint, fmt.Sprintf("%d", port)))
 		if err != nil {
 			return fmt.Errorf("resolve endpoint %s: %w", p.Name, err)
 		}
