@@ -5,7 +5,7 @@ go 1.25.6
 require (
 	github.com/google/nftables v0.3.0
 	github.com/hashicorp/memberlist v0.5.4
-	github.com/pigeon-as/pigeon-addr-plan v0.0.1-beta.1
+	github.com/pigeon-as/pigeon-addr-plan v0.0.1-beta.2
 	github.com/vishvananda/netlink v1.3.1
 	golang.org/x/crypto v0.48.0
 	golang.org/x/sys v0.41.0

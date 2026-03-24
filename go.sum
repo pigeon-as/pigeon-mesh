@@ -101,6 +101,8 @@ github.com/pascaldekloe/goe v0.1.0 h1:cBOtyMzM9HTpWjXfbbunk26uA6nG3a8n06Wieeh0Mw
 github.com/pascaldekloe/goe v0.1.0/go.mod h1:lzWF7FIEvWOWxwDKqyGYQf6ZUaNfKdP144TG7ZOy1lc=
 github.com/pigeon-as/pigeon-addr-plan v0.0.1-beta.1 h1:4ioaMBKq3LAy1IKuX/0z2tD3yvElvF9rR0Sfp9cz9aA=
 github.com/pigeon-as/pigeon-addr-plan v0.0.1-beta.1/go.mod h1:fxpwjaAl4ifiW0geZ8HJm4PyReMXBY6RSS8xFaFLoLs=
+github.com/pigeon-as/pigeon-addr-plan v0.0.1-beta.2 h1:IgjmLqVPHq/3KgOTQvhxRvblTPIm5N1nKuWLVsYCg1M=
+github.com/pigeon-as/pigeon-addr-plan v0.0.1-beta.2/go.mod h1:fxpwjaAl4ifiW0geZ8HJm4PyReMXBY6RSS8xFaFLoLs=
 github.com/pkg/errors v0.8.0/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
 github.com/pkg/errors v0.8.1/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
 github.com/pkg/errors v0.9.1/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
