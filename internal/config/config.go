@@ -104,5 +104,8 @@ func (c Config) Validate() error {
 			return fmt.Errorf("endpoint_address: invalid IP %q", c.EndpointAddress)
 		}
 	}
+	if c.EndpointInterface != "" && len(c.EndpointInterface) > maxIfaceNameLen {
+		return fmt.Errorf("endpoint_interface: name too long (%d chars, max %d)", len(c.EndpointInterface), maxIfaceNameLen)
+	}
 	return nil
 }

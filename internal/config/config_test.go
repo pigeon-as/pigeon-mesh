@@ -66,6 +66,13 @@ func TestValidate_EndpointAddressInvalid(t *testing.T) {
 	}
 }
 
+func TestValidate_EndpointInterfaceTooLong(t *testing.T) {
+	cfg := Config{Seeds: []string{"1.2.3.4"}, GossipKey: validKey32, WgPSK: validKey32, ListenPort: 51820, EndpointInterface: "this-name-is-way-too-long"}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for endpoint_interface name > 15 chars")
+	}
+}
+
 func TestValidate_PortRange(t *testing.T) {
 	cfg := Config{Seeds: []string{"1.2.3.4"}, GossipKey: validKey32, WgPSK: validKey32, ListenPort: 0, EndpointAddress: "10.0.0.1"}
 	if err := cfg.Validate(); err == nil {
