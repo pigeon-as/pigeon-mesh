@@ -3,6 +3,7 @@ package mesh
 import (
 	"bytes"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -99,6 +100,10 @@ func SetupInterface(iface string, privKey wgtypes.Key, overlayAddr string, liste
 	// Create interface if it doesn't exist.
 	link, err := netlink.LinkByName(iface)
 	if err != nil {
+		var notFound netlink.LinkNotFoundError
+		if !errors.As(err, &notFound) {
+			return fmt.Errorf("lookup interface: %w", err)
+		}
 		wg := &netlink.Wireguard{LinkAttrs: netlink.LinkAttrs{Name: iface}}
 		if err := netlink.LinkAdd(wg); err != nil {
 			return fmt.Errorf("create interface: %w", err)
@@ -124,9 +129,14 @@ func SetupInterface(iface string, privKey wgtypes.Key, overlayAddr string, liste
 	}
 
 	// Flush existing addresses.
-	addrs, _ := netlink.AddrList(link, netlink.FAMILY_ALL)
+	addrs, err := netlink.AddrList(link, netlink.FAMILY_ALL)
+	if err != nil {
+		return fmt.Errorf("list addresses: %w", err)
+	}
 	for i := range addrs {
-		netlink.AddrDel(link, &addrs[i])
+		if err := netlink.AddrDel(link, &addrs[i]); err != nil {
+			return fmt.Errorf("delete address %s: %w", addrs[i].IP, err)
+		}
 	}
 
 	// Add overlay address.

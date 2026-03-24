@@ -6,31 +6,62 @@ import (
 	"testing"
 )
 
+// validKey32 is 32 zero bytes, base64-encoded. Valid for both
+// gossip_key (16/24/32) and wg_psk (32).
+const validKey32 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
 func TestValidate_RequiresSeeds(t *testing.T) {
-	cfg := Config{GossipKey: "dGVzdA==", WgPSK: "dGVzdA=="}
+	cfg := Config{GossipKey: validKey32, WgPSK: validKey32}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected error for missing seeds")
 	}
 }
 
 func TestValidate_RequiresGossipKey(t *testing.T) {
-	cfg := Config{Seeds: []string{"1.2.3.4"}, WgPSK: "dGVzdA=="}
+	cfg := Config{Seeds: []string{"1.2.3.4"}, WgPSK: validKey32}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected error for missing gossip_key")
 	}
 }
 
 func TestValidate_RequiresWgPSK(t *testing.T) {
-	cfg := Config{Seeds: []string{"1.2.3.4"}, GossipKey: "dGVzdA=="}
+	cfg := Config{Seeds: []string{"1.2.3.4"}, GossipKey: validKey32}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected error for missing wg_psk")
 	}
 }
 
 func TestValidate_OK(t *testing.T) {
-	cfg := Config{Seeds: []string{"1.2.3.4"}, GossipKey: "dGVzdA==", WgPSK: "dGVzdA=="}
+	cfg := Config{Seeds: []string{"1.2.3.4"}, GossipKey: validKey32, WgPSK: validKey32}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidate_GossipKeyBadLength(t *testing.T) {
+	cfg := Config{Seeds: []string{"1.2.3.4"}, GossipKey: "dGVzdA==", WgPSK: validKey32}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for 4-byte gossip_key")
+	}
+}
+
+func TestValidate_WgPSKBadLength(t *testing.T) {
+	// 16 zero bytes — valid for gossip but not for wg_psk.
+	cfg := Config{Seeds: []string{"1.2.3.4"}, GossipKey: validKey32, WgPSK: "AAAAAAAAAAAAAAAAAAAAAA=="}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for 16-byte wg_psk")
+	}
+}
+
+func TestValidate_InterfaceTooLong(t *testing.T) {
+	cfg := Config{
+		Seeds:     []string{"1.2.3.4"},
+		GossipKey: validKey32,
+		WgPSK:     validKey32,
+		Interface: "this-name-is-way-too-long",
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for interface name > 15 chars")
 	}
 }
 

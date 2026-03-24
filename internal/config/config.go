@@ -2,6 +2,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -59,8 +60,7 @@ func applyDefaults(cfg *Config) {
 	}
 }
 
-// Validate checks required fields. Should be called after all overrides
-// (CLI flags, env vars) have been applied.
+// Validate checks required fields and key formats.
 func (c Config) Validate() error {
 	if len(c.Seeds) == 0 {
 		return fmt.Errorf("seeds is required")
@@ -68,8 +68,25 @@ func (c Config) Validate() error {
 	if c.GossipKey == "" {
 		return fmt.Errorf("gossip_key is required")
 	}
+	gossipRaw, err := base64.StdEncoding.DecodeString(c.GossipKey)
+	if err != nil {
+		return fmt.Errorf("gossip_key: invalid base64: %w", err)
+	}
+	if l := len(gossipRaw); l != 16 && l != 24 && l != 32 {
+		return fmt.Errorf("gossip_key: must be 16, 24, or 32 bytes, got %d", l)
+	}
 	if c.WgPSK == "" {
 		return fmt.Errorf("wg_psk is required")
+	}
+	pskRaw, err := base64.StdEncoding.DecodeString(c.WgPSK)
+	if err != nil {
+		return fmt.Errorf("wg_psk: invalid base64: %w", err)
+	}
+	if len(pskRaw) != 32 {
+		return fmt.Errorf("wg_psk: must be 32 bytes, got %d", len(pskRaw))
+	}
+	if len(c.Interface) > 15 {
+		return fmt.Errorf("interface: name too long (%d chars, max 15)", len(c.Interface))
 	}
 	return nil
 }

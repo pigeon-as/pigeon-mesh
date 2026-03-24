@@ -50,8 +50,14 @@ func TestDerivePairPSK_DifferentPeers(t *testing.T) {
 	pubB := mustParseKey(t, "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=")
 	pubC := mustParseKey(t, "Q0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0M=")
 
-	pskAB, _ := DerivePairPSK(fleet, pubA, pubB)
-	pskAC, _ := DerivePairPSK(fleet, pubA, pubC)
+	pskAB, err := DerivePairPSK(fleet, pubA, pubB)
+	if err != nil {
+		t.Fatalf("DerivePairPSK(A,B): %v", err)
+	}
+	pskAC, err := DerivePairPSK(fleet, pubA, pubC)
+	if err != nil {
+		t.Fatalf("DerivePairPSK(A,C): %v", err)
+	}
 	if pskAB == pskAC {
 		t.Fatal("different peer pairs should produce different PSKs")
 	}
@@ -70,12 +76,18 @@ func TestOverlayAddr(t *testing.T) {
 		t.Fatalf("unexpected overlay addr format: %s", got)
 	}
 	// Deterministic: same input → same output.
-	got2, _ := OverlayAddr("worker-01")
+	got2, err := OverlayAddr("worker-01")
+	if err != nil {
+		t.Fatalf("OverlayAddr repeat: %v", err)
+	}
 	if got != got2 {
 		t.Fatalf("not deterministic: %s != %s", got, got2)
 	}
 	// Different hostname → different address.
-	other, _ := OverlayAddr("worker-02")
+	other, err := OverlayAddr("worker-02")
+	if err != nil {
+		t.Fatalf("OverlayAddr other: %v", err)
+	}
 	if got == other {
 		t.Fatal("different hostnames should produce different addresses")
 	}
@@ -90,12 +102,18 @@ func TestPeerRoute(t *testing.T) {
 		t.Fatal("peerRoute returned empty string")
 	}
 	// Deterministic.
-	got2, _ := peerRoute("worker-01")
+	got2, err := peerRoute("worker-01")
+	if err != nil {
+		t.Fatalf("peerRoute repeat: %v", err)
+	}
 	if got != got2 {
 		t.Fatalf("not deterministic: %s != %s", got, got2)
 	}
 	// Different name → different route.
-	other, _ := peerRoute("worker-02")
+	other, err := peerRoute("worker-02")
+	if err != nil {
+		t.Fatalf("peerRoute other: %v", err)
+	}
 	if got == other {
 		t.Fatal("different names should produce different routes")
 	}

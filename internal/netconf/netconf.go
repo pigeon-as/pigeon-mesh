@@ -172,6 +172,12 @@ func SetupTranspose(iface string) error {
 // words preserves the one's complement sum used by TCP/UDP pseudo-headers.
 func transposeExprs(addrOffset uint32) []expr.Any {
 	return []expr.Any{
+		// Only process IPv6 packets (EtherType 0x86DD). Without this guard,
+		// an IPv4 payload that coincidentally contains 0xfdaa at the same
+		// offset would be corrupted.
+		&expr.Meta{Key: expr.MetaKeyPROTOCOL, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{0x86, 0xDD}},
+
 		// Check address prefix (bytes 0-1) == 0xfdaa.
 		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: addrOffset, Len: 2},
 		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{0xfd, 0xaa}},
