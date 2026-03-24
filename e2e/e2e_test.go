@@ -242,19 +242,10 @@ func TestOverlayAddress(t *testing.T) {
 	}
 
 	// Compute expected overlay address.
-	host, err := addr.HashPrefix(addr.PigeonULARange(), addr.NetworkBits, hostname)
+	expected, err := addr.PigeonHostIP(hostname)
 	if err != nil {
 		t.Fatal(err)
 	}
-	hostIP, err := addr.HostAddr(host, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	transposed, ok := addr.TransposePigeonULA(hostIP)
-	if !ok {
-		t.Fatal("transpose failed")
-	}
-	expected := transposed.String()
 
 	// Check interface addresses.
 	iface, err := net.InterfaceByName("wg-e2e")
@@ -272,7 +263,7 @@ func TestOverlayAddress(t *testing.T) {
 		if err != nil {
 			continue
 		}
-		if prefix.Addr().String() == expected {
+		if prefix.Addr() == expected {
 			found = true
 			break
 		}

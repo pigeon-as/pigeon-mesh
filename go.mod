@@ -35,3 +35,5 @@ require (
 	golang.org/x/tools v0.38.0 // indirect
 	golang.zx2c4.com/wireguard v0.0.0-20231211153847-12269c276173 // indirect
 )
+
+replace github.com/pigeon-as/pigeon-addr-plan => ../pigeon-addr-plan

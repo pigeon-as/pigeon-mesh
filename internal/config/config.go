@@ -17,16 +17,15 @@ const (
 )
 
 type Config struct {
-	Interface   string   `json:"interface"`
-	Seeds       []string `json:"seeds"`
-	GossipKey   string   `json:"gossip_key"`
-	WgPSK       string   `json:"wg_psk"`
-	ListenPort  int      `json:"listen_port"`
-	OverlayAddr string   `json:"overlay_addr"`
-	Endpoint    string   `json:"endpoint"`
-	EgressCIDR  string   `json:"egress_cidr"`
-	DataDir     string   `json:"data_dir"`
-	LogLevel    string   `json:"log_level"`
+	Interface  string   `json:"interface"`
+	Seeds      []string `json:"seeds"`
+	GossipKey  string   `json:"gossip_key"`
+	WgPSK      string   `json:"wg_psk"`
+	ListenPort int      `json:"listen_port"`
+	Endpoint   string   `json:"endpoint"`
+	EgressCIDR string   `json:"egress_cidr"`
+	DataDir    string   `json:"data_dir"`
+	LogLevel   string   `json:"log_level"`
 }
 
 func Load(path string) (Config, error) {
