@@ -15,9 +15,9 @@ import (
 )
 
 const (
-	memberlistPort     = 7946
-	reconcileInterval  = 30 * time.Second
-	leaveTimeout       = 5 * time.Second
+	memberlistPort    = 7946
+	reconcileInterval = 30 * time.Second
+	leaveTimeout      = 5 * time.Second
 )
 
 type Config struct {
