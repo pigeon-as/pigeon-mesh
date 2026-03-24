@@ -293,9 +293,9 @@ func resolveDefaultRouteIP() (string, error) {
 		return "", fmt.Errorf("resolve default route: %w", err)
 	}
 	defer conn.Close()
-	host, _, err := net.SplitHostPort(conn.LocalAddr().String())
-	if err != nil {
-		return "", fmt.Errorf("parse local addr: %w", err)
+	udpAddr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		return "", fmt.Errorf("resolve default route: unexpected addr type %T", conn.LocalAddr())
 	}
-	return host, nil
+	return udpAddr.IP.String(), nil
 }
