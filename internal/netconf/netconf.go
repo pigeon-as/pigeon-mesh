@@ -1,5 +1,3 @@
-// Package netconf manages nftables and sysctl configuration for the mesh overlay.
-//
 //go:build linux
 
 package netconf
@@ -16,15 +14,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// SetupNftables creates the pigeon-mesh NAT rules for CGNAT masquerade.
-// Filter rules (WireGuard port, memberlist, wg0 accept, forward) are managed
-// by pigeon-fence. Only masquerade stays here because NAT is not firewall
-// policy — it's coupled to the WireGuard interface lifecycle.
-//
-// Uses its own table (pigeon-mesh-nat) to avoid colliding with other nftables
-// users. Same own-table pattern as pigeon-fence (pigeon-fence) and Calico (calico).
+// SetupNftables creates CGNAT masquerade rules in its own table (pigeon-mesh-nat).
 func SetupNftables(iface, egressCIDR string) error {
-	// Best-effort cleanup of stale table from previous run.
 	cleanup := &nftables.Conn{}
 	cleanup.DelTable(&nftables.Table{
 		Family: nftables.TableFamilyINet,
@@ -32,7 +23,6 @@ func SetupNftables(iface, egressCIDR string) error {
 	})
 	_ = cleanup.Flush()
 
-	// NAT rules (optional CGNAT masquerade for VM egress).
 	if egressCIDR == "" {
 		return nil
 	}
@@ -71,9 +61,7 @@ func SetupNftables(iface, egressCIDR string) error {
 	return nil
 }
 
-// VerifySysctl checks that IP forwarding is enabled. These sysctls are set by
-// the image sysctl.conf drop-in at boot — pigeon-mesh verifies them rather than
-// setting them, to maintain clear responsibility boundaries.
+// VerifySysctl checks that IP forwarding is enabled.
 func VerifySysctl() error {
 	params := []struct {
 		path  string
@@ -94,19 +82,13 @@ func VerifySysctl() error {
 	return nil
 }
 
-// masqueradeExprs builds nftables expressions for:
-//
-//	oifname != "<iface>" ip saddr <cidr> masquerade
-//
-// The output interface check prevents masquerading cross-host mesh traffic.
+// masqueradeExprs: meta nfproto ipv4 oifname != <iface> ip saddr <cidr> masquerade
 func masqueradeExprs(iface string, networkIP net.IP, mask net.IPMask) []expr.Any {
-	ifaceBuf := make([]byte, 16) // IFNAMSIZ
+	ifaceBuf := make([]byte, 16)
 	copy(ifaceBuf, iface)
 	return []expr.Any{
-		// Gate on IPv4 (inet table may see IPv6 packets).
 		&expr.Meta{Key: expr.MetaKeyNFPROTO, Register: 1},
 		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{unix.NFPROTO_IPV4}},
-		// Skip masquerade for traffic going to the WireGuard interface (cross-host mesh).
 		&expr.Meta{Key: expr.MetaKeyOIFNAME, Register: 1},
 		&expr.Cmp{Op: expr.CmpOpNeq, Register: 1, Data: ifaceBuf},
 		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: 12, Len: 4},
@@ -116,12 +98,9 @@ func masqueradeExprs(iface string, networkIP net.IP, mask net.IPMask) []expr.Any
 	}
 }
 
-// SetupTranspose creates nftables netdev rules on the WireGuard interface to
-// transpose pigeon IPv6 addresses between app-view and wire-view. Swaps the
-// network (bytes 2-5) and host (bytes 6-9) fields of fdaa:: addresses in both
-// src and dst, for both ingress and egress. The transform is self-inverse.
+// SetupTranspose creates netdev rules that swap network/host fields of fdaa::
+// addresses (self-inverse) for WireGuard cryptokey routing.
 func SetupTranspose(iface string) error {
-	// Best-effort cleanup of stale table from previous run.
 	cleanup := &nftables.Conn{}
 	cleanup.DelTable(&nftables.Table{
 		Family: nftables.TableFamilyNetdev,
@@ -135,8 +114,6 @@ func SetupTranspose(iface string) error {
 		Name:   "pigeon-transpose",
 	})
 
-	// Create ingress and egress chains bound to the WireGuard device.
-	// Both directions apply the same self-inverse transposition.
 	hooks := []struct {
 		name string
 		hook *nftables.ChainHook
@@ -154,10 +131,8 @@ func SetupTranspose(iface string) error {
 			Device:   iface,
 		})
 
-		// Rule 1: if src starts with fdaa::, swap src bytes 2-5 ↔ 6-9.
-		conn.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: transposeExprs(8)})
-		// Rule 2: if dst starts with fdaa::, swap dst bytes 2-5 ↔ 6-9.
-		conn.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: transposeExprs(24)})
+		conn.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: transposeExprs(8)})  // src
+		conn.AddRule(&nftables.Rule{Table: table, Chain: chain, Exprs: transposeExprs(24)}) // dst
 	}
 
 	if err := conn.Flush(); err != nil {
@@ -166,27 +141,16 @@ func SetupTranspose(iface string) error {
 	return nil
 }
 
-// transposeExprs builds expressions that check if an IPv6 address (at addrOffset
-// from the network header: 8 for src, 24 for dst) starts with fdaa::, and swaps
-// bytes 2-5 and 6-9. No checksum fixup needed — swapping 16-bit-aligned 32-bit
-// words preserves the one's complement sum used by TCP/UDP pseudo-headers.
+// transposeExprs: meta protocol ip6 → check fdaa:: prefix → swap bytes 2-5 ↔ 6-9.
+// addrOffset: 8 for src, 24 for dst. No checksum fixup needed (16-bit-aligned swap).
 func transposeExprs(addrOffset uint32) []expr.Any {
 	return []expr.Any{
-		// Only process IPv6 packets (EtherType 0x86DD). Without this guard,
-		// an IPv4 payload that coincidentally contains 0xfdaa at the same
-		// offset would be corrupted.
 		&expr.Meta{Key: expr.MetaKeyPROTOCOL, Register: 1},
 		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{0x86, 0xDD}},
-
-		// Check address prefix (bytes 0-1) == 0xfdaa.
 		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: addrOffset, Len: 2},
 		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{0xfd, 0xaa}},
-
-		// Load field A (bytes 2-5) into reg1, field B (bytes 6-9) into reg2.
 		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: addrOffset + 2, Len: 4},
 		&expr.Payload{DestRegister: 2, Base: expr.PayloadBaseNetworkHeader, Offset: addrOffset + 6, Len: 4},
-
-		// Write field B to bytes 2-5, field A to bytes 6-9.
 		&expr.Payload{OperationType: expr.PayloadWrite, SourceRegister: 2, Base: expr.PayloadBaseNetworkHeader, Offset: addrOffset + 2, Len: 4, CsumType: expr.CsumTypeNone},
 		&expr.Payload{OperationType: expr.PayloadWrite, SourceRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: addrOffset + 6, Len: 4, CsumType: expr.CsumTypeNone},
 	}

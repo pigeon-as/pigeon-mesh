@@ -1,3 +1,5 @@
+//go:build linux
+
 package mesh
 
 import (
@@ -22,8 +24,8 @@ import (
 )
 
 // LoadOrGenerateKey loads a WireGuard private key from dataDir/privkey,
-// or generates a new one and persists it. If dataDir is empty, a fresh
-// keypair is generated without persistence.
+// or generates a new one if not found. If dataDir is empty, generates
+// an ephemeral key (not persisted).
 func LoadOrGenerateKey(dataDir string) (wgtypes.Key, wgtypes.Key, error) {
 	if dataDir == "" {
 		priv, err := wgtypes.GeneratePrivateKey()
@@ -62,10 +64,24 @@ func LoadOrGenerateKey(dataDir string) (wgtypes.Key, wgtypes.Key, error) {
 	return priv, priv.PublicKey(), nil
 }
 
-// atomicWriteFile writes data to path via a temp file + rename.
 func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, perm); err != nil {
+	f, err := os.CreateTemp(filepath.Dir(path), ".pigeon-mesh-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Chmod(perm); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
 		return err
 	}
 	if err := os.Rename(tmp, path); err != nil {
@@ -75,9 +91,8 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	return nil
 }
 
-// OverlayAddr computes the WireGuard overlay address from a hostname.
-// Returns the app-view address fdaa:0:0:HHHH:HHHH::1/128. nftables on wg0
-// transposes to wire-view for WireGuard cryptokey routing.
+// OverlayAddr computes the app-view overlay address (fdaa:0:0:HHHH:HHHH::1/128)
+// from a hostname.
 func OverlayAddr(hostname string) (string, error) {
 	host, err := addr.HashPrefix(addr.PigeonULARange(), addr.NetworkBits, hostname)
 	if err != nil {
@@ -94,10 +109,8 @@ func OverlayAddr(hostname string) (string, error) {
 	return netip.PrefixFrom(ip, 128).String(), nil
 }
 
-// SetupInterface creates and configures the WireGuard interface.
-// If the interface already exists, it reconfigures it.
+// SetupInterface creates (or reconfigures) the WireGuard interface.
 func SetupInterface(iface string, privKey wgtypes.Key, overlayAddr string, listenPort int) error {
-	// Create interface if it doesn't exist.
 	link, err := netlink.LinkByName(iface)
 	if err != nil {
 		var notFound netlink.LinkNotFoundError
@@ -114,7 +127,6 @@ func SetupInterface(iface string, privKey wgtypes.Key, overlayAddr string, liste
 		}
 	}
 
-	// Configure WireGuard via wgctrl netlink.
 	client, err := wgctrl.New()
 	if err != nil {
 		return fmt.Errorf("wgctrl client: %w", err)
@@ -128,7 +140,6 @@ func SetupInterface(iface string, privKey wgtypes.Key, overlayAddr string, liste
 		return fmt.Errorf("configure device: %w", err)
 	}
 
-	// Flush existing addresses.
 	addrs, err := netlink.AddrList(link, netlink.FAMILY_ALL)
 	if err != nil {
 		return fmt.Errorf("list addresses: %w", err)
@@ -139,7 +150,6 @@ func SetupInterface(iface string, privKey wgtypes.Key, overlayAddr string, liste
 		}
 	}
 
-	// Add overlay address.
 	nlAddr, err := netlink.ParseAddr(overlayAddr)
 	if err != nil {
 		return fmt.Errorf("parse overlay addr: %w", err)
@@ -152,8 +162,6 @@ func SetupInterface(iface string, privKey wgtypes.Key, overlayAddr string, liste
 		return fmt.Errorf("bring up: %w", err)
 	}
 
-	// Catch-all route for app-view pigeon traffic. More-specific routes
-	// (bridge /80s from pigeon-cni) take precedence for local VMs.
 	_, dst, _ := net.ParseCIDR("fdaa::/16")
 	if err := netlink.RouteReplace(&netlink.Route{
 		LinkIndex: link.Attrs().Index,
@@ -165,9 +173,8 @@ func SetupInterface(iface string, privKey wgtypes.Key, overlayAddr string, liste
 	return nil
 }
 
-// DerivePairPSK derives a per-pair WireGuard PresharedKey from the fleet PSK
-// and both peers' public keys using HKDF-SHA256 with domain separation.
-// Keys are sorted as raw 32-byte values; the fleet secret never enters the kernel.
+// DerivePairPSK derives a per-pair PresharedKey from the fleet PSK and both
+// peers' public keys via HKDF-SHA256.
 func DerivePairPSK(fleetPSK wgtypes.Key, localPub, remotePub wgtypes.Key) (wgtypes.Key, error) {
 	a, b := localPub[:], remotePub[:]
 	if bytes.Compare(a, b) > 0 {
@@ -186,7 +193,6 @@ func DerivePairPSK(fleetPSK wgtypes.Key, localPub, remotePub wgtypes.Key) (wgtyp
 }
 
 // ReconcilePeers sets WireGuard peers to match the given list, removing stale ones.
-// If fleetPSK is non-nil, a per-pair PSK is derived via HKDF for each tunnel.
 func ReconcilePeers(iface string, peers []Node, localPub wgtypes.Key, fleetPSK *wgtypes.Key) error {
 	client, err := wgctrl.New()
 	if err != nil {
@@ -205,7 +211,6 @@ func ReconcilePeers(iface string, peers []Node, localPub wgtypes.Key, fleetPSK *
 		}
 		desired[pubKey] = struct{}{}
 
-		// The peer's /48 in wire-view covers overlay + all VM traffic.
 		route, err := peerRoute(p.Name)
 		if err != nil {
 			return fmt.Errorf("peer route %s: %w", p.Name, err)
@@ -244,7 +249,6 @@ func ReconcilePeers(iface string, peers []Node, localPub wgtypes.Key, fleetPSK *
 		})
 	}
 
-	// Get current peers to find stale ones.
 	dev, err := client.Device(iface)
 	if err != nil {
 		return fmt.Errorf("get device: %w", err)
@@ -267,7 +271,7 @@ func ReconcilePeers(iface string, peers []Node, localPub wgtypes.Key, fleetPSK *
 	return nil
 }
 
-// DetectEndpoint returns the first non-loopback, non-private IPv4 address.
+// DetectEndpoint returns the first public IPv4 address on the host.
 func DetectEndpoint() (string, error) {
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
@@ -286,8 +290,7 @@ func DetectEndpoint() (string, error) {
 	return "", fmt.Errorf("no public IPv4 address found")
 }
 
-// peerRoute derives the host route (AllowedIPs) for a peer.
-// Returns fdaa:HHHH:HHHH::/48 — the full host prefix for WireGuard routing.
+// peerRoute returns the AllowedIPs prefix (fdaa:HHHH:HHHH::/48) for a peer.
 func peerRoute(name string) (string, error) {
 	host, err := addr.HashPrefix(addr.PigeonULARange(), addr.NetworkBits, name)
 	if err != nil {

@@ -1,3 +1,5 @@
+//go:build linux
+
 package mesh
 
 import (
@@ -12,20 +14,18 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
-// Config configures the mesh.
 type Config struct {
-	Interface   string   // WireGuard interface name (default: wg0)
-	Seeds       []string // Seed node addresses for memberlist
-	GossipKey   string   // Base64-encoded AES-256 key for memberlist encryption
-	WgPSK       string   // Base64-encoded 32-byte WireGuard PresharedKey (optional)
-	ListenPort  int      // WireGuard listen port (default: 51820)
-	Hostname    string   // FQDN hostname for memberlist node name
-	OverlayAddr string   // Explicit overlay address (e.g. fdaa:0:0:abcd:ef01::1/128). Derived from hostname if empty.
-	Endpoint    string   // Public IP for WireGuard endpoint (auto-detected if empty)
-	DataDir     string   // Directory for persistent state (default: generate ephemeral keys)
+	Interface   string
+	Seeds       []string
+	GossipKey   string
+	WgPSK       string
+	ListenPort  int
+	Hostname    string
+	OverlayAddr string
+	Endpoint    string
+	DataDir     string
 }
 
-// Mesh manages the WireGuard mesh via memberlist gossip.
 type Mesh struct {
 	list     *memberlist.Memberlist
 	local    Node
@@ -36,16 +36,13 @@ type Mesh struct {
 	psk      *wgtypes.Key
 }
 
-// New creates and starts a new mesh. It generates a WireGuard keypair,
-// creates the WireGuard interface, and joins the memberlist cluster.
+// New creates and starts a new mesh.
 func New(logger *slog.Logger, cfg Config) (*Mesh, error) {
-	// Load or generate WireGuard keypair (persisted to data-dir if set).
 	privKey, pubKey, err := LoadOrGenerateKey(cfg.DataDir)
 	if err != nil {
 		return nil, fmt.Errorf("load/generate keypair: %w", err)
 	}
 
-	// Use explicit overlay address if provided, otherwise derive from hostname.
 	overlayAddr := cfg.OverlayAddr
 	if overlayAddr == "" {
 		overlayAddr, err = OverlayAddr(cfg.Hostname)
@@ -54,7 +51,6 @@ func New(logger *slog.Logger, cfg Config) (*Mesh, error) {
 		}
 	}
 
-	// Detect public endpoint.
 	endpoint := cfg.Endpoint
 	if endpoint == "" {
 		endpoint, err = DetectEndpoint()
@@ -77,7 +73,6 @@ func New(logger *slog.Logger, cfg Config) (*Mesh, error) {
 		"endpoint", local.Endpoint,
 	)
 
-	// Parse optional WireGuard PSK.
 	var psk *wgtypes.Key
 	if cfg.WgPSK != "" {
 		raw, err := base64.StdEncoding.DecodeString(cfg.WgPSK)
@@ -94,12 +89,10 @@ func New(logger *slog.Logger, cfg Config) (*Mesh, error) {
 		psk = &k
 	}
 
-	// Setup WireGuard interface.
 	if err := SetupInterface(cfg.Interface, privKey, overlayAddr, cfg.ListenPort); err != nil {
 		return nil, fmt.Errorf("setup wireguard: %w", err)
 	}
 
-	// Encode metadata for memberlist gossip.
 	meta, err := encodeNodeMeta(local)
 	if err != nil {
 		return nil, fmt.Errorf("encode metadata: %w", err)
@@ -107,7 +100,6 @@ func New(logger *slog.Logger, cfg Config) (*Mesh, error) {
 
 	events := make(chan struct{}, 1)
 
-	// Configure memberlist (WAN defaults for cross-DC mesh).
 	mlCfg := memberlist.DefaultWANConfig()
 	mlCfg.Name = cfg.Hostname
 	mlCfg.BindPort = 7946
@@ -133,7 +125,6 @@ func New(logger *slog.Logger, cfg Config) (*Mesh, error) {
 		return nil, fmt.Errorf("create memberlist: %w", err)
 	}
 
-	// Join seed nodes.
 	if len(cfg.Seeds) > 0 {
 		n, err := list.Join(cfg.Seeds)
 		if err != nil {
@@ -155,14 +146,11 @@ func New(logger *slog.Logger, cfg Config) (*Mesh, error) {
 }
 
 // Run processes membership events and reconciles WireGuard peers.
-// It blocks until ctx is cancelled.
 func (m *Mesh) Run(ctx context.Context) {
-	// Initial reconcile.
 	if err := ReconcilePeers(m.iface, m.Peers(), m.localPub, m.psk); err != nil {
 		m.logger.Error("initial peer reconcile", "err", err)
 	}
 
-	// Periodic reconcile as safety net (same interval as Consul's Serf reconcile).
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
@@ -184,7 +172,6 @@ func (m *Mesh) Run(ctx context.Context) {
 	}
 }
 
-// Peers returns the current remote mesh peers.
 func (m *Mesh) Peers() []Node {
 	members := m.list.Members()
 	peers := make([]Node, 0, len(members)-1)
@@ -202,12 +189,10 @@ func (m *Mesh) Peers() []Node {
 	return peers
 }
 
-// Leave gracefully leaves the memberlist cluster.
 func (m *Mesh) Leave() error {
 	return m.list.Leave(5 * time.Second)
 }
 
-// delegate implements memberlist.Delegate for metadata broadcasting.
 type delegate struct {
 	meta []byte
 }
@@ -224,7 +209,6 @@ func (d *delegate) GetBroadcasts(overhead, limit int) [][]byte { return nil }
 func (d *delegate) LocalState(join bool) []byte                { return nil }
 func (d *delegate) MergeRemoteState(buf []byte, join bool)     {}
 
-// eventDelegate implements memberlist.EventDelegate for join/leave notifications.
 type eventDelegate struct {
 	ch chan struct{}
 }

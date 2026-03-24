@@ -4,6 +4,7 @@ OUTDIR := build
 .PHONY: build clean test vet
 
 build:
+	@mkdir -p $(OUTDIR)
 	go build -o $(OUTDIR)/$(BINARY) ./cmd/pigeon-mesh
 
 clean:

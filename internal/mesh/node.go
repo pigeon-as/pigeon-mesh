@@ -2,7 +2,6 @@ package mesh
 
 import "encoding/json"
 
-// Node represents a mesh peer's public information.
 type Node struct {
 	Name        string `json:"n"`
 	PubKey      string `json:"pk"`

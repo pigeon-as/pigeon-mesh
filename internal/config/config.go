@@ -1,4 +1,3 @@
-// Package config loads and validates the pigeon-mesh JSON configuration.
 package config
 
 import (
@@ -8,7 +7,6 @@ import (
 	"os"
 )
 
-// Config holds the pigeon-mesh configuration.
 type Config struct {
 	Interface   string   `json:"interface"`
 	Seeds       []string `json:"seeds"`
@@ -22,7 +20,6 @@ type Config struct {
 	LogLevel    string   `json:"log_level"`
 }
 
-// Load reads a JSON config file and returns a Config with defaults applied.
 func Load(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -38,7 +35,6 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
-// Defaults returns a Config with all default values applied.
 func Defaults() Config {
 	var cfg Config
 	applyDefaults(&cfg)
@@ -60,7 +56,6 @@ func applyDefaults(cfg *Config) {
 	}
 }
 
-// Validate checks required fields and key formats.
 func (c Config) Validate() error {
 	if len(c.Seeds) == 0 {
 		return fmt.Errorf("seeds is required")
