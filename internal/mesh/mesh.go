@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/netip"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/memberlist"
@@ -35,13 +36,14 @@ type Config struct {
 }
 
 type Mesh struct {
-	list     *memberlist.Memberlist
-	local    Node
-	localPub wgtypes.Key
-	events   chan struct{}
-	logger   *slog.Logger
-	iface    string
-	psk      *wgtypes.Key
+	list        *memberlist.Memberlist
+	local       Node
+	localPub    wgtypes.Key
+	events      chan struct{}
+	logger      *slog.Logger
+	iface       string
+	psk         *wgtypes.Key
+	reconcileMu sync.Mutex
 }
 
 // New creates and starts a new mesh.
@@ -160,9 +162,11 @@ func New(logger *slog.Logger, cfg Config) (*Mesh, error) {
 
 // Run processes membership events and reconciles WireGuard peers.
 func (m *Mesh) Run(ctx context.Context) {
+	m.reconcileMu.Lock()
 	if err := ReconcilePeers(m.iface, m.Peers(), m.localPub, m.psk); err != nil {
 		m.logger.Error("initial peer reconcile", "err", err)
 	}
+	m.reconcileMu.Unlock()
 
 	ticker := time.NewTicker(reconcileInterval)
 	defer ticker.Stop()
@@ -174,13 +178,17 @@ func (m *Mesh) Run(ctx context.Context) {
 		case <-m.events:
 			peers := m.Peers()
 			m.logger.Info("membership changed", "peers", len(peers))
+			m.reconcileMu.Lock()
 			if err := ReconcilePeers(m.iface, peers, m.localPub, m.psk); err != nil {
 				m.logger.Error("peer reconcile", "err", err)
 			}
+			m.reconcileMu.Unlock()
 		case <-ticker.C:
+			m.reconcileMu.Lock()
 			if err := ReconcilePeers(m.iface, m.Peers(), m.localPub, m.psk); err != nil {
 				m.logger.Error("periodic reconcile", "err", err)
 			}
+			m.reconcileMu.Unlock()
 		}
 	}
 }
