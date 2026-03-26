@@ -150,13 +150,7 @@ func (t *TLSTransport) Shutdown() error {
 
 		t.wg.Wait()
 
-		for _, key := range t.pool.Keys() {
-			if val, ok := t.pool.Get(key); ok {
-				if c, ok := val.(net.Conn); ok {
-					c.Close()
-				}
-			}
-		}
+		// Purge fires the eviction callback (conn.Close) for each entry.
 		t.pool.Purge()
 	})
 	return nil
@@ -242,6 +236,9 @@ func (t *TLSTransport) handlePacketConn(conn net.Conn) {
 	}
 }
 
+// getConn returns a pooled connection or dials a new one.
+// The global lock is held through the dial — same pattern as Alertmanager's
+// connectionPool.borrowConnection. Acceptable for small cluster sizes.
 func (t *TLSTransport) getConn(addr string) (net.Conn, error) {
 	t.poolMu.Lock()
 	defer t.poolMu.Unlock()

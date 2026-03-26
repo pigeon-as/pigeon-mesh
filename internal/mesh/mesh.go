@@ -236,10 +236,7 @@ func (m *Mesh) Leave() error {
 }
 
 func (m *Mesh) Shutdown() error {
-	if m.transport != nil {
-		return m.transport.Shutdown()
-	}
-	return nil
+	return m.list.Shutdown()
 }
 
 type delegate struct {
