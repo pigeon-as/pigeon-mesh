@@ -158,7 +158,10 @@ func (t *TLSTransport) Shutdown() error {
 		t.wg.Wait()
 
 		// Purge fires the eviction callback (conn.Close) for each entry.
+		// Lock required: memberlist goroutines may still be in WriteTo.
+		t.poolMu.Lock()
 		t.pool.Purge()
+		t.poolMu.Unlock()
 	})
 	return nil
 }
