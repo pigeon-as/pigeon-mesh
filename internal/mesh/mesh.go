@@ -131,11 +131,10 @@ func New(logger *slog.Logger, cfg Config) (*Mesh, error) {
 		if err != nil {
 			return nil, fmt.Errorf("load mesh CA: %w", err)
 		}
-		peerCert, err := generatePeerCert(caCert, caKey, cfg.Hostname, endpoint)
+		serverTLS, clientTLS, err := newTLSConfigs(caCert, caKey, cfg.Hostname, endpoint)
 		if err != nil {
-			return nil, fmt.Errorf("generate peer cert: %w", err)
+			return nil, fmt.Errorf("create tls configs: %w", err)
 		}
-		serverTLS, clientTLS := newTLSConfigs(caCert, peerCert)
 
 		transport, err = NewTLSTransport(logger, "0.0.0.0", memberlistPort, serverTLS, clientTLS)
 		if err != nil {

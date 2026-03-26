@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -227,7 +228,7 @@ func (t *TLSTransport) handlePacketConn(conn net.Conn) {
 			return
 		}
 
-		fromAddr, err := net.ResolveTCPAddr("tcp", from)
+		fromAddr, err := parseTCPAddr(from)
 		if err != nil {
 			t.logger.Warn("parse from address", "from", from, "err", err)
 			continue
@@ -293,4 +294,22 @@ func (t *TLSTransport) dialTLS(addr string, timeout time.Duration) (*tls.Conn, e
 		return nil, fmt.Errorf("tls dial %s: %w", addr, err)
 	}
 	return conn, nil
+}
+
+// parseTCPAddr parses a host:port string without DNS resolution.
+// Rejects non-IP hostnames to avoid unexpected lookups on peer-controlled data.
+func parseTCPAddr(s string) (*net.TCPAddr, error) {
+	host, portStr, err := net.SplitHostPort(s)
+	if err != nil {
+		return nil, err
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return nil, fmt.Errorf("non-IP host: %q", host)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid port: %w", err)
+	}
+	return &net.TCPAddr{IP: ip, Port: port}, nil
 }

@@ -17,10 +17,7 @@ import (
 	"time"
 )
 
-const (
-	peerCertTTL   = 24 * time.Hour
-	notBeforeSkew = 5 * time.Minute
-)
+const notBeforeSkew = 5 * time.Minute
 
 // loadCA reads a PEM-encoded CA certificate and private key from disk.
 func loadCA(certFile, keyFile string) (*x509.Certificate, *ecdsa.PrivateKey, error) {
@@ -72,7 +69,7 @@ func generatePeerCert(caCert *x509.Certificate, caKey *ecdsa.PrivateKey, hostnam
 		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: hostname},
 		NotBefore:    now.Add(-notBeforeSkew),
-		NotAfter:     now.Add(peerCertTTL),
+		NotAfter:     caCert.NotAfter,
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 		DNSNames:     []string{hostname},
@@ -100,7 +97,14 @@ func generatePeerCert(caCert *x509.Certificate, caKey *ecdsa.PrivateKey, hostnam
 }
 
 // newTLSConfigs builds server and client TLS configs from a CA and peer cert.
-func newTLSConfigs(caCert *x509.Certificate, peerCert tls.Certificate) (server *tls.Config, client *tls.Config) {
+// The peer cert is generated once at startup, valid until the CA expires.
+// Process restart = new cert. CA rotation (Terraform) = mesh restart.
+func newTLSConfigs(caCert *x509.Certificate, caKey *ecdsa.PrivateKey, hostname, endpointIP string) (server *tls.Config, client *tls.Config, err error) {
+	peerCert, err := generatePeerCert(caCert, caKey, hostname, endpointIP)
+	if err != nil {
+		return nil, nil, fmt.Errorf("generate peer cert: %w", err)
+	}
+
 	caPool := x509.NewCertPool()
 	caPool.AddCert(caCert)
 
@@ -117,5 +121,5 @@ func newTLSConfigs(caCert *x509.Certificate, peerCert tls.Certificate) (server *
 		MinVersion:   tls.VersionTLS13,
 	}
 
-	return server, client
+	return server, client, nil
 }

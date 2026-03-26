@@ -51,11 +51,10 @@ func testCA(t *testing.T) (*x509.Certificate, *ecdsa.PrivateKey) {
 // testTransport creates a TLSTransport for testing on a random port.
 func testTransport(t *testing.T, caCert *x509.Certificate, caKey *ecdsa.PrivateKey, hostname string) *TLSTransport {
 	t.Helper()
-	peerCert, err := generatePeerCert(caCert, caKey, hostname, "127.0.0.1")
+	serverTLS, clientTLS, err := newTLSConfigs(caCert, caKey, hostname, "127.0.0.1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	serverTLS, clientTLS := newTLSConfigs(caCert, peerCert)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	tr, err := NewTLSTransport(logger, "127.0.0.1", 0, serverTLS, clientTLS)
