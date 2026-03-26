@@ -21,11 +21,12 @@
 //	payload_len  uint32 big-endian   Length of payload in bytes.
 //	payload      []byte              Memberlist gossip message.
 //	from_len     uint32 big-endian   Length of from address string in bytes.
-//	from         []byte              Sender's advertised address as "ip:port".
+//	from         []byte              Sender's advertised address as "host:port"
+//	                                (Go net.TCPAddr.String format; IPv6 is bracketed, e.g. "[fdaa::1]:7946").
 //
 // Limits:
 //   - payload_len  ≤ 65536 (64 KB, matches memberlist's UDP limit)
-//   - from_len     ≤ 256   (ip:port strings are never this long)
+//   - from_len     ≤ 256   (safely bounds typical host:port strings, including bracketed IPv6)
 //
 // # Stream Mode (ConnStream connections)
 //
