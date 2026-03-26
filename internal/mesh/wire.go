@@ -54,6 +54,13 @@ const (
 
 // WritePacket encodes and writes a single packet-framed message.
 func WritePacket(w io.Writer, payload []byte, from string) error {
+	if len(payload) > MaxPayloadSize {
+		return fmt.Errorf("payload too large: %d bytes (max %d)", len(payload), MaxPayloadSize)
+	}
+	if len(from) > MaxFromSize {
+		return fmt.Errorf("from address too large: %d bytes (max %d)", len(from), MaxFromSize)
+	}
+
 	fromBytes := []byte(from)
 	buf := make([]byte, 4+len(payload)+4+len(fromBytes))
 
