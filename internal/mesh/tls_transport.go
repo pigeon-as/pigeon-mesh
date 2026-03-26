@@ -24,15 +24,16 @@ const (
 
 // TLSTransport implements memberlist.Transport using mutual TLS.
 type TLSTransport struct {
-	logger    *slog.Logger
-	listener  net.Listener
-	clientTLS *tls.Config
-	advertise net.Addr
-	pool      *lru.Cache
-	packetCh  chan *memberlist.Packet
-	streamCh  chan net.Conn
-	shutdown  chan struct{}
-	wg        sync.WaitGroup
+	logger       *slog.Logger
+	listener     net.Listener
+	clientTLS    *tls.Config
+	advertise    net.Addr
+	pool         *lru.Cache
+	packetCh     chan *memberlist.Packet
+	streamCh     chan net.Conn
+	shutdown     chan struct{}
+	wg           sync.WaitGroup
+	shutdownOnce sync.Once
 }
 
 // NewTLSTransport creates a TLS transport that listens on the given address.
@@ -129,19 +130,22 @@ func (t *TLSTransport) StreamCh() <-chan net.Conn {
 }
 
 // Shutdown stops the transport and closes all connections.
+// Safe to call multiple times.
 func (t *TLSTransport) Shutdown() error {
-	close(t.shutdown)
-	t.listener.Close()
-	t.wg.Wait()
+	t.shutdownOnce.Do(func() {
+		close(t.shutdown)
+		t.listener.Close()
+		t.wg.Wait()
 
-	for _, key := range t.pool.Keys() {
-		if val, ok := t.pool.Get(key); ok {
-			if c, ok := val.(net.Conn); ok {
-				c.Close()
+		for _, key := range t.pool.Keys() {
+			if val, ok := t.pool.Get(key); ok {
+				if c, ok := val.(net.Conn); ok {
+					c.Close()
+				}
 			}
 		}
-	}
-	t.pool.Purge()
+		t.pool.Purge()
+	})
 	return nil
 }
 
