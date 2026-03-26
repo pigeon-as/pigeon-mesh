@@ -152,8 +152,13 @@ func TestTLSTransport_MultiplePackets(t *testing.T) {
 	t1 := testTransport(t, caCert, caKey, "node-1")
 	t2 := testTransport(t, caCert, caKey, "node-2")
 
-	t1.FinalAdvertiseAddr("127.0.0.1", 0)
-	_, port2, _ := t2.FinalAdvertiseAddr("127.0.0.1", 0)
+	if _, _, err := t1.FinalAdvertiseAddr("127.0.0.1", 0); err != nil {
+		t.Fatal(err)
+	}
+	_, port2, err := t2.FinalAdvertiseAddr("127.0.0.1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
 	addr2 := fmt.Sprintf("127.0.0.1:%d", port2)
 
 	const count = 10
@@ -184,11 +189,16 @@ func TestTLSTransport_RejectUntrustedPeer(t *testing.T) {
 	t1 := testTransport(t, caCert1, caKey1, "node-1")
 	t2 := testTransport(t, caCert2, caKey2, "node-2") // Different CA
 
-	t1.FinalAdvertiseAddr("127.0.0.1", 0)
-	_, port2, _ := t2.FinalAdvertiseAddr("127.0.0.1", 0)
+	if _, _, err := t1.FinalAdvertiseAddr("127.0.0.1", 0); err != nil {
+		t.Fatal(err)
+	}
+	_, port2, err := t2.FinalAdvertiseAddr("127.0.0.1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
 	addr2 := fmt.Sprintf("127.0.0.1:%d", port2)
 
-	_, err := t1.WriteTo([]byte("should fail"), addr2)
+	_, err = t1.WriteTo([]byte("should fail"), addr2)
 	if err == nil {
 		t.Fatal("expected TLS handshake error for untrusted peer")
 	}
@@ -257,8 +267,13 @@ func TestTLSTransport_ConnectionPool(t *testing.T) {
 	t1 := testTransport(t, caCert, caKey, "node-1")
 	t2 := testTransport(t, caCert, caKey, "node-2")
 
-	t1.FinalAdvertiseAddr("127.0.0.1", 0)
-	_, port2, _ := t2.FinalAdvertiseAddr("127.0.0.1", 0)
+	if _, _, err := t1.FinalAdvertiseAddr("127.0.0.1", 0); err != nil {
+		t.Fatal(err)
+	}
+	_, port2, err := t2.FinalAdvertiseAddr("127.0.0.1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
 	addr2 := fmt.Sprintf("127.0.0.1:%d", port2)
 
 	// Send two messages — second should reuse the pooled connection.

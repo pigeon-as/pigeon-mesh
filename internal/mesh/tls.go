@@ -43,12 +43,28 @@ func loadCA(certFile, keyFile string) (*x509.Certificate, *ecdsa.PrivateKey, err
 	if keyBlock == nil {
 		return nil, nil, fmt.Errorf("ca key: no PEM block found")
 	}
-	caKey, err := x509.ParseECPrivateKey(keyBlock.Bytes)
+	caKey, err := parseECKey(keyBlock.Bytes)
 	if err != nil {
 		return nil, nil, fmt.Errorf("parse ca key: %w", err)
 	}
 
 	return caCert, caKey, nil
+}
+
+// parseECKey tries SEC1 (EC PRIVATE KEY) then PKCS#8 (PRIVATE KEY).
+func parseECKey(der []byte) (*ecdsa.PrivateKey, error) {
+	if key, err := x509.ParseECPrivateKey(der); err == nil {
+		return key, nil
+	}
+	parsed, err := x509.ParsePKCS8PrivateKey(der)
+	if err != nil {
+		return nil, fmt.Errorf("not SEC1 or PKCS#8: %w", err)
+	}
+	key, ok := parsed.(*ecdsa.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("PKCS#8 key is %T, not ECDSA", parsed)
+	}
+	return key, nil
 }
 
 // generatePeerCert creates an ephemeral P-256 certificate signed by the CA.
