@@ -17,7 +17,10 @@ import (
 	"time"
 )
 
-const peerCertTTL = 24 * time.Hour
+const (
+	peerCertTTL     = 24 * time.Hour
+	notBeforeSkew  = 5 * time.Minute
+)
 
 // loadCA reads a PEM-encoded CA certificate and private key from disk.
 func loadCA(certFile, keyFile string) (*x509.Certificate, *ecdsa.PrivateKey, error) {
@@ -68,7 +71,7 @@ func generatePeerCert(caCert *x509.Certificate, caKey *ecdsa.PrivateKey, hostnam
 	template := &x509.Certificate{
 		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: hostname},
-		NotBefore:    now,
+		NotBefore:    now.Add(-notBeforeSkew),
 		NotAfter:     now.Add(peerCertTTL),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
