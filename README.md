@@ -7,10 +7,9 @@ WireGuard mesh daemon for pigeon infrastructure. Manages the overlay network pla
 - **Pairwise PSK** — fleet secret (`wg_psk`) is used to derive per-pair PresharedKeys via `HKDF-SHA256(fleet_psk, sort(pubA || pubB), "pigeon-mesh wireguard pairwise psk v1")`. The fleet secret stays in userspace; only derived per-pair keys enter the kernel.
 - **Address transposition** — nftables netdev rules on `wg0` transpose network/host fields of pigeon addresses (`fdaa::/16`) so each host owns a non-overlapping `/48` for WireGuard cryptokey routing.
 - **NAT masquerade** — optional CGNAT masquerade for VM egress via `egress_cidr`. Filter rules (WG port, memberlist, wg0 accept) are managed by pigeon-fence.
-- **sysctl verification** — verifies IPv4/IPv6 forwarding is enabled (fail-fast). Does not set sysctl — image `sysctl.conf` owns that.
 - **mTLS gossip transport** — optional TLS transport for memberlist. Ephemeral P-256 peer certificates are generated at startup from a shared CA. All gossip traffic (packets + streams) runs over TLS 1.3 with mutual authentication.
 
-Runs as a systemd unit on all nodes. Must start before Consul/Vault/Nomad — the mesh is the foundation for all inter-node communication.
+Runs as a systemd unit on all nodes. Must start before Consul/Vault/Nomad — the mesh is the foundation for all inter-node communication. Requires IPv4/IPv6 forwarding enabled via sysctl.
 
 ## Usage
 

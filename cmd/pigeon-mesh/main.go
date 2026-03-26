@@ -69,12 +69,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := netconf.VerifySysctl(); err != nil {
-		logger.Error("verify sysctl", "err", err)
-		os.Exit(1)
-	}
-	logger.Info("sysctl verified")
-
 	if err := netconf.SetupNftables(cfg.Interface, cfg.EgressCIDR); err != nil {
 		logger.Error("setup nftables", "err", err)
 		os.Exit(1)
