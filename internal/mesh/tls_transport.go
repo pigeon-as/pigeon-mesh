@@ -181,6 +181,8 @@ func (t *TLSTransport) acceptLoop() {
 
 func (t *TLSTransport) handleConn(conn net.Conn) {
 	defer t.wg.Done()
+	t.trackConn(conn)
+	defer t.untrackConn(conn)
 
 	var typeBuf [1]byte
 	conn.SetReadDeadline(time.Now().Add(readTimeout))
@@ -208,8 +210,6 @@ func (t *TLSTransport) handleConn(conn net.Conn) {
 }
 
 func (t *TLSTransport) handlePacketConn(conn net.Conn) {
-	t.trackConn(conn)
-	defer t.untrackConn(conn)
 	defer conn.Close()
 
 	for {
