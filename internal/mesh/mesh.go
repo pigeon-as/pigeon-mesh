@@ -160,6 +160,9 @@ func New(logger *slog.Logger, cfg Config) (*Mesh, error) {
 
 	list, err := memberlist.Create(mlCfg)
 	if err != nil {
+		if transport != nil {
+			transport.Shutdown()
+		}
 		return nil, fmt.Errorf("create memberlist: %w", err)
 	}
 

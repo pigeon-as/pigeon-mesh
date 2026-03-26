@@ -87,13 +87,15 @@ func generatePeerCert(caCert *x509.Certificate, caKey *ecdsa.PrivateKey, hostnam
 		return tls.Certificate{}, fmt.Errorf("sign peer cert: %w", err)
 	}
 
+	leafCert, err := x509.ParseCertificate(certDER)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("parse peer cert: %w", err)
+	}
+
 	return tls.Certificate{
 		Certificate: [][]byte{certDER, caCert.Raw},
 		PrivateKey:  peerKey,
-		Leaf: func() *x509.Certificate {
-			c, _ := x509.ParseCertificate(certDER)
-			return c
-		}(),
+		Leaf:        leafCert,
 	}, nil
 }
 
