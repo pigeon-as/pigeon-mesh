@@ -3,10 +3,12 @@
 package mesh
 
 import (
+	"net/netip"
 	"os"
 	"path/filepath"
 	"testing"
 
+	addr "github.com/pigeon-as/pigeon-addr-plan"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
@@ -66,55 +68,58 @@ func TestDerivePairPSK_DifferentPeers(t *testing.T) {
 }
 
 func TestOverlayAddr(t *testing.T) {
-	got, err := OverlayAddr("worker-01")
+	ip, err := addr.PigeonHostIP("worker-01")
 	if err != nil {
-		t.Fatalf("OverlayAddr: %v", err)
+		t.Fatalf("PigeonHostIP: %v", err)
 	}
+	got := netip.PrefixFrom(ip, 128).String()
 	if got == "" {
-		t.Fatal("OverlayAddr returned empty string")
+		t.Fatal("overlay addr is empty")
 	}
-	// Must be a /128 within fdaa::/16.
-	if len(got) < 10 {
-		t.Fatalf("unexpected overlay addr format: %s", got)
+	// Must be within fdaa::/16.
+	if !addr.IsPigeonIP(ip) {
+		t.Fatalf("not in pigeon range: %s", got)
 	}
 	// Deterministic: same input → same output.
-	got2, err := OverlayAddr("worker-01")
+	ip2, err := addr.PigeonHostIP("worker-01")
 	if err != nil {
-		t.Fatalf("OverlayAddr repeat: %v", err)
+		t.Fatalf("PigeonHostIP repeat: %v", err)
 	}
+	got2 := netip.PrefixFrom(ip2, 128).String()
 	if got != got2 {
 		t.Fatalf("not deterministic: %s != %s", got, got2)
 	}
 	// Different hostname → different address.
-	other, err := OverlayAddr("worker-02")
+	otherIP, err := addr.PigeonHostIP("worker-02")
 	if err != nil {
-		t.Fatalf("OverlayAddr other: %v", err)
+		t.Fatalf("PigeonHostIP other: %v", err)
 	}
+	other := netip.PrefixFrom(otherIP, 128).String()
 	if got == other {
 		t.Fatal("different hostnames should produce different addresses")
 	}
 }
 
 func TestPeerRoute(t *testing.T) {
-	got, err := peerRoute("worker-01")
+	got, err := addr.PigeonHostRoute("worker-01")
 	if err != nil {
-		t.Fatalf("peerRoute: %v", err)
+		t.Fatalf("PigeonHostRoute: %v", err)
 	}
-	if got == "" {
-		t.Fatal("peerRoute returned empty string")
+	if got == (netip.Prefix{}) {
+		t.Fatal("PigeonHostRoute returned zero prefix")
 	}
 	// Deterministic.
-	got2, err := peerRoute("worker-01")
+	got2, err := addr.PigeonHostRoute("worker-01")
 	if err != nil {
-		t.Fatalf("peerRoute repeat: %v", err)
+		t.Fatalf("PigeonHostRoute repeat: %v", err)
 	}
 	if got != got2 {
 		t.Fatalf("not deterministic: %s != %s", got, got2)
 	}
 	// Different name → different route.
-	other, err := peerRoute("worker-02")
+	other, err := addr.PigeonHostRoute("worker-02")
 	if err != nil {
-		t.Fatalf("peerRoute other: %v", err)
+		t.Fatalf("PigeonHostRoute other: %v", err)
 	}
 	if got == other {
 		t.Fatal("different names should produce different routes")
