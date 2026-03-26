@@ -18,8 +18,8 @@ import (
 )
 
 const (
-	peerCertTTL     = 24 * time.Hour
-	notBeforeSkew  = 5 * time.Minute
+	peerCertTTL   = 24 * time.Hour
+	notBeforeSkew = 5 * time.Minute
 )
 
 // loadCA reads a PEM-encoded CA certificate and private key from disk.
