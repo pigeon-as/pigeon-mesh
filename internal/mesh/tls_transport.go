@@ -94,8 +94,15 @@ func (t *TLSTransport) FinalAdvertiseAddr(ip string, port int) (net.IP, int, err
 }
 
 // WriteTo sends a packet-type message to the given address.
+// The pool lock is held through both connection borrow and write to prevent
+// concurrent writes on the same tls.Conn (which is not goroutine-safe).
+// Alertmanager uses a per-connection mutex for this; we use the global pool
+// lock, which is equivalent for small cluster sizes.
 func (t *TLSTransport) WriteTo(b []byte, addr string) (time.Time, error) {
-	conn, err := t.getConn(addr)
+	t.poolMu.Lock()
+	defer t.poolMu.Unlock()
+
+	conn, err := t.getConnLocked(addr)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -236,13 +243,11 @@ func (t *TLSTransport) handlePacketConn(conn net.Conn) {
 	}
 }
 
-// getConn returns a pooled connection or dials a new one.
-// The global lock is held through the dial — same pattern as Alertmanager's
-// connectionPool.borrowConnection. Acceptable for small cluster sizes.
-func (t *TLSTransport) getConn(addr string) (net.Conn, error) {
-	t.poolMu.Lock()
-	defer t.poolMu.Unlock()
-
+// getConnLocked returns a pooled connection or dials a new one.
+// The caller must hold poolMu. The lock is held through dial and kept by
+// WriteTo through the subsequent write — same pattern as Alertmanager's
+// per-connection mutex in tlsConn.Write, using a global lock instead.
+func (t *TLSTransport) getConnLocked(addr string) (net.Conn, error) {
 	if val, ok := t.pool.Get(addr); ok {
 		conn := val.(net.Conn)
 		// Liveness probe: 1-byte read with immediate deadline.
