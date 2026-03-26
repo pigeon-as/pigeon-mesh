@@ -48,6 +48,10 @@ func loadCA(certFile, keyFile string) (*x509.Certificate, *ecdsa.PrivateKey, err
 		return nil, nil, fmt.Errorf("parse ca key: %w", err)
 	}
 
+	if !caCert.IsCA {
+		return nil, nil, fmt.Errorf("certificate is not a CA")
+	}
+
 	return caCert, caKey, nil
 }
 

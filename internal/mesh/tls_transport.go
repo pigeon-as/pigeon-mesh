@@ -248,7 +248,7 @@ func (t *TLSTransport) getConn(addr string) (net.Conn, error) {
 
 	if val, ok := t.pool.Get(addr); ok {
 		conn := val.(net.Conn)
-		// Liveness probe: zero-length read with immediate deadline.
+		// Liveness probe: 1-byte read with immediate deadline.
 		conn.SetReadDeadline(time.Now())
 		var buf [1]byte
 		if _, err := conn.Read(buf[:]); err != nil && !isTimeout(err) {
@@ -310,6 +310,9 @@ func parseTCPAddr(s string) (*net.TCPAddr, error) {
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
 		return nil, fmt.Errorf("invalid port: %w", err)
+	}
+	if port < 1 || port > 65535 {
+		return nil, fmt.Errorf("port out of range: %d", port)
 	}
 	return &net.TCPAddr{IP: ip, Port: port}, nil
 }
