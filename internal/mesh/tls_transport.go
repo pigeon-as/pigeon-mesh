@@ -29,11 +29,14 @@ type TLSTransport struct {
 	clientTLS    *tls.Config
 	advertise    net.Addr
 	pool         *lru.Cache
+	poolMu       sync.Mutex
 	packetCh     chan *memberlist.Packet
 	streamCh     chan net.Conn
 	shutdown     chan struct{}
 	wg           sync.WaitGroup
 	shutdownOnce sync.Once
+	connsMu      sync.Mutex
+	conns        map[net.Conn]struct{}
 }
 
 // NewTLSTransport creates a TLS transport that listens on the given address.
@@ -62,6 +65,7 @@ func NewTLSTransport(logger *slog.Logger, bindAddr string, bindPort int, serverT
 		packetCh:  make(chan *memberlist.Packet, 256),
 		streamCh:  make(chan net.Conn, 16),
 		shutdown:  make(chan struct{}),
+		conns:     make(map[net.Conn]struct{}),
 	}
 
 	t.wg.Add(1)
@@ -135,6 +139,14 @@ func (t *TLSTransport) Shutdown() error {
 	t.shutdownOnce.Do(func() {
 		close(t.shutdown)
 		t.listener.Close()
+
+		// Close all tracked inbound connections so blocked readers unblock.
+		t.connsMu.Lock()
+		for c := range t.conns {
+			c.Close()
+		}
+		t.connsMu.Unlock()
+
 		t.wg.Wait()
 
 		for _, key := range t.pool.Keys() {
@@ -196,6 +208,8 @@ func (t *TLSTransport) handleConn(conn net.Conn) {
 }
 
 func (t *TLSTransport) handlePacketConn(conn net.Conn) {
+	t.trackConn(conn)
+	defer t.untrackConn(conn)
 	defer conn.Close()
 
 	for {
@@ -228,6 +242,9 @@ func (t *TLSTransport) handlePacketConn(conn net.Conn) {
 }
 
 func (t *TLSTransport) getConn(addr string) (net.Conn, error) {
+	t.poolMu.Lock()
+	defer t.poolMu.Unlock()
+
 	if val, ok := t.pool.Get(addr); ok {
 		conn := val.(net.Conn)
 		// Liveness probe: zero-length read with immediate deadline.
@@ -255,6 +272,18 @@ func (t *TLSTransport) getConn(addr string) (net.Conn, error) {
 
 	t.pool.Add(addr, conn)
 	return conn, nil
+}
+
+func (t *TLSTransport) trackConn(conn net.Conn) {
+	t.connsMu.Lock()
+	t.conns[conn] = struct{}{}
+	t.connsMu.Unlock()
+}
+
+func (t *TLSTransport) untrackConn(conn net.Conn) {
+	t.connsMu.Lock()
+	delete(t.conns, conn)
+	t.connsMu.Unlock()
 }
 
 func (t *TLSTransport) dialTLS(addr string, timeout time.Duration) (*tls.Conn, error) {

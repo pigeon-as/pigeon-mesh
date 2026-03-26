@@ -24,7 +24,10 @@ func testCA(t *testing.T) (*x509.Certificate, *ecdsa.PrivateKey) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		t.Fatal(err)
+	}
 	template := &x509.Certificate{
 		SerialNumber:          serial,
 		Subject:               pkix.Name{CommonName: "test CA"},

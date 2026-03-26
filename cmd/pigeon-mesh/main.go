@@ -98,8 +98,8 @@ func main() {
 		logger.Error("start mesh", "err", err)
 		os.Exit(1)
 	}
-	defer m.Leave()
 	defer m.Shutdown()
+	defer m.Leave()
 
 	if err := netconf.SetupTranspose(cfg.Interface); err != nil {
 		logger.Error("setup transpose", "err", err)
