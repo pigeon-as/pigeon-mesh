@@ -5,9 +5,6 @@ package netconf
 import (
 	"fmt"
 	"net"
-	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/google/nftables"
 	"github.com/google/nftables/expr"
@@ -74,27 +71,6 @@ func SetupNftables(iface, egressCIDR string) error {
 
 	if err := conn.Flush(); err != nil {
 		return fmt.Errorf("nftables flush: %w", err)
-	}
-	return nil
-}
-
-// VerifySysctl checks that IP forwarding is enabled.
-func VerifySysctl() error {
-	params := []struct {
-		path  string
-		value string
-	}{
-		{"net/ipv4/ip_forward", "1"},
-		{"net/ipv6/conf/all/forwarding", "1"},
-	}
-	for _, p := range params {
-		got, err := os.ReadFile(filepath.Join("/proc/sys", p.path))
-		if err != nil {
-			return fmt.Errorf("read sysctl %s: %w", p.path, err)
-		}
-		if strings.TrimSpace(string(got)) != p.value {
-			return fmt.Errorf("sysctl %s = %q, want %q (check /etc/sysctl.d/ drop-in)", p.path, strings.TrimSpace(string(got)), p.value)
-		}
 	}
 	return nil
 }
