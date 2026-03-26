@@ -23,6 +23,38 @@ const (
 	readTimeout  = 10 * time.Second
 )
 
+// pooledConn wraps a TLS connection with a per-connection mutex to allow
+// concurrent writes to different peers without global lock contention.
+// Follows Alertmanager's tlsConn pattern.
+type pooledConn struct {
+	mu   sync.Mutex
+	conn net.Conn
+	live bool
+}
+
+func (pc *pooledConn) writePacket(payload []byte, from string) error {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	if err := WritePacket(pc.conn, payload, from); err != nil {
+		pc.live = false
+		return err
+	}
+	return nil
+}
+
+func (pc *pooledConn) alive() bool {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	return pc.live
+}
+
+func (pc *pooledConn) Close() error {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	pc.live = false
+	return pc.conn.Close()
+}
+
 // TLSTransport implements memberlist.Transport using mutual TLS.
 type TLSTransport struct {
 	logger       *slog.Logger
@@ -49,8 +81,8 @@ func NewTLSTransport(logger *slog.Logger, bindAddr string, bindPort int, serverT
 	}
 
 	pool, err := lru.NewWithEvict(connPoolSize, func(key, value interface{}) {
-		if c, ok := value.(net.Conn); ok {
-			c.Close()
+		if pc, ok := value.(*pooledConn); ok {
+			pc.Close()
 		}
 	})
 	if err != nil {
@@ -94,22 +126,16 @@ func (t *TLSTransport) FinalAdvertiseAddr(ip string, port int) (net.IP, int, err
 }
 
 // WriteTo sends a packet-type message to the given address.
-// The pool lock is held through both connection borrow and write to prevent
-// concurrent writes on the same tls.Conn (which is not goroutine-safe).
-// Alertmanager uses a per-connection mutex for this; we use the global pool
-// lock, which is equivalent for small cluster sizes.
+// Per-connection mutex (pooledConn.mu) allows concurrent writes to different
+// peers. Pool lock held only during borrow, not during writes — matching
+// Alertmanager's borrowConnection + writePacket pattern.
 func (t *TLSTransport) WriteTo(b []byte, addr string) (time.Time, error) {
-	t.poolMu.Lock()
-	defer t.poolMu.Unlock()
-
-	conn, err := t.getConnLocked(addr)
+	pc, err := t.getConn(addr)
 	if err != nil {
 		return time.Time{}, err
 	}
 
-	if err := WritePacket(conn, b, t.advertise.String()); err != nil {
-		t.pool.Remove(addr)
-		conn.Close()
+	if err := pc.writePacket(b, t.advertise.String()); err != nil {
 		return time.Time{}, err
 	}
 
@@ -157,8 +183,7 @@ func (t *TLSTransport) Shutdown() error {
 
 		t.wg.Wait()
 
-		// Purge fires the eviction callback (conn.Close) for each entry.
-		// Lock required: memberlist goroutines may still be in WriteTo.
+		// Purge fires the eviction callback (pooledConn.Close) for each entry.
 		t.poolMu.Lock()
 		t.pool.Purge()
 		t.poolMu.Unlock()
@@ -246,23 +271,19 @@ func (t *TLSTransport) handlePacketConn(conn net.Conn) {
 	}
 }
 
-// getConnLocked returns a pooled connection or dials a new one.
-// The caller must hold poolMu. The lock is held through dial and kept by
-// WriteTo through the subsequent write — same pattern as Alertmanager's
-// per-connection mutex in tlsConn.Write, using a global lock instead.
-func (t *TLSTransport) getConnLocked(addr string) (net.Conn, error) {
+// getConn returns a pooled connection or dials a new one.
+// Pool lock is held only during lookup/store, not during writes.
+func (t *TLSTransport) getConn(addr string) (*pooledConn, error) {
+	t.poolMu.Lock()
+	defer t.poolMu.Unlock()
+
 	if val, ok := t.pool.Get(addr); ok {
-		conn := val.(net.Conn)
-		// Liveness probe: 1-byte read with immediate deadline.
-		conn.SetReadDeadline(time.Now())
-		var buf [1]byte
-		if _, err := conn.Read(buf[:]); err != nil && !isTimeout(err) {
-			t.pool.Remove(addr)
-			conn.Close()
-		} else {
-			conn.SetReadDeadline(time.Time{})
-			return conn, nil
+		pc := val.(*pooledConn)
+		if pc.alive() {
+			return pc, nil
 		}
+		// Dead connection — fall through to dial. Add() replaces it,
+		// firing the eviction callback which closes the old conn.
 	}
 
 	conn, err := t.dialTLS(addr, readTimeout)
@@ -276,8 +297,9 @@ func (t *TLSTransport) getConnLocked(addr string) (net.Conn, error) {
 		return nil, fmt.Errorf("write packet marker: %w", err)
 	}
 
-	t.pool.Add(addr, conn)
-	return conn, nil
+	pc := &pooledConn{conn: conn, live: true}
+	t.pool.Add(addr, pc)
+	return pc, nil
 }
 
 func (t *TLSTransport) trackConn(conn net.Conn) {
