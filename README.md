@@ -9,7 +9,7 @@ WireGuard mesh daemon for pigeon infrastructure. Manages the overlay network pla
 - **NAT masquerade** — optional CGNAT masquerade for VM egress via `egress_cidr`. Filter rules (WG port, memberlist, wg0 accept) are managed by pigeon-fence.
 - **mTLS gossip transport** — optional TLS transport for memberlist. Ephemeral P-256 peer certificates are generated at startup from a shared CA. All gossip traffic (packets + streams) runs over TLS 1.3 with mutual authentication.
 
-Runs as a systemd unit on all nodes. Must start before Consul/Vault/Nomad — the mesh is the foundation for all inter-node communication.
+Runs as a systemd unit on all nodes. Must start before Consul/Vault/Nomad — the mesh is the foundation for all inter-node communication. Requires IPv4/IPv6 forwarding enabled via sysctl.
 
 ## Usage
 
