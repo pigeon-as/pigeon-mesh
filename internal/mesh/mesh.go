@@ -142,6 +142,7 @@ func New(logger *slog.Logger, cfg Config) (*Mesh, error) {
 			return nil, fmt.Errorf("create tls transport: %w", err)
 		}
 		mlCfg.Transport = transport
+		mlCfg.AdvertiseAddr = endpoint
 		logger.Info("tls transport enabled")
 	}
 
