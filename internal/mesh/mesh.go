@@ -32,16 +32,19 @@ type Config struct {
 	EndpointAddress   string
 	EndpointInterface string
 	DataDir           string
+	TLSCACert         string
+	TLSCAKey          string
 }
 
 type Mesh struct {
-	list     *memberlist.Memberlist
-	local    Node
-	localPub wgtypes.Key
-	events   chan struct{}
-	logger   *slog.Logger
-	iface    string
-	psk      *wgtypes.Key
+	list      *memberlist.Memberlist
+	local     Node
+	localPub  wgtypes.Key
+	events    chan struct{}
+	logger    *slog.Logger
+	iface     string
+	psk       *wgtypes.Key
+	transport *TLSTransport
 }
 
 // New creates and starts a new mesh.
@@ -121,6 +124,27 @@ func New(logger *slog.Logger, cfg Config) (*Mesh, error) {
 	mlCfg.Events = &eventDelegate{ch: events}
 	mlCfg.LogOutput = io.Discard
 
+	var transport *TLSTransport
+
+	if cfg.TLSCACert != "" {
+		caCert, caKey, err := loadCA(cfg.TLSCACert, cfg.TLSCAKey)
+		if err != nil {
+			return nil, fmt.Errorf("load mesh CA: %w", err)
+		}
+		peerCert, err := generatePeerCert(caCert, caKey, cfg.Hostname, endpoint)
+		if err != nil {
+			return nil, fmt.Errorf("generate peer cert: %w", err)
+		}
+		serverTLS, clientTLS := newTLSConfigs(caCert, peerCert)
+
+		transport, err = NewTLSTransport(logger, "0.0.0.0", memberlistPort, serverTLS, clientTLS)
+		if err != nil {
+			return nil, fmt.Errorf("create tls transport: %w", err)
+		}
+		mlCfg.Transport = transport
+		logger.Info("tls transport enabled")
+	}
+
 	if cfg.GossipKey != "" {
 		key, err := base64.StdEncoding.DecodeString(cfg.GossipKey)
 		if err != nil {
@@ -148,13 +172,14 @@ func New(logger *slog.Logger, cfg Config) (*Mesh, error) {
 	}
 
 	return &Mesh{
-		list:     list,
-		local:    local,
-		localPub: pubKey,
-		events:   events,
-		logger:   logger,
-		iface:    cfg.Interface,
-		psk:      psk,
+		list:      list,
+		local:     local,
+		localPub:  pubKey,
+		events:    events,
+		logger:    logger,
+		iface:     cfg.Interface,
+		psk:       psk,
+		transport: transport,
 	}, nil
 }
 
@@ -205,6 +230,13 @@ func (m *Mesh) Peers() []Node {
 
 func (m *Mesh) Leave() error {
 	return m.list.Leave(leaveTimeout)
+}
+
+func (m *Mesh) Shutdown() error {
+	if m.transport != nil {
+		return m.transport.Shutdown()
+	}
+	return nil
 }
 
 type delegate struct {

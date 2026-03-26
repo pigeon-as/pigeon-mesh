@@ -28,6 +28,8 @@ type Config struct {
 	EgressCIDR        string   `json:"egress_cidr"`
 	DataDir           string   `json:"data_dir"`
 	LogLevel          string   `json:"log_level"`
+	TLSCACert         string   `json:"tls_ca_cert"`
+	TLSCAKey          string   `json:"tls_ca_key"`
 }
 
 func Load(path string) (Config, error) {
@@ -106,6 +108,17 @@ func (c Config) Validate() error {
 	}
 	if c.EndpointInterface != "" && len(c.EndpointInterface) > maxIfaceNameLen {
 		return fmt.Errorf("endpoint_interface: name too long (%d chars, max %d)", len(c.EndpointInterface), maxIfaceNameLen)
+	}
+	if (c.TLSCACert == "") != (c.TLSCAKey == "") {
+		return fmt.Errorf("tls_ca_cert and tls_ca_key must both be set or both be empty")
+	}
+	if c.TLSCACert != "" {
+		if _, err := os.Stat(c.TLSCACert); err != nil {
+			return fmt.Errorf("tls_ca_cert: %w", err)
+		}
+		if _, err := os.Stat(c.TLSCAKey); err != nil {
+			return fmt.Errorf("tls_ca_key: %w", err)
+		}
 	}
 	return nil
 }

@@ -91,12 +91,15 @@ func main() {
 		EndpointAddress:   cfg.EndpointAddress,
 		EndpointInterface: cfg.EndpointInterface,
 		DataDir:           cfg.DataDir,
+		TLSCACert:         cfg.TLSCACert,
+		TLSCAKey:          cfg.TLSCAKey,
 	})
 	if err != nil {
 		logger.Error("start mesh", "err", err)
 		os.Exit(1)
 	}
 	defer m.Leave()
+	defer m.Shutdown()
 
 	if err := netconf.SetupTranspose(cfg.Interface); err != nil {
 		logger.Error("setup transpose", "err", err)
