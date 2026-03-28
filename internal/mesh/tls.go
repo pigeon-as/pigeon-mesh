@@ -3,6 +3,7 @@
 package mesh
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -52,7 +53,15 @@ func loadCA(certFile, keyFile string) (*x509.Certificate, crypto.Signer, error) 
 		return nil, nil, fmt.Errorf("certificate is not a CA")
 	}
 
-	if !caKey.Public().(interface{ Equal(crypto.PublicKey) bool }).Equal(caCert.PublicKey) {
+	certPub, err := x509.MarshalPKIXPublicKey(caCert.PublicKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshal cert public key: %w", err)
+	}
+	keyPub, err := x509.MarshalPKIXPublicKey(caKey.Public())
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshal key public key: %w", err)
+	}
+	if !bytes.Equal(certPub, keyPub) {
 		return nil, nil, fmt.Errorf("ca cert and key do not match")
 	}
 
@@ -69,10 +78,11 @@ func parsePrivateKey(der []byte) (crypto.Signer, error) {
 		}
 		return nil, fmt.Errorf("PKCS#8 key is %T, not a signer", parsed)
 	}
-	if key, err := x509.ParseECPrivateKey(der); err == nil {
+	key, sec1Err := x509.ParseECPrivateKey(der)
+	if sec1Err == nil {
 		return key, nil
 	}
-	return nil, fmt.Errorf("not PKCS#8 (%v) or SEC1", pkcs8Err)
+	return nil, fmt.Errorf("not PKCS#8 (%v) or SEC1 (%v)", pkcs8Err, sec1Err)
 }
 
 // generatePeerCert creates an ephemeral Ed25519 certificate signed by the CA.
