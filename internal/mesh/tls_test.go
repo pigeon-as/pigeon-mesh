@@ -4,6 +4,7 @@ package mesh
 
 import (
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
@@ -101,11 +102,18 @@ func TestLoadCA_Mismatch(t *testing.T) {
 }
 
 func TestLoadCA_NotCA(t *testing.T) {
-	// Create a non-CA certificate.
+	// Create a non-CA certificate with its own keypair.
 	caCert, caKey := testCA(t)
+	_, leafKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	dir := t.TempDir()
 
-	serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		t.Fatal(err)
+	}
 	leafTemplate := &x509.Certificate{
 		SerialNumber:          serial,
 		Subject:               pkix.Name{CommonName: "leaf"},
@@ -114,16 +122,16 @@ func TestLoadCA_NotCA(t *testing.T) {
 		IsCA:                  false,
 		BasicConstraintsValid: true,
 	}
-	leafDER, err := x509.CreateCertificate(rand.Reader, leafTemplate, caCert, caKey.Public(), caKey)
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTemplate, caCert, leafKey.Public(), caKey)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	certFile := filepath.Join(dir, "leaf.crt")
-	keyFile := filepath.Join(dir, "ca.key")
+	keyFile := filepath.Join(dir, "leaf.key")
 	writePEM(t, certFile, "CERTIFICATE", leafDER)
 
-	keyDER, err := x509.MarshalPKCS8PrivateKey(caKey)
+	keyDER, err := x509.MarshalPKCS8PrivateKey(leafKey)
 	if err != nil {
 		t.Fatal(err)
 	}
