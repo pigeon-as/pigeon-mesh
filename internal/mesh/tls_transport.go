@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	connPoolSize = 64
+	connPoolSize = 1024
 	readTimeout  = 10 * time.Second
 )
 
@@ -272,7 +272,10 @@ func (t *TLSTransport) handlePacketConn(conn net.Conn) {
 }
 
 // getConn returns a pooled connection or dials a new one.
-// Pool lock is held only during lookup/store, not during writes.
+// Follows Alertmanager's borrowConnection pattern: pool lock held for the
+// entire operation including dial. This is trivially correct — no concurrent
+// dial races, no double-check needed. The serialization cost is acceptable
+// because dials are infrequent (connections are long-lived and pooled).
 func (t *TLSTransport) getConn(addr string) (*pooledConn, error) {
 	t.poolMu.Lock()
 	defer t.poolMu.Unlock()
@@ -282,8 +285,8 @@ func (t *TLSTransport) getConn(addr string) (*pooledConn, error) {
 		if pc.alive() {
 			return pc, nil
 		}
-		// Dead connection — fall through to dial. Add() replaces it,
-		// firing the eviction callback which closes the old conn.
+		// Remove dead entry so it doesn't waste a pool slot.
+		t.pool.Remove(addr)
 	}
 
 	conn, err := t.dialTLS(addr, readTimeout)
