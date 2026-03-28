@@ -38,7 +38,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"net"
 )
 
 // Connection type bytes written immediately after TLS handshake.
@@ -110,10 +109,4 @@ func ReadPacket(r io.Reader) (payload []byte, from string, err error) {
 	}
 
 	return payload, string(fromBuf), nil
-}
-
-// isTimeout reports whether err is a network timeout.
-func isTimeout(err error) bool {
-	ne, ok := err.(net.Error)
-	return ok && ne.Timeout()
 }
