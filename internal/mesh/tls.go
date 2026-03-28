@@ -52,13 +52,18 @@ func loadCA(certFile, keyFile string) (*x509.Certificate, crypto.Signer, error) 
 		return nil, nil, fmt.Errorf("certificate is not a CA")
 	}
 
+	if !caKey.Public().(interface{ Equal(crypto.PublicKey) bool }).Equal(caCert.PublicKey) {
+		return nil, nil, fmt.Errorf("ca cert and key do not match")
+	}
+
 	return caCert, caKey, nil
 }
 
 // parsePrivateKey parses a DER-encoded private key. Tries PKCS#8 first
 // (Ed25519, ECDSA, RSA), then SEC1 (legacy EC PRIVATE KEY) for backward compat.
 func parsePrivateKey(der []byte) (crypto.Signer, error) {
-	if parsed, err := x509.ParsePKCS8PrivateKey(der); err == nil {
+	parsed, pkcs8Err := x509.ParsePKCS8PrivateKey(der)
+	if pkcs8Err == nil {
 		if s, ok := parsed.(crypto.Signer); ok {
 			return s, nil
 		}
@@ -67,7 +72,7 @@ func parsePrivateKey(der []byte) (crypto.Signer, error) {
 	if key, err := x509.ParseECPrivateKey(der); err == nil {
 		return key, nil
 	}
-	return nil, fmt.Errorf("key is not PKCS#8 or SEC1")
+	return nil, fmt.Errorf("not PKCS#8 (%v) or SEC1", pkcs8Err)
 }
 
 // generatePeerCert creates an ephemeral Ed25519 certificate signed by the CA.
