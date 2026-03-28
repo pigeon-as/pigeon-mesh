@@ -3,8 +3,8 @@
 package mesh
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
+	"crypto"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -17,10 +17,10 @@ import (
 	"time"
 )
 
-// testCA generates a self-signed CA for tests.
-func testCA(t *testing.T) (*x509.Certificate, *ecdsa.PrivateKey) {
+// testCA generates a self-signed Ed25519 CA for tests.
+func testCA(t *testing.T) (*x509.Certificate, crypto.Signer) {
 	t.Helper()
-	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	_, caKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +37,7 @@ func testCA(t *testing.T) (*x509.Certificate, *ecdsa.PrivateKey) {
 		BasicConstraintsValid: true,
 		KeyUsage:              x509.KeyUsageCertSign,
 	}
-	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &caKey.PublicKey, caKey)
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, caKey.Public(), caKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +49,7 @@ func testCA(t *testing.T) (*x509.Certificate, *ecdsa.PrivateKey) {
 }
 
 // testTransport creates a TLSTransport for testing on a random port.
-func testTransport(t *testing.T, caCert *x509.Certificate, caKey *ecdsa.PrivateKey, hostname string) *TLSTransport {
+func testTransport(t *testing.T, caCert *x509.Certificate, caKey crypto.Signer, hostname string) *TLSTransport {
 	t.Helper()
 	serverTLS, clientTLS, err := newTLSConfigs(caCert, caKey, hostname, "127.0.0.1")
 	if err != nil {
