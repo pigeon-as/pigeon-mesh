@@ -3,8 +3,9 @@
 package mesh
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
+	"bytes"
+	"crypto"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
@@ -20,7 +21,7 @@ import (
 const notBeforeSkew = 5 * time.Minute
 
 // loadCA reads a PEM-encoded CA certificate and private key from disk.
-func loadCA(certFile, keyFile string) (*x509.Certificate, *ecdsa.PrivateKey, error) {
+func loadCA(certFile, keyFile string) (*x509.Certificate, crypto.Signer, error) {
 	certPEM, err := os.ReadFile(certFile)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read ca cert: %w", err)
@@ -43,7 +44,7 @@ func loadCA(certFile, keyFile string) (*x509.Certificate, *ecdsa.PrivateKey, err
 	if keyBlock == nil {
 		return nil, nil, fmt.Errorf("ca key: no PEM block found")
 	}
-	caKey, err := parseECKey(keyBlock.Bytes)
+	caKey, err := parsePrivateKey(keyBlock.Bytes)
 	if err != nil {
 		return nil, nil, fmt.Errorf("parse ca key: %w", err)
 	}
@@ -51,33 +52,43 @@ func loadCA(certFile, keyFile string) (*x509.Certificate, *ecdsa.PrivateKey, err
 	if !caCert.IsCA {
 		return nil, nil, fmt.Errorf("certificate is not a CA")
 	}
-	if !caKey.PublicKey.Equal(caCert.PublicKey) {
+
+	certPub, err := x509.MarshalPKIXPublicKey(caCert.PublicKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshal cert public key: %w", err)
+	}
+	keyPub, err := x509.MarshalPKIXPublicKey(caKey.Public())
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshal key public key: %w", err)
+	}
+	if !bytes.Equal(certPub, keyPub) {
 		return nil, nil, fmt.Errorf("ca cert and key do not match")
 	}
 
 	return caCert, caKey, nil
 }
 
-// parseECKey tries SEC1 (EC PRIVATE KEY) then PKCS#8 (PRIVATE KEY).
-func parseECKey(der []byte) (*ecdsa.PrivateKey, error) {
-	if key, err := x509.ParseECPrivateKey(der); err == nil {
+// parsePrivateKey parses a DER-encoded private key. Tries PKCS#8 first
+// (Ed25519, ECDSA, RSA), then SEC1 (legacy EC PRIVATE KEY) for backward compat.
+func parsePrivateKey(der []byte) (crypto.Signer, error) {
+	parsed, pkcs8Err := x509.ParsePKCS8PrivateKey(der)
+	if pkcs8Err == nil {
+		if s, ok := parsed.(crypto.Signer); ok {
+			return s, nil
+		}
+		return nil, fmt.Errorf("PKCS#8 key is %T, not a signer", parsed)
+	}
+	key, sec1Err := x509.ParseECPrivateKey(der)
+	if sec1Err == nil {
 		return key, nil
 	}
-	parsed, err := x509.ParsePKCS8PrivateKey(der)
-	if err != nil {
-		return nil, fmt.Errorf("not SEC1 or PKCS#8: %w", err)
-	}
-	key, ok := parsed.(*ecdsa.PrivateKey)
-	if !ok {
-		return nil, fmt.Errorf("PKCS#8 key is %T, not ECDSA", parsed)
-	}
-	return key, nil
+	return nil, fmt.Errorf("not PKCS#8 (%v) or SEC1 (%v)", pkcs8Err, sec1Err)
 }
 
-// generatePeerCert creates an ephemeral P-256 certificate signed by the CA.
+// generatePeerCert creates an ephemeral Ed25519 certificate signed by the CA.
 // The cert includes both ServerAuth and ClientAuth extended key usage for mTLS.
-func generatePeerCert(caCert *x509.Certificate, caKey *ecdsa.PrivateKey, hostname string, endpointIP string) (tls.Certificate, error) {
-	peerKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+func generatePeerCert(caCert *x509.Certificate, caKey crypto.Signer, hostname string, endpointIP string) (tls.Certificate, error) {
+	_, peerKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return tls.Certificate{}, fmt.Errorf("generate peer key: %w", err)
 	}
@@ -102,7 +113,7 @@ func generatePeerCert(caCert *x509.Certificate, caKey *ecdsa.PrivateKey, hostnam
 		template.IPAddresses = []net.IP{ip}
 	}
 
-	certDER, err := x509.CreateCertificate(rand.Reader, template, caCert, &peerKey.PublicKey, caKey)
+	certDER, err := x509.CreateCertificate(rand.Reader, template, caCert, peerKey.Public(), caKey)
 	if err != nil {
 		return tls.Certificate{}, fmt.Errorf("sign peer cert: %w", err)
 	}
@@ -122,7 +133,7 @@ func generatePeerCert(caCert *x509.Certificate, caKey *ecdsa.PrivateKey, hostnam
 // newTLSConfigs builds server and client TLS configs from a CA and peer cert.
 // The peer cert is generated once at startup, valid until the CA expires.
 // Process restart = new cert. CA rotation (Terraform) = mesh restart.
-func newTLSConfigs(caCert *x509.Certificate, caKey *ecdsa.PrivateKey, hostname, endpointIP string) (server *tls.Config, client *tls.Config, err error) {
+func newTLSConfigs(caCert *x509.Certificate, caKey crypto.Signer, hostname, endpointIP string) (server *tls.Config, client *tls.Config, err error) {
 	peerCert, err := generatePeerCert(caCert, caKey, hostname, endpointIP)
 	if err != nil {
 		return nil, nil, fmt.Errorf("generate peer cert: %w", err)
