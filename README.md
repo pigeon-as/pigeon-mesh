@@ -18,6 +18,15 @@ That's enough to start. Each node advertises its WireGuard IP to the
 mesh; use `--extra-allowed-ips` to advertise additional CIDRs. Run
 `wg-mesh --help` for the full flag list.
 
+`--endpoint` and `--address` accept go-sockaddr templates (the same
+syntax Consul, Nomad, and Vault use) for runtime resolution:
+
+```
+wg-mesh \
+  --interface wg0 \
+  --endpoint '[{{ GetDefaultInterfaces | include "type" "IPv6" | limit 1 | attr "address" }}]:51820'
+```
+
 Runs as systemd `Type=notify`; honors `WatchdogSec=`.
 
 ## Initial peers
