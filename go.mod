@@ -26,7 +26,7 @@ require (
 	github.com/mdlayher/socket v0.5.1 // indirect
 	github.com/miekg/dns v1.1.68 // indirect
 	github.com/sean-/seed v0.0.0-20170313163322-e2103e2c3529 // indirect
-	golang.org/x/crypto v0.44.0 // indirect
+	golang.org/x/crypto v0.45.0 // indirect
 	golang.org/x/mod v0.28.0 // indirect
 	golang.org/x/net v0.47.0 // indirect
 	golang.org/x/sync v0.17.0 // indirect
