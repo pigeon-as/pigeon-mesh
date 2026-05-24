@@ -13,6 +13,7 @@ import (
 	"slices"
 	"syscall"
 
+	sockaddr "github.com/hashicorp/go-sockaddr/template"
 	"github.com/pigeon-as/wg-mesh/internal/mesh"
 	"github.com/pigeon-as/wg-mesh/internal/sdnotify"
 	"github.com/pigeon-as/wg-mesh/internal/wg"
@@ -22,8 +23,8 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
 	iface := flag.String("interface", "", "existing WireGuard interface (required)")
-	endpoint := flag.String("endpoint", "", "this node's Endpoint as host:port (required)")
-	address := flag.String("address", "", "this node's overlay IP (auto-detected from --interface if unset)")
+	endpoint := flag.String("endpoint", "", "this node's Endpoint as host:port; go-sockaddr templates evaluated (required)")
+	address := flag.String("address", "", "this node's overlay IP; go-sockaddr templates evaluated; auto-detected from --interface if unset")
 	extraAllowedIPs := flag.String("extra-allowed-ips", "", "extra CIDRs to advertise alongside this node's host route, comma-separated")
 	gossipPort := flag.Int("gossip-port", 7946, "port to listen on for gossip (TCP and UDP)")
 	gossipKeyFile := flag.String("gossip-key-file", "", "JSON file of base64-encoded gossip encryption keys")
@@ -39,7 +40,18 @@ func main() {
 		os.Exit(2)
 	}
 
-	ip, err := resolveAddress(*address, *iface)
+	endpointStr, err := sockaddr.Parse(*endpoint)
+	if err != nil {
+		slog.Error("endpoint template", "err", err)
+		os.Exit(1)
+	}
+	addressStr, err := sockaddr.Parse(*address)
+	if err != nil {
+		slog.Error("address template", "err", err)
+		os.Exit(1)
+	}
+
+	ip, err := resolveAddress(addressStr, *iface)
 	if err != nil {
 		slog.Error("resolve address", "err", err)
 		os.Exit(1)
@@ -72,7 +84,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	ep, err := mesh.NormalizeEndpoint(*endpoint)
+	ep, err := mesh.NormalizeEndpoint(endpointStr)
 	if err != nil {
 		slog.Error("endpoint", "err", err)
 		os.Exit(1)
