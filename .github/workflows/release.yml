@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [linux]
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} make build
+
+      - name: Package
+        run: tar -C build -czf "wg-mesh-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz" wg-mesh
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: wg-mesh-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: "wg-mesh-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz"
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: release/
+
+      - name: Release
+        run: |
+          gh release create "${{ github.ref_name }}" release/* \
+            --repo "${{ github.repository }}" \
+            --title "${{ github.ref_name }}" \
+            --notes "wg-mesh ${{ github.ref_name }}" \
+          || gh release upload "${{ github.ref_name }}" release/* \
+            --repo "${{ github.repository }}" --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
