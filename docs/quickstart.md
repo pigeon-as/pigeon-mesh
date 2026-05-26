@@ -13,7 +13,8 @@ ip link add wg0 type wireguard
 wg genkey | tee /etc/wireguard/wg0.key | wg set wg0 private-key /dev/stdin listen-port 51820
 
 hex=$(wg show wg0 public-key | openssl dgst -sha256 -mac HMAC -macopt hexkey:$prefix -r | head -c 16)
-ip -6 addr add "${prefix}::${hex:0:4}:${hex:4:4}:${hex:8:4}:${hex:12:4}/128" dev wg0
+addr="${prefix}::${hex:0:4}:${hex:4:4}:${hex:8:4}:${hex:12:4}"
+ip -6 addr add "$addr/128" dev wg0
 ip link set wg0 up
 
 wg-mesh --interface wg0 \
@@ -30,9 +31,10 @@ key:
 ```sh
 prefix=fdcc
 hex=$(echo <their-pubkey> | openssl dgst -sha256 -mac HMAC -macopt hexkey:$prefix -r | head -c 16)
+addr="${prefix}::${hex:0:4}:${hex:4:4}:${hex:8:4}:${hex:12:4}"
 wg set wg0 peer <their-pubkey> \
   endpoint <their-public-ip>:51820 \
-  allowed-ips "${prefix}::${hex:0:4}:${hex:4:4}:${hex:8:4}:${hex:12:4}/128"
+  allowed-ips "$addr/128"
 ```
 
 wg-mesh picks the peer up from `wg show` and the rest of the mesh
