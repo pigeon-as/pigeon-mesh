@@ -1,10 +1,9 @@
 # Quickstart
 
-Each node's IPv6 host address is derived from its WireGuard public key
-(RFC 7217-style: `HMAC-SHA256(prefix, pubkey)`, low 64 bits as the
-interface identifier). The private key alone determines the overlay
-address, and any node can compute any other node's address from public
-information.
+Each node's IPv6 host address is derived from its WireGuard public key:
+`HMAC-SHA256(prefix, pubkey)`, low 64 bits as the interface identifier.
+The private key alone determines the overlay address, and any node can
+compute any other node's address from public information.
 
 Run once per node, as root:
 
