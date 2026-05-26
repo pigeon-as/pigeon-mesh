@@ -18,7 +18,7 @@ ip -6 addr add "${prefix}::${hex:0:4}:${hex:4:4}:${hex:8:4}:${hex:12:4}/128" dev
 ip link set wg0 up
 
 wg-mesh --interface wg0 \
-  --endpoint '[{{ GetDefaultInterfaces | include "type" "IPv6" | limit 1 | attr "address" }}]:51820'
+  --endpoint '[{{ GetPublicInterfaces | include "type" "IPv6" | limit 1 | attr "address" }}]:51820'
 ```
 
 All nodes in the same mesh must agree on `prefix`.
