@@ -29,6 +29,10 @@ wg-mesh \
 
 Runs as systemd `Type=notify`; honors `WatchdogSec=`.
 
+For a simple setup that generates the keypair, derives an IPv6 address
+from the public key, and brings up the interface, see
+[docs/quickstart.md](docs/quickstart.md).
+
 ## Initial peers
 
 Add bootstrap peers to the kernel first (with `wg-quick`, networkd, or
