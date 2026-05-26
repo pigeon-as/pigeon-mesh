@@ -24,7 +24,7 @@ syntax Consul, Nomad, and Vault use) for runtime resolution:
 ```
 wg-mesh \
   --interface wg0 \
-  --endpoint '[{{ GetDefaultInterfaces | include "type" "IPv6" | limit 1 | attr "address" }}]:51820'
+  --endpoint '[{{ GetPublicInterfaces | include "type" "IPv6" | limit 1 | attr "address" }}]:51820'
 ```
 
 Runs as systemd `Type=notify`; honors `WatchdogSec=`.
