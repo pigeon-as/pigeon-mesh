@@ -10,48 +10,48 @@ import (
 const testKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 
 func TestPeer_PeerConfigIPv4(t *testing.T) {
-	wp, err := Peer{PublicKey: testKey, Endpoint: "203.0.113.7:51820", AllowedIPs: []string{"fd00::1/128"}}.peerConfig()
+	wp, err := Peer{PublicKey: testKey, Endpoint: "203.0.113.7:51820", AllowedIPs: []string{"fd00::1/128"}}.toWG()
 	must.NoError(t, err)
 	must.NotNil(t, wp.Endpoint)
 	must.SliceLen(t, 1, wp.AllowedIPs)
 }
 
 func TestPeer_PeerConfigIPv6(t *testing.T) {
-	wp, err := Peer{PublicKey: testKey, Endpoint: "[2001:db8::1]:51820", AllowedIPs: []string{"fd00::1/128"}}.peerConfig()
+	wp, err := Peer{PublicKey: testKey, Endpoint: "[2001:db8::1]:51820", AllowedIPs: []string{"fd00::1/128"}}.toWG()
 	must.NoError(t, err)
 	must.NotNil(t, wp.Endpoint)
 	must.SliceLen(t, 1, wp.AllowedIPs)
 }
 
 func TestPeer_PeerConfigKeepalive(t *testing.T) {
-	wp, err := Peer{PublicKey: testKey, Endpoint: "203.0.113.7:51820", AllowedIPs: []string{"fd00::1/128"}, PersistentKeepalive: 25}.peerConfig()
+	wp, err := Peer{PublicKey: testKey, Endpoint: "203.0.113.7:51820", AllowedIPs: []string{"fd00::1/128"}, PersistentKeepalive: 25}.toWG()
 	must.NoError(t, err)
 	must.NotNil(t, wp.PersistentKeepaliveInterval)
 	must.EqOp(t, 25*time.Second, *wp.PersistentKeepaliveInterval)
 }
 
 func TestPeer_PeerConfigBadPubkey(t *testing.T) {
-	_, err := Peer{PublicKey: "not-base64", Endpoint: "203.0.113.7:51820", AllowedIPs: []string{"fd00::1/128"}}.peerConfig()
+	_, err := Peer{PublicKey: "not-base64", Endpoint: "203.0.113.7:51820", AllowedIPs: []string{"fd00::1/128"}}.toWG()
 	must.ErrorContains(t, err, "public_key")
 }
 
 func TestPeer_PeerConfigNoPort(t *testing.T) {
-	_, err := Peer{PublicKey: testKey, Endpoint: "203.0.113.7", AllowedIPs: []string{"fd00::1/128"}}.peerConfig()
+	_, err := Peer{PublicKey: testKey, Endpoint: "203.0.113.7", AllowedIPs: []string{"fd00::1/128"}}.toWG()
 	must.ErrorContains(t, err, "endpoint")
 }
 
 func TestPeer_PeerConfigBadPort(t *testing.T) {
-	_, err := Peer{PublicKey: testKey, Endpoint: "203.0.113.7:0", AllowedIPs: []string{"fd00::1/128"}}.peerConfig()
+	_, err := Peer{PublicKey: testKey, Endpoint: "203.0.113.7:0", AllowedIPs: []string{"fd00::1/128"}}.toWG()
 	must.ErrorContains(t, err, "port")
 }
 
 func TestPeer_PeerConfigBadCIDR(t *testing.T) {
-	_, err := Peer{PublicKey: testKey, Endpoint: "203.0.113.7:51820", AllowedIPs: []string{"not-a-cidr"}}.peerConfig()
+	_, err := Peer{PublicKey: testKey, Endpoint: "203.0.113.7:51820", AllowedIPs: []string{"not-a-cidr"}}.toWG()
 	must.ErrorContains(t, err, "allowed_ip")
 }
 
 func TestPeer_PeerConfigEmptyAllowedIPsRejected(t *testing.T) {
-	_, err := Peer{PublicKey: testKey, Endpoint: "203.0.113.7:51820"}.peerConfig()
+	_, err := Peer{PublicKey: testKey, Endpoint: "203.0.113.7:51820"}.toWG()
 	must.ErrorContains(t, err, "allowed_ips")
 }
 

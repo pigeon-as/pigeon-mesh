@@ -4,6 +4,7 @@ go 1.25
 
 require (
 	github.com/coreos/go-systemd/v22 v22.7.0
+	github.com/expr-lang/expr v1.17.8
 	github.com/hashicorp/go-msgpack/v2 v2.1.5
 	github.com/hashicorp/go-sockaddr v1.0.7
 	github.com/hashicorp/memberlist v0.5.4

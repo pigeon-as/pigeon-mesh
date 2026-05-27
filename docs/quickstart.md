@@ -1,11 +1,8 @@
 # Quickstart
 
-Each node's IPv6 host address is derived from its WireGuard public key:
-`HMAC-SHA256(prefix, pubkey)`, low 64 bits as the interface identifier.
-The private key alone determines the overlay address, and any node can
-compute any other node's address from public information.
-
-Run once per node, as root:
+Each node's overlay address is derived from its pubkey via
+`HMAC-SHA256(prefix, pubkey)` so any node can compute any other's.
+Run as root, once per node:
 
 ```sh
 prefix=fdcc
@@ -18,15 +15,11 @@ ip -6 addr add "$addr/128" dev wg0
 ip link set wg0 up
 
 wg-mesh --interface wg0 \
-  --endpoint '[{{ GetPublicInterfaces | include "type" "IPv6" | limit 1 | attr "address" }}]:51820'
+  --endpoint '[{{ GetPublicInterfaces | include "type" "IPv6" | limit 1 | attr "address" }}]:51820' \
+  --peer-policy 'all(peer.AllowedIPs, cidrContains("fdcc::/16", #))'
 ```
 
-All nodes in the same mesh must agree on `prefix`.
-
 ## Adding a peer
-
-A peer's overlay address is the same derivation applied to their public
-key:
 
 ```sh
 prefix=fdcc
@@ -37,5 +30,4 @@ wg set wg0 peer <their-pubkey> \
   allowed-ips "$addr/128"
 ```
 
-wg-mesh picks the peer up from `wg show` and the rest of the mesh
-arrives via gossip.
+wg-mesh picks the peer up from `wg show`.

@@ -23,12 +23,14 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
 	iface := flag.String("interface", "", "existing WireGuard interface (required)")
-	endpoint := flag.String("endpoint", "", "this node's Endpoint as host:port; go-sockaddr templates evaluated (required)")
+	endpoint := flag.String("endpoint", "", "this node's Endpoint as ip:port (hostnames are not resolved); go-sockaddr templates evaluated (required)")
 	address := flag.String("address", "", "this node's overlay IP; go-sockaddr templates evaluated; auto-detected from --interface if unset")
 	extraAllowedIPs := flag.String("extra-allowed-ips", "", "extra CIDRs to advertise alongside this node's host route, comma-separated")
 	gossipPort := flag.Int("gossip-port", 7946, "port to listen on for gossip (TCP and UDP)")
 	gossipKeyFile := flag.String("gossip-key-file", "", "JSON file of base64-encoded gossip encryption keys")
 	persistentKeepalive := flag.Int("persistent-keepalive", 0, "PersistentKeepalive interval in seconds advertised to peers (0 disables)")
+	profile := flag.String("profile", "wan", "memberlist timing profile: lan, wan, or local")
+	peerPolicy := flag.String("peer-policy", "", "expr predicate (returns bool) evaluated per peer at admission; false rejects. In scope: peer (Peer), srcAddr (string), cidrContains(cidr, addr) bool. See docs/quickstart.md.")
 	flag.Parse()
 
 	if *iface == "" || *endpoint == "" {
@@ -100,6 +102,8 @@ func main() {
 	cfg := mesh.Config{
 		Iface:      *iface,
 		GossipPort: *gossipPort,
+		BindAddr:   ip.String(),
+		Profile:    *profile,
 		Self:       self,
 		WG:         wgc,
 	}
@@ -109,6 +113,14 @@ func main() {
 			slog.Error("gossip key", "err", err)
 			os.Exit(1)
 		}
+	}
+	if *peerPolicy != "" {
+		policy, err := mesh.ParsePeerPolicy(*peerPolicy)
+		if err != nil {
+			slog.Error("peer-policy", "err", err)
+			os.Exit(1)
+		}
+		cfg.PeerPolicy = policy
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -124,7 +136,10 @@ func main() {
 	go reloadKeyringOnSIGHUP(ctx, m, *gossipKeyFile)
 
 	slog.Info("wg-mesh up", "interface", *iface, "endpoint", ep, "address", ip.String())
-	m.Run(ctx)
+	if err := m.Run(ctx); err != nil {
+		slog.Error("wg-mesh stopped", "err", err)
+		os.Exit(1)
+	}
 	slog.Info("wg-mesh stopped")
 }
 

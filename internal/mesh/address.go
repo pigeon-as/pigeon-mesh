@@ -17,33 +17,19 @@ func InterfaceAddress(iface string) (net.IP, error) {
 		return nil, fmt.Errorf("addrs %q: %w", iface, err)
 	}
 	var match net.IP
-	var count int
+	var found []string
 	for _, a := range addrs {
 		n, ok := a.(*net.IPNet)
 		if !ok || !n.IP.IsGlobalUnicast() {
 			continue
 		}
 		match = n.IP
-		count++
+		found = append(found, n.IP.String())
 	}
-	if count != 1 {
-		return nil, fmt.Errorf("interface %q: want exactly 1 global address, got %d (pass --address)", iface, count)
+	if len(found) != 1 {
+		return nil, fmt.Errorf("interface %q: want exactly 1 global address, got %d [%s]; pass --address <ip>", iface, len(found), strings.Join(found, ", "))
 	}
 	return match, nil
-}
-
-func firstHostRoute(cidrs []string) (net.IP, error) {
-	for _, c := range cidrs {
-		ip, ipnet, err := net.ParseCIDR(c)
-		if err != nil {
-			return nil, fmt.Errorf("allowed_ip %q: %w", c, err)
-		}
-		ones, bits := ipnet.Mask.Size()
-		if ones == bits {
-			return ip, nil
-		}
-	}
-	return nil, fmt.Errorf("allowed_ips must include a host route (/32 or /128)")
 }
 
 func ParseAllowedIPs(s string) ([]string, error) {
