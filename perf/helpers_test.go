@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -167,17 +168,19 @@ func newNode(t *testing.T, name, underlay, overlay string, port int, bridge stri
 	return &node{ns: name, underlay: underlay, overlay: overlay, pub: pub}
 }
 
-func startMesh(t *testing.T, n *node, peers []*node, port int) *exec.Cmd {
+func startMesh(t *testing.T, n *node, peers []*node, port int, extraArgs ...string) *exec.Cmd {
 	t.Helper()
 	for _, p := range peers {
 		runIn(t, n.ns, "wg", "set", "wg0", "peer", p.pub,
 			"endpoint", fmt.Sprintf("%s:%d", p.underlay, port),
 			"allowed-ips", p.overlay+"/128")
 	}
-	cmd := exec.Command("ip", "netns", "exec", n.ns, meshBin,
+	args := []string{"netns", "exec", n.ns, meshBin,
 		"--interface", "wg0",
 		"--endpoint", fmt.Sprintf("%s:%d", n.underlay, port),
-	)
+	}
+	args = append(args, extraArgs...)
+	cmd := exec.Command("ip", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	must.NoError(t, cmd.Start())
@@ -234,7 +237,7 @@ func buildCluster(t *testing.T, tag string, port, n int) []*node {
 	return nodes
 }
 
-func bootstrap(t *testing.T, nodes []*node, port, seedCount int) []*exec.Cmd {
+func bootstrap(t *testing.T, nodes []*node, port, seedCount int, extraArgs ...string) []*exec.Cmd {
 	t.Helper()
 	seeds := nodes
 	if len(nodes) > seedCount {
@@ -256,7 +259,7 @@ func bootstrap(t *testing.T, nodes []*node, port, seedCount int) []*exec.Cmd {
 		} else {
 			boot = seeds
 		}
-		cmds[i] = startMesh(t, n, boot, port)
+		cmds[i] = startMesh(t, n, boot, port, extraArgs...)
 	}
 	return cmds
 }
@@ -264,13 +267,22 @@ func bootstrap(t *testing.T, nodes []*node, port, seedCount int) []*exec.Cmd {
 func waitConverged(t *testing.T, nodes []*node, timeout time.Duration) {
 	t.Helper()
 	waitFor(t, fmt.Sprintf("all %d see all peers", len(nodes)), timeout, func() bool {
-		for _, src := range nodes {
-			peers := wgPeers(src)
+		peerLists := make([]string, len(nodes))
+		var wg sync.WaitGroup
+		for i, src := range nodes {
+			wg.Add(1)
+			go func(i int, src *node) {
+				defer wg.Done()
+				peerLists[i] = wgPeers(src)
+			}(i, src)
+		}
+		wg.Wait()
+		for i, src := range nodes {
 			for _, dst := range nodes {
 				if src == dst {
 					continue
 				}
-				if !strings.Contains(peers, dst.pub) {
+				if !strings.Contains(peerLists[i], dst.pub) {
 					return false
 				}
 			}

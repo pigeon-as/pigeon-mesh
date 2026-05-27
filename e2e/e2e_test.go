@@ -147,6 +147,65 @@ func TestMesh_GossipKeyAndReload(t *testing.T) {
 	must.StrContains(t, wgPeers(b), a.pub)
 }
 
+func TestMesh_PeerPolicyRejects(t *testing.T) {
+	skipIfNoNetns(t)
+	newBridge(t, "wgmp-br")
+
+	a := newNode(t, "wgmp-a", "10.130.0.1", "fd00:abc:a::1", 51820, "wgmp-br")
+	b := newNode(t, "wgmp-b", "10.130.0.2", "fd00:abc:b::1", 51820, "wgmp-br")
+	c := newNode(t, "wgmp-c", "10.130.0.3", "fd00:abc:c::1", 51820, "wgmp-br")
+
+	startMesh(t, a, []*node{b}, 51820,
+		"--peer-policy", `all(peer.AllowedIPs, cidrContains("fd00:abc:b::/64", #))`)
+	startMesh(t, b, []*node{a, c}, 51820)
+	startMesh(t, c, []*node{b}, 51820)
+
+	waitFor(t, "b sees a and c", 15*time.Second, func() bool {
+		return strings.Contains(wgPeers(b), a.pub) &&
+			strings.Contains(wgPeers(b), c.pub)
+	})
+
+	time.Sleep(5 * time.Second)
+
+	must.StrContains(t, wgPeers(a), b.pub)
+	must.False(t, strings.Contains(wgPeers(a), c.pub),
+		must.Sprint("A must reject C (outside fd00:abc:b::/64)"))
+}
+
+func TestMesh_RestartDoesNotDropPeers(t *testing.T) {
+	skipIfNoNetns(t)
+	newBridge(t, "wgmr-br")
+
+	a := newNode(t, "wgmr-a", "10.132.0.1", "fd00:dead:a::1", 51820, "wgmr-br")
+	b := newNode(t, "wgmr-b", "10.132.0.2", "fd00:dead:b::1", 51820, "wgmr-br")
+	c := newNode(t, "wgmr-c", "10.132.0.3", "fd00:dead:c::1", 51820, "wgmr-br")
+
+	startMesh(t, a, []*node{b, c}, 51820)
+	cmdB := startMesh(t, b, []*node{a, c}, 51820)
+	startMesh(t, c, []*node{a, b}, 51820)
+
+	waitFor(t, "3-node converged", 15*time.Second, func() bool {
+		return strings.Contains(wgPeers(a), b.pub) && strings.Contains(wgPeers(a), c.pub) &&
+			strings.Contains(wgPeers(b), a.pub) && strings.Contains(wgPeers(b), c.pub) &&
+			strings.Contains(wgPeers(c), a.pub) && strings.Contains(wgPeers(c), b.pub)
+	})
+
+	must.NoError(t, cmdB.Process.Signal(syscall.SIGTERM))
+	cmdB.Wait()
+
+	must.StrContains(t, wgPeers(a), b.pub, must.Sprint("A dropped B immediately after SIGTERM"))
+	must.StrContains(t, wgPeers(c), b.pub, must.Sprint("C dropped B immediately after SIGTERM"))
+
+	time.Sleep(3 * time.Second)
+	must.StrContains(t, wgPeers(a), b.pub, must.Sprint("A dropped B during 3s gap"))
+	must.StrContains(t, wgPeers(c), b.pub, must.Sprint("C dropped B during 3s gap"))
+
+	startMesh(t, b, []*node{a, c}, 51820)
+	time.Sleep(3 * time.Second)
+	must.StrContains(t, wgPeers(a), b.pub, must.Sprint("A dropped B after restart"))
+	must.StrContains(t, wgPeers(c), b.pub, must.Sprint("C dropped B after restart"))
+}
+
 func TestMesh_ThreeNodes_TransitiveDiscovery(t *testing.T) {
 	skipIfNoNetns(t)
 	newBridge(t, "wgm3-br")

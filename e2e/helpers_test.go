@@ -120,7 +120,7 @@ func startMesh(t *testing.T, n *node, peers []*node, port int, extraArgs ...stri
 		runIn(t, n.ns, "wg", "set", "wg0", "peer", p.pub,
 			"endpoint", fmt.Sprintf("%s:%d", p.underlay, port),
 			"allowed-ips", p.overlay+"/128")
-		runIn(t, n.ns, "ip", "-6", "route", "add", p.overlay+"/128", "dev", "wg0")
+		runIn(t, n.ns, "ip", "-6", "route", "replace", p.overlay+"/128", "dev", "wg0")
 	}
 
 	args := []string{"netns", "exec", n.ns, meshBin,

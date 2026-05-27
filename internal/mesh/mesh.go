@@ -8,8 +8,10 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net"
+	"reflect"
 	"slices"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/memberlist"
@@ -18,28 +20,54 @@ import (
 )
 
 const (
-	leaveTimeout      = 5 * time.Second
 	retryJoinInterval = 30 * time.Second
-	eventBuffer       = 256
+	reconcileInterval = 30 * time.Second
+	eventBuffer       = 2048
 )
 
 type Config struct {
 	Iface      string
 	GossipPort int
+	BindAddr   string
+	Profile    string
 	Self       Peer
 	Keyring    *memberlist.Keyring
 	WG         *wg.Client
+	PeerPolicy *PeerPolicy
 }
 
 type Mesh struct {
 	cfg        Config
+	meta       []byte
 	memberlist *memberlist.Memberlist
 	events     <-chan memberlist.NodeEvent
+	peers      map[string]wgtypes.PeerConfig
+	shutdownCh chan struct{}
+	closeOnce  sync.Once
+}
+
+func (m *Mesh) shutdown() {
+	m.closeOnce.Do(func() { close(m.shutdownCh) })
+}
+
+func (m *Mesh) handleNodeConflict(existing, other *memberlist.Node) {
+	if existing.Name != m.cfg.Self.PublicKey {
+		slog.Warn("node name conflict",
+			"name", existing.Name,
+			"existing", existing.Address(),
+			"other", other.Address())
+		return
+	}
+	slog.Error("self pubkey conflict", "other", other.Address())
+	m.shutdown()
 }
 
 func New(cfg Config) (*Mesh, error) {
 	if cfg.WG == nil {
 		return nil, fmt.Errorf("no wgctrl client configured")
+	}
+	if cfg.BindAddr == "" {
+		return nil, fmt.Errorf("no bind addr configured")
 	}
 	meta, err := encodeMeta(cfg.Self)
 	if err != nil {
@@ -48,20 +76,35 @@ func New(cfg Config) (*Mesh, error) {
 	if len(meta) > memberlist.MetaMaxSize {
 		return nil, fmt.Errorf("encoded self meta %d bytes exceeds limit %d", len(meta), memberlist.MetaMaxSize)
 	}
-	bindIP, err := firstHostRoute(cfg.Self.AllowedIPs)
-	if err != nil {
-		return nil, fmt.Errorf("self: %w", err)
-	}
 
 	events := make(chan memberlist.NodeEvent, eventBuffer)
 
-	d := &delegate{meta: meta}
-	mc := memberlist.DefaultWANConfig()
+	m := &Mesh{
+		cfg:        cfg,
+		meta:       meta,
+		events:     events,
+		peers:      make(map[string]wgtypes.PeerConfig),
+		shutdownCh: make(chan struct{}),
+	}
+
+	d := &delegate{mesh: m}
+	var mc *memberlist.Config
+	switch cfg.Profile {
+	case "", "wan":
+		mc = memberlist.DefaultWANConfig()
+	case "lan":
+		mc = memberlist.DefaultLANConfig()
+	case "local":
+		mc = memberlist.DefaultLocalConfig()
+	default:
+		return nil, fmt.Errorf("profile %q: must be lan, wan, or local", cfg.Profile)
+	}
 	mc.Name = cfg.Self.PublicKey
-	mc.BindAddr = bindIP.String()
+	mc.BindAddr = cfg.BindAddr
 	mc.BindPort = cfg.GossipPort
 	mc.Delegate = d
 	mc.Conflict = d
+	mc.Alive = d
 	mc.Events = &memberlist.ChannelEventDelegate{Ch: events}
 	mc.Keyring = cfg.Keyring
 	mc.Logger = newMemberlistLogger()
@@ -70,7 +113,8 @@ func New(cfg Config) (*Mesh, error) {
 	if err != nil {
 		return nil, fmt.Errorf("memberlist: %w", err)
 	}
-	return &Mesh{cfg: cfg, memberlist: ml, events: events}, nil
+	m.memberlist = ml
+	return m, nil
 }
 
 func (m *Mesh) join() (int, error) {
@@ -95,45 +139,76 @@ func (m *Mesh) join() (int, error) {
 }
 
 func (m *Mesh) handleJoin(node *memberlist.Node) {
-	if len(node.Meta) == 0 {
-		slog.Warn("empty meta", "node", node.Name)
-		return
-	}
-	var p Peer
-	if err := decodeMeta(node.Meta, &p); err != nil {
+	pc, err := peerConfigFromNode(node)
+	if err != nil {
 		slog.Warn("decode meta", "node", node.Name, "err", err)
 		return
 	}
-	if p.PublicKey != node.Name {
-		slog.Warn("meta pubkey mismatch", "node", node.Name, "meta", p.PublicKey)
-		return
-	}
-	pc, err := p.peerConfig()
-	if err != nil {
-		slog.Warn("peer config", "node", node.Name, "err", err)
+	if cached, ok := m.peers[node.Name]; ok && reflect.DeepEqual(cached, pc) {
 		return
 	}
 	if err := m.cfg.WG.Apply(m.cfg.Iface, []wgtypes.PeerConfig{pc}); err != nil {
-		slog.Warn("apply", "node", node.Name, "err", err)
+		slog.Warn("apply peer", "node", node.Name, "err", err)
+		return
 	}
+	m.peers[node.Name] = pc
 }
 
 func (m *Mesh) handleLeave(node *memberlist.Node) {
 	pk, err := wgtypes.ParseKey(node.Name)
 	if err != nil {
-		slog.Warn("leave", "node", node.Name, "err", err)
+		slog.Warn("parse pubkey", "node", node.Name, "err", err)
 		return
 	}
 	if err := m.cfg.WG.Apply(m.cfg.Iface, []wgtypes.PeerConfig{{PublicKey: pk, Remove: true}}); err != nil {
-		slog.Warn("leave apply", "node", node.Name, "err", err)
+		slog.Warn("apply leave", "node", node.Name, "err", err)
+		return
 	}
+	delete(m.peers, node.Name)
 }
 
-func (m *Mesh) Run(ctx context.Context) {
-	defer func() {
-		if err := m.memberlist.Leave(leaveTimeout); err != nil {
-			slog.Warn("leave broadcast", "err", err)
+func diff(applied, desired map[string]wgtypes.PeerConfig) []wgtypes.PeerConfig {
+	var changes []wgtypes.PeerConfig
+	for name, pc := range desired {
+		if cached, ok := applied[name]; ok && reflect.DeepEqual(cached, pc) {
+			continue
 		}
+		changes = append(changes, pc)
+	}
+	for name, prev := range applied {
+		if _, ok := desired[name]; !ok {
+			changes = append(changes, wgtypes.PeerConfig{PublicKey: prev.PublicKey, Remove: true})
+		}
+	}
+	return changes
+}
+
+func (m *Mesh) reconcile() error {
+	desired := make(map[string]wgtypes.PeerConfig)
+	for _, n := range m.memberlist.Members() {
+		if n.Name == m.cfg.Self.PublicKey {
+			continue
+		}
+		pc, err := peerConfigFromNode(n)
+		if err != nil {
+			slog.Warn("decode meta", "node", n.Name, "err", err)
+			continue
+		}
+		desired[n.Name] = pc
+	}
+	changes := diff(m.peers, desired)
+	if len(changes) == 0 {
+		return nil
+	}
+	if err := m.cfg.WG.Apply(m.cfg.Iface, changes); err != nil {
+		return err
+	}
+	m.peers = desired
+	return nil
+}
+
+func (m *Mesh) Run(ctx context.Context) error {
+	defer func() {
 		if err := m.memberlist.Shutdown(); err != nil {
 			slog.Warn("memberlist shutdown", "err", err)
 		}
@@ -146,13 +221,23 @@ func (m *Mesh) Run(ctx context.Context) {
 	if n > 0 {
 		slog.Info("joined", "reached", n)
 	} else {
+		slog.Info("starting retry join")
 		go m.retryJoin(ctx)
 	}
+
+	reconcileTicker := time.NewTicker(reconcileInterval)
+	defer reconcileTicker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
+		case <-m.shutdownCh:
+			return fmt.Errorf("self pubkey conflict")
+		case <-reconcileTicker.C:
+			if err := m.reconcile(); err != nil {
+				slog.Warn("reconcile", "err", err)
+			}
 		case ev := <-m.events:
 			if ev.Node.Name == m.cfg.Self.PublicKey {
 				continue
@@ -215,14 +300,19 @@ func (m *Mesh) retryJoin(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-m.shutdownCh:
+			return
 		case <-time.After(wait):
 		}
 		n, err := m.join()
-		if err != nil {
+		switch {
+		case err != nil:
 			slog.Warn("retry join", "err", err)
-		} else if n > 0 {
-			slog.Info("rejoined", "reached", n)
+		case n > 0:
+			slog.Info("joined", "reached", n)
 			return
+		default:
+			slog.Info("no bootstrap peers")
 		}
 		backoff = min(2*backoff, retryJoinInterval)
 	}

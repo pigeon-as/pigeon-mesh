@@ -1,55 +1,56 @@
 # wg-mesh
 
-A peer-to-peer WireGuard full-mesh daemon. It automatically adds and
-removes peers on an existing WireGuard interface as nodes join or leave.
-No central server.
-
-Each node is identified by its WireGuard public key.
+A peer-to-peer WireGuard full-mesh daemon. No central server. Nodes are
+identified by WireGuard public key; the kernel WG peer set follows the
+gossip cluster.
 
 ## Run
 
 ```
 wg-mesh \
   --interface wg0 \
-  --endpoint 203.0.113.1:51820
+  --endpoint 203.0.113.1:51820 \
+  --peer-policy 'all(peer.AllowedIPs, cidrContains("fd00::/8", #))'
 ```
 
-That's enough to start. Each node advertises its WireGuard IP to the
-mesh; use `--extra-allowed-ips` to advertise additional CIDRs. Run
-`wg-mesh --help` for the full flag list.
+`wg-mesh --help` lists the full flag set.
 
-`--endpoint` and `--address` accept go-sockaddr templates (the same
-syntax Consul, Nomad, and Vault use) for runtime resolution:
+`--endpoint` and `--address` accept
+[go-sockaddr](https://github.com/hashicorp/go-sockaddr) templates for
+runtime resolution:
 
 ```
-wg-mesh \
-  --interface wg0 \
-  --endpoint '[{{ GetPublicInterfaces | include "type" "IPv6" | limit 1 | attr "address" }}]:51820'
+--endpoint '[{{ GetPublicInterfaces | include "type" "IPv6" | limit 1 | attr "address" }}]:51820'
 ```
+
+`--peer-policy` is an [expr](https://expr-lang.org) boolean predicate
+evaluated per peer at admission. Anything expressible in expr (CIDR
+range, identity binding, multi-attribute checks) works as policy.
+Rejected peers are skipped; wg-mesh keeps running.
 
 Runs as systemd `Type=notify`; honors `WatchdogSec=`.
 
-For a simple setup that generates the keypair, derives an IPv6 address
-from the public key, and brings up the interface, see
-[docs/quickstart.md](docs/quickstart.md).
+See [docs/quickstart.md](docs/quickstart.md) for a setup that derives
+each node's IPv6 overlay address from its WireGuard public key.
 
 ## Initial peers
 
-Add bootstrap peers to the kernel first (with `wg-quick`, networkd, or
-`wg set`). Each peer needs a host route (`/32` or `/128`) in
+Add bootstrap peers to the kernel first ([wg-quick](https://man.archlinux.org/man/wg-quick.8),
+[systemd-networkd](https://www.freedesktop.org/software/systemd/man/systemd.netdev.html),
+or `wg set`). Each peer needs a host route (`/32` or `/128`) in
 `AllowedIPs`:
 
 ```
 wg set wg0 peer <base64-pubkey> \
   endpoint 203.0.113.2:51820 \
-  allowed-ips fd00:dead:beef::2/128
+  allowed-ips fd00::2/128
 ```
 
 Existing kernel peers are used to bootstrap the gossip cluster.
 
 ## Encrypted gossip
 
-Pass `--gossip-key-file keys.json` to encrypt gossip:
+Pass `--gossip-key-file keys.json`:
 
 ```json
 ["base64-primary-key", "base64-old-key"]
@@ -63,15 +64,16 @@ key signs outgoing; all are accepted on receive. `SIGHUP` reloads.
 - WireGuard's Noise handshake is the only transport security. wg-mesh
   never reads or persists the private key.
 - Gossip is unencrypted unless `--gossip-key-file` is set.
-- A peer is trusted with whatever `allowed_ips` it advertises. wg-mesh
-  has no admission control.
+- By default, peers are trusted with whatever `allowed_ips` they
+  advertise. Optional `--peer-policy` enforces an operator-defined expr
+  predicate per peer at admission.
 
 ## Operations
 
 Live state: `wg show <interface>`.
 
-Stop the daemon to leave gracefully; peers see the Leave and drop the
-WG entry. Crashed nodes are detected and removed automatically.
+Stop or crash the daemon; peers detect via SWIM probes (~30s in WAN
+config) and remove the WG entry.
 
 ## Build
 

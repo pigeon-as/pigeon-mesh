@@ -14,6 +14,7 @@ import (
 	"github.com/hashicorp/memberlist"
 	"github.com/pigeon-as/wg-mesh/internal/wg"
 	"github.com/shoenig/test/must"
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
 func keyOf(b byte) []byte {
@@ -27,16 +28,19 @@ func TestMesh_New_NilWG(t *testing.T) {
 	must.ErrorContains(t, err, "wgctrl")
 }
 
-func TestMesh_New_NoHostRouteInAllowedIPs(t *testing.T) {
+func TestMesh_New_NoBindAddr(t *testing.T) {
+	_, err := New(Config{WG: &wg.Client{}})
+	must.ErrorContains(t, err, "bind addr")
+}
+
+func TestMesh_New_InvalidProfile(t *testing.T) {
 	_, err := New(Config{
-		WG: &wg.Client{},
-		Self: Peer{
-			PublicKey:  testKey,
-			Endpoint:   "203.0.113.1:51820",
-			AllowedIPs: []string{"10.0.0.0/24"},
-		},
+		WG:       &wg.Client{},
+		BindAddr: "fd00::1",
+		Profile:  "garbage",
+		Self:     Peer{PublicKey: testKey},
 	})
-	must.ErrorContains(t, err, "host route")
+	must.ErrorContains(t, err, "must be lan, wan, or local")
 }
 
 func TestMesh_New_OversizedMeta(t *testing.T) {
@@ -45,7 +49,8 @@ func TestMesh_New_OversizedMeta(t *testing.T) {
 		manyAllowed[i] = fmt.Sprintf("fd00::%x/128", i)
 	}
 	_, err := New(Config{
-		WG: &wg.Client{},
+		WG:       &wg.Client{},
+		BindAddr: "fd00::1",
 		Self: Peer{
 			PublicKey:  testKey,
 			Endpoint:   "203.0.113.1:51820",
@@ -131,4 +136,68 @@ func TestReloadKeyringFromFile_ApplyError(t *testing.T) {
 	m := &Mesh{cfg: Config{}}
 	_, err := m.ReloadKeyringFromFile(path)
 	must.ErrorContains(t, err, "apply")
+}
+
+func encodedPeerNode(t *testing.T, pubkey, hostRouteCIDR string) *memberlist.Node {
+	t.Helper()
+	p := Peer{
+		PublicKey:  pubkey,
+		Endpoint:   "203.0.113.1:51820",
+		AllowedIPs: []string{hostRouteCIDR},
+	}
+	meta, err := encodeMeta(p)
+	must.NoError(t, err)
+	return &memberlist.Node{Name: pubkey, Meta: meta}
+}
+
+func TestPeerConfigFromNode_Accepts(t *testing.T) {
+	pk, err := wgtypes.GeneratePrivateKey()
+	must.NoError(t, err)
+	pubkey := pk.PublicKey().String()
+	_, err = peerConfigFromNode(encodedPeerNode(t, pubkey, "fdcc::dead/128"))
+	must.NoError(t, err)
+}
+
+func TestPeerConfigFromNode_PubkeyMismatch(t *testing.T) {
+	pk, err := wgtypes.GeneratePrivateKey()
+	must.NoError(t, err)
+	pubkey := pk.PublicKey().String()
+	node := encodedPeerNode(t, pubkey, "fdcc::dead/128")
+	node.Name = "different-name"
+	_, err = peerConfigFromNode(node)
+	must.ErrorContains(t, err, "mismatch")
+}
+
+func TestDiff(t *testing.T) {
+	build := func(hostRoute string) wgtypes.PeerConfig {
+		pc, err := Peer{PublicKey: testKey, Endpoint: "203.0.113.7:51820", AllowedIPs: []string{hostRoute}}.toWG()
+		must.NoError(t, err)
+		return pc
+	}
+	stable := build("fd00::1/128")
+
+	must.SliceLen(t, 0, diff(
+		map[string]wgtypes.PeerConfig{"X": stable},
+		map[string]wgtypes.PeerConfig{"X": stable},
+	))
+
+	pcY := build("fd00::2/128")
+	pcZ := build("fd00::3/128")
+	pcWold := build("fd00::4/128")
+	pcWnew := build("fd00::5/128")
+	changes := diff(
+		map[string]wgtypes.PeerConfig{"X": stable, "Y": pcY, "W": pcWold},
+		map[string]wgtypes.PeerConfig{"X": stable, "Z": pcZ, "W": pcWnew},
+	)
+	must.SliceLen(t, 3, changes)
+	var removes, adds int
+	for _, c := range changes {
+		if c.Remove {
+			removes++
+		} else {
+			adds++
+		}
+	}
+	must.EqOp(t, 1, removes, must.Sprint("Y should be removed"))
+	must.EqOp(t, 2, adds, must.Sprint("Z and updated W should be added"))
 }
