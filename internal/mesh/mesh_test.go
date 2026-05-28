@@ -138,59 +138,55 @@ func TestReloadKeyringFromFile_ApplyError(t *testing.T) {
 	must.ErrorContains(t, err, "apply")
 }
 
-func encodedPeerNode(t *testing.T, pubkey, hostRouteCIDR string) *memberlist.Node {
+func encodedMeta(t *testing.T, pubkey, hostRouteCIDR string) []byte {
 	t.Helper()
-	p := Peer{
+	meta, err := encodeMeta(Peer{
 		PublicKey:  pubkey,
 		Endpoint:   "203.0.113.1:51820",
 		AllowedIPs: []string{hostRouteCIDR},
-	}
-	meta, err := encodeMeta(p)
+	})
 	must.NoError(t, err)
-	return &memberlist.Node{Name: pubkey, Meta: meta}
+	return meta
 }
 
-func TestPeerConfigFromNode_Accepts(t *testing.T) {
+func TestPeerConfigFromMeta_Accepts(t *testing.T) {
 	pk, err := wgtypes.GeneratePrivateKey()
 	must.NoError(t, err)
 	pubkey := pk.PublicKey().String()
-	_, err = peerConfigFromNode(encodedPeerNode(t, pubkey, "fdcc::dead/128"))
+	_, err = peerConfigFromMeta(pubkey, encodedMeta(t, pubkey, "fdcc::dead/128"))
 	must.NoError(t, err)
 }
 
-func TestPeerConfigFromNode_PubkeyMismatch(t *testing.T) {
+func TestPeerConfigFromMeta_PubkeyMismatch(t *testing.T) {
 	pk, err := wgtypes.GeneratePrivateKey()
 	must.NoError(t, err)
 	pubkey := pk.PublicKey().String()
-	node := encodedPeerNode(t, pubkey, "fdcc::dead/128")
-	node.Name = "different-name"
-	_, err = peerConfigFromNode(node)
+	_, err = peerConfigFromMeta("different-name", encodedMeta(t, pubkey, "fdcc::dead/128"))
 	must.ErrorContains(t, err, "mismatch")
 }
 
 func TestDiff(t *testing.T) {
-	build := func(hostRoute string) wgtypes.PeerConfig {
-		pc, err := Peer{PublicKey: testKey, Endpoint: "203.0.113.7:51820", AllowedIPs: []string{hostRoute}}.toWG()
+	genKey := func() string {
+		pk, err := wgtypes.GeneratePrivateKey()
 		must.NoError(t, err)
-		return pc
+		return pk.PublicKey().String()
 	}
-	stable := build("fd00::1/128")
+	x, y, z, w := genKey(), genKey(), genKey(), genKey()
 
-	must.SliceLen(t, 0, diff(
-		map[string]wgtypes.PeerConfig{"X": stable},
-		map[string]wgtypes.PeerConfig{"X": stable},
-	))
+	prev := map[string][]byte{
+		x: encodedMeta(t, x, "fd00::1/128"),
+		y: encodedMeta(t, y, "fd00::2/128"),
+		w: encodedMeta(t, w, "fd00::4/128"),
+	}
+	cur := map[string][]byte{
+		x: encodedMeta(t, x, "fd00::1/128"), // unchanged
+		z: encodedMeta(t, z, "fd00::3/128"), // new
+		w: encodedMeta(t, w, "fd00::5/128"), // changed
+	}
 
-	pcY := build("fd00::2/128")
-	pcZ := build("fd00::3/128")
-	pcWold := build("fd00::4/128")
-	pcWnew := build("fd00::5/128")
-	changes := diff(
-		map[string]wgtypes.PeerConfig{"X": stable, "Y": pcY, "W": pcWold},
-		map[string]wgtypes.PeerConfig{"X": stable, "Z": pcZ, "W": pcWnew},
-	)
+	changes := diff(prev, cur)
 	must.SliceLen(t, 3, changes)
-	var removes, adds int
+	var adds, removes int
 	for _, c := range changes {
 		if c.Remove {
 			removes++
@@ -198,6 +194,8 @@ func TestDiff(t *testing.T) {
 			adds++
 		}
 	}
-	must.EqOp(t, 1, removes, must.Sprint("Y should be removed"))
-	must.EqOp(t, 2, adds, must.Sprint("Z and updated W should be added"))
+	must.EqOp(t, 2, adds, must.Sprint("new Z and changed W are applied"))
+	must.EqOp(t, 1, removes, must.Sprint("Y is removed"))
+
+	must.SliceEmpty(t, diff(cur, cur)) // identical state is a no-op
 }

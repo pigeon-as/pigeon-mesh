@@ -18,7 +18,7 @@ func ParsePeerPolicy(s string) (*PeerPolicy, error) {
 		expr.AsBool(),
 		expr.Env(map[string]any{
 			"peer":         Peer{},
-			"srcAddr":      "",
+			"peers":        func() []Peer { return nil },
 			"cidrContains": cidrContains,
 		}),
 	)
@@ -28,10 +28,10 @@ func ParsePeerPolicy(s string) (*PeerPolicy, error) {
 	return &PeerPolicy{program: prog}, nil
 }
 
-func (p *PeerPolicy) accept(peer Peer, srcAddr string) (bool, error) {
+func (p *PeerPolicy) accept(peer Peer, peers func() []Peer) (bool, error) {
 	out, err := expr.Run(p.program, map[string]any{
 		"peer":         peer,
-		"srcAddr":      srcAddr,
+		"peers":        peers,
 		"cidrContains": cidrContains,
 	})
 	if err != nil {

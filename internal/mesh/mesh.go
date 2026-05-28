@@ -3,14 +3,16 @@
 package mesh
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math/rand/v2"
 	"net"
-	"reflect"
 	"slices"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/memberlist"
@@ -20,9 +22,7 @@ import (
 
 const (
 	retryJoinInterval = 30 * time.Second
-	reconcileInterval = 30 * time.Second
-	coalesceInterval  = 200 * time.Millisecond
-	eventBuffer       = 2048
+	reconcileInterval = 60 * time.Second
 )
 
 type Config struct {
@@ -37,11 +37,13 @@ type Config struct {
 }
 
 type Mesh struct {
-	cfg        Config
-	meta       []byte
-	memberlist *memberlist.Memberlist
-	events     <-chan memberlist.NodeEvent
-	peers      map[string]wgtypes.PeerConfig
+	cfg         Config
+	meta        []byte
+	memberlist  *memberlist.Memberlist
+	mu          sync.RWMutex
+	members     map[string][]byte
+	peers       map[string][]byte
+	reconcileCh chan struct{}
 }
 
 func New(cfg Config) (*Mesh, error) {
@@ -59,13 +61,12 @@ func New(cfg Config) (*Mesh, error) {
 		return nil, fmt.Errorf("encoded self meta %d bytes exceeds limit %d", len(meta), memberlist.MetaMaxSize)
 	}
 
-	events := make(chan memberlist.NodeEvent, eventBuffer)
-
 	m := &Mesh{
-		cfg:    cfg,
-		meta:   meta,
-		events: events,
-		peers:  make(map[string]wgtypes.PeerConfig),
+		cfg:         cfg,
+		meta:        meta,
+		members:     make(map[string][]byte),
+		peers:       make(map[string][]byte),
+		reconcileCh: make(chan struct{}, 1),
 	}
 
 	d := &delegate{mesh: m}
@@ -83,7 +84,7 @@ func New(cfg Config) (*Mesh, error) {
 	mc.Name = cfg.Self.PublicKey
 	mc.Delegate = d
 	mc.Alive = d
-	mc.Events = &memberlist.ChannelEventDelegate{Ch: events}
+	mc.Events = d
 	mc.Keyring = cfg.Keyring
 	mc.Logger = newMemberlistLogger()
 
@@ -126,43 +127,89 @@ func (m *Mesh) join() (int, error) {
 	return m.memberlist.Join(targets)
 }
 
-func diff(applied, desired map[string]wgtypes.PeerConfig) []wgtypes.PeerConfig {
+func diff(prev, cur map[string][]byte) []wgtypes.PeerConfig {
 	var changes []wgtypes.PeerConfig
-	for name, pc := range desired {
-		if cached, ok := applied[name]; ok && reflect.DeepEqual(cached, pc) {
+	for key, meta := range cur {
+		if bytes.Equal(prev[key], meta) {
+			continue
+		}
+		pc, err := peerConfigFromMeta(key, meta)
+		if err != nil {
+			slog.Warn("decode meta", "node", key, "err", err)
 			continue
 		}
 		changes = append(changes, pc)
 	}
-	for name, prev := range applied {
-		if _, ok := desired[name]; !ok {
-			changes = append(changes, wgtypes.PeerConfig{PublicKey: prev.PublicKey, Remove: true})
+	for key := range prev {
+		if _, ok := cur[key]; ok {
+			continue
 		}
+		pk, err := wgtypes.ParseKey(key)
+		if err != nil {
+			slog.Warn("parse pubkey", "node", key, "err", err)
+			continue
+		}
+		changes = append(changes, wgtypes.PeerConfig{PublicKey: pk, Remove: true})
 	}
 	return changes
 }
 
-func (m *Mesh) reconcile() error {
-	desired := make(map[string]wgtypes.PeerConfig)
-	for _, n := range m.memberlist.Members() {
-		if n.Name == m.cfg.Self.PublicKey {
-			continue
-		}
-		pc, err := peerConfigFromNode(n)
-		if err != nil {
-			slog.Warn("decode meta", "node", n.Name, "err", err)
-			continue
-		}
-		desired[n.Name] = pc
+func (m *Mesh) setMember(n *memberlist.Node) {
+	if n.Name == m.cfg.Self.PublicKey {
+		return
 	}
-	changes := diff(m.peers, desired)
+	m.mu.Lock()
+	m.members[n.Name] = bytes.Clone(n.Meta)
+	m.mu.Unlock()
+	m.triggerReconcile()
+}
+
+func (m *Mesh) removeMember(n *memberlist.Node) {
+	if n.Name == m.cfg.Self.PublicKey {
+		return
+	}
+	m.mu.Lock()
+	delete(m.members, n.Name)
+	m.mu.Unlock()
+	m.triggerReconcile()
+}
+
+func (m *Mesh) triggerReconcile() {
+	select {
+	case m.reconcileCh <- struct{}{}:
+	default:
+	}
+}
+
+func (m *Mesh) peerSnapshot(exclude string) []Peer {
+	m.mu.RLock()
+	snap := maps.Clone(m.members)
+	m.mu.RUnlock()
+	peers := make([]Peer, 0, len(snap))
+	for name, meta := range snap {
+		if name == exclude {
+			continue
+		}
+		var p Peer
+		if decodeMeta(meta, &p) == nil {
+			peers = append(peers, p)
+		}
+	}
+	return peers
+}
+
+func (m *Mesh) reconcile() error {
+	m.mu.RLock()
+	cur := maps.Clone(m.members)
+	m.mu.RUnlock()
+	changes := diff(m.peers, cur)
 	if len(changes) == 0 {
 		return nil
 	}
 	if err := m.cfg.WG.Apply(m.cfg.Iface, changes); err != nil {
 		return err
 	}
-	m.peers = desired
+	m.peers = cur
 	return nil
 }
 
@@ -188,27 +235,18 @@ func (m *Mesh) Run(ctx context.Context) error {
 		slog.Warn("reconcile", "err", err)
 	}
 
-	backstop := time.NewTicker(reconcileInterval)
-	defer backstop.Stop()
-	var settle <-chan time.Time
+	ticker := time.NewTicker(reconcileInterval)
+	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case ev := <-m.events:
-			if ev.Node.Name == m.cfg.Self.PublicKey {
-				continue
-			}
-			if settle == nil {
-				settle = time.After(coalesceInterval)
-			}
-		case <-settle:
-			settle = nil
+		case <-m.reconcileCh:
 			if err := m.reconcile(); err != nil {
 				slog.Warn("reconcile", "err", err)
 			}
-		case <-backstop.C:
+		case <-ticker.C:
 			if err := m.reconcile(); err != nil {
 				slog.Warn("reconcile", "err", err)
 			}

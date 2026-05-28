@@ -23,14 +23,14 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
 	iface := flag.String("interface", "", "existing WireGuard interface (required)")
-	endpoint := flag.String("endpoint", "", "this node's Endpoint as ip:port (hostnames are not resolved); go-sockaddr templates evaluated (required)")
+	endpoint := flag.String("endpoint", "", "this node's Endpoint as host:port; hostnames resolved at startup; go-sockaddr templates evaluated (required)")
 	address := flag.String("address", "", "this node's overlay IP; go-sockaddr templates evaluated; auto-detected from --interface if unset")
 	extraAllowedIPs := flag.String("extra-allowed-ips", "", "extra CIDRs to advertise alongside this node's host route, comma-separated")
 	gossipPort := flag.Int("gossip-port", 7946, "port to listen on for gossip (TCP and UDP)")
 	gossipKeyFile := flag.String("gossip-key-file", "", "JSON file of base64-encoded gossip encryption keys")
 	persistentKeepalive := flag.Int("persistent-keepalive", 0, "PersistentKeepalive interval in seconds advertised to peers (0 disables)")
 	profile := flag.String("profile", "wan", "memberlist timing profile: lan, wan, or local")
-	peerPolicy := flag.String("peer-policy", "", "expr predicate (returns bool) evaluated per peer at admission; false rejects. In scope: peer (Peer), srcAddr (string), cidrContains(cidr, addr) bool. See docs/quickstart.md.")
+	peerPolicy := flag.String("peer-policy", "", "expr predicate (returns bool) evaluated per peer at admission; false rejects. In scope: peer (Peer), peers() (other members), cidrContains(cidr, addr) bool. See docs/quickstart.md.")
 	flag.Parse()
 
 	if *iface == "" || *endpoint == "" {
@@ -47,16 +47,24 @@ func main() {
 		slog.Error("endpoint template", "err", err)
 		os.Exit(1)
 	}
-	addressStr, err := sockaddr.Parse(*address)
-	if err != nil {
-		slog.Error("address template", "err", err)
-		os.Exit(1)
-	}
-
-	ip, err := resolveAddress(addressStr, *iface)
-	if err != nil {
-		slog.Error("resolve address", "err", err)
-		os.Exit(1)
+	var ip net.IP
+	if *address == "" {
+		ip, err = mesh.InterfaceAddress(*iface)
+		if err != nil {
+			slog.Error("address", "err", err)
+			os.Exit(1)
+		}
+	} else {
+		addressStr, err := sockaddr.Parse(*address)
+		if err != nil {
+			slog.Error("address template", "err", err)
+			os.Exit(1)
+		}
+		ip = net.ParseIP(addressStr)
+		if ip == nil {
+			slog.Error("address", "err", fmt.Errorf("--address %q resolved to %q, not an IP", *address, addressStr))
+			os.Exit(1)
+		}
 	}
 	host := mesh.HostRoute(ip)
 	allowed := []string{host.String()}
@@ -140,17 +148,6 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("wg-mesh stopped")
-}
-
-func resolveAddress(override, iface string) (net.IP, error) {
-	if override == "" {
-		return mesh.InterfaceAddress(iface)
-	}
-	ip := net.ParseIP(override)
-	if ip == nil {
-		return nil, fmt.Errorf("invalid --address %q", override)
-	}
-	return ip, nil
 }
 
 func reloadKeyringOnSIGHUP(ctx context.Context, m *mesh.Mesh, path string) {
