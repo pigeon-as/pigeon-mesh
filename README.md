@@ -48,6 +48,23 @@ wg set wg0 peer <base64-pubkey> \
 
 Existing kernel peers are used to bootstrap the gossip cluster.
 
+## Peer policy examples
+
+```
+# keep peers inside the overlay; without this a peer can advertise ::/0
+# and hijack the default route
+all(peer.AllowedIPs, cidrContains("fd00::/8", #))
+
+# lock each node to a single overlay address — no subnet or extra claims
+len(peer.AllowedIPs) == 1 && cidrContains("fd00::/8", peer.AllowedIPs[0])
+
+# a trusted gateway may advertise extra routes (a subnet, an exit); others confined
+peer.PublicKey == "<gateway-pubkey>" || all(peer.AllowedIPs, cidrContains("fd00::/8", #))
+
+# no address theft: reject any route another peer already claims
+all(peer.AllowedIPs, let r = #; none(peers(), r in #.AllowedIPs))
+```
+
 ## Encrypted gossip
 
 Pass `--gossip-key-file keys.json`:

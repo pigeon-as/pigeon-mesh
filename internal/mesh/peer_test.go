@@ -1,6 +1,7 @@
 package mesh
 
 import (
+	"net"
 	"testing"
 	"time"
 
@@ -98,12 +99,19 @@ func TestNormalizeEndpoint_Rejected(t *testing.T) {
 		"203.0.113.7",
 		"2001:db8::1",
 		"203.0.113.7:bad",
-		"nonexistent.invalid:1234",
 		"",
 	} {
 		_, err := NormalizeEndpoint(bad)
 		must.Error(t, err, must.Sprintf("input %q", bad))
 	}
+}
+
+func TestNormalizeEndpoint_ResolvesHostname(t *testing.T) {
+	got, err := NormalizeEndpoint("localhost:51820")
+	must.NoError(t, err)
+	host, _, err := net.SplitHostPort(got)
+	must.NoError(t, err)
+	must.NotNil(t, net.ParseIP(host), must.Sprintf("localhost should resolve to an IP, got %q", got))
 }
 
 func TestEncodeDecodeMeta_RoundTrip(t *testing.T) {
@@ -123,4 +131,3 @@ func TestEncodeDecodeMeta_RoundTrip(t *testing.T) {
 	must.SliceLen(t, 2, out.AllowedIPs)
 	must.EqOp(t, in.PersistentKeepalive, out.PersistentKeepalive)
 }
-

@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/hashicorp/go-msgpack/v2/codec"
-	"github.com/hashicorp/memberlist"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
@@ -35,16 +34,16 @@ func decodeMeta(b []byte, p *Peer) error {
 	return nil
 }
 
-func peerConfigFromNode(node *memberlist.Node) (wgtypes.PeerConfig, error) {
-	if len(node.Meta) == 0 {
+func peerConfigFromMeta(name string, meta []byte) (wgtypes.PeerConfig, error) {
+	if len(meta) == 0 {
 		return wgtypes.PeerConfig{}, fmt.Errorf("empty meta")
 	}
 	var p Peer
-	if err := decodeMeta(node.Meta, &p); err != nil {
+	if err := decodeMeta(meta, &p); err != nil {
 		return wgtypes.PeerConfig{}, err
 	}
-	if p.PublicKey != node.Name {
-		return wgtypes.PeerConfig{}, fmt.Errorf("meta pubkey mismatch: %q vs node name %q", p.PublicKey, node.Name)
+	if p.PublicKey != name {
+		return wgtypes.PeerConfig{}, fmt.Errorf("meta pubkey mismatch: %q vs node name %q", p.PublicKey, name)
 	}
 	return p.toWG()
 }
@@ -81,4 +80,3 @@ func (p Peer) toWG() (wgtypes.PeerConfig, error) {
 	}
 	return cfg, nil
 }
-
