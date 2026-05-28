@@ -19,27 +19,24 @@ const (
 )
 
 func TestScaling(t *testing.T) {
-	profiles := []struct {
-		name string
-		tag  string
-	}{
-		{"wan", "a"},
-		{"lan", "b"},
-	}
-	for _, p := range profiles {
-		t.Run(p.name, func(t *testing.T) {
-			for _, n := range []int{10, 20, 50, 75, 100} {
+	maxN := safeMaxNodes()
+	for _, profile := range []string{"wan", "lan"} {
+		t.Run(profile, func(t *testing.T) {
+			for _, n := range []int{10, 25, 50, 100, 200, 300, 400, 500, 1000, 2500, 5000} {
 				t.Run(fmt.Sprintf("N=%d", n), func(t *testing.T) {
-					nodes := buildCluster(t, fmt.Sprintf("%s%x", p.tag, n), port, n)
+					if n > maxN {
+						t.Skipf("N=%d over host ceiling %d", n, maxN)
+					}
+					nodes := buildCluster(t, port, n)
 					joinStart := time.Now()
-					cmds := bootstrap(t, nodes, port, seedCount, "--profile", p.name)
+					cmds := bootstrap(t, nodes, port, seedCount, "--profile", profile)
 					waitConverged(t, nodes, 600*time.Second)
 					converge := time.Since(joinStart)
 
 					m := measureCluster(t, cmds, 10*time.Second)
 					m.n = n
 					m.convergence = converge
-					t.Logf("profile=%s %s", p.name, m.String())
+					t.Logf("profile=%s %s", profile, m.String())
 				})
 			}
 		})
@@ -50,7 +47,7 @@ func TestScalingWAN(t *testing.T) {
 	const latencyMs = 50
 	for _, n := range []int{10, 20, 50, 100} {
 		t.Run(fmt.Sprintf("N=%d", n), func(t *testing.T) {
-			nodes := buildCluster(t, fmt.Sprintf("c%x", n), port, n)
+			nodes := buildCluster(t, port, n)
 			for _, node := range nodes {
 				applyLatency(t, node, latencyMs)
 			}
@@ -70,7 +67,7 @@ func TestScalingWAN(t *testing.T) {
 func TestFailureDetection(t *testing.T) {
 	for _, n := range []int{10, 20, 50} {
 		t.Run(fmt.Sprintf("N=%d", n), func(t *testing.T) {
-			nodes := buildCluster(t, fmt.Sprintf("b%x", n), port, n)
+			nodes := buildCluster(t, port, n)
 			cmds := bootstrap(t, nodes, port, seedCount)
 			waitConverged(t, nodes, 600*time.Second)
 
@@ -83,7 +80,7 @@ func TestFailureDetection(t *testing.T) {
 			cfg := memberlist.DefaultLANConfig()
 			maxSuspicion := time.Duration(cfg.SuspicionMult*cfg.SuspicionMaxTimeoutMult) * cfg.ProbeInterval
 			timeout := 60*time.Second + time.Duration(math.Log10(float64(n))*float64(maxSuspicion))
-			waitFor(t, "remove dead peer", timeout, func() bool {
+			waitFor(t, "remove dead peer", timeout, 500*time.Millisecond, func() bool {
 				for i, src := range nodes {
 					if i == target {
 						continue

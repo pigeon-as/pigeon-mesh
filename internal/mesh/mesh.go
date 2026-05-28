@@ -11,7 +11,6 @@ import (
 	"reflect"
 	"slices"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/hashicorp/memberlist"
@@ -22,6 +21,7 @@ import (
 const (
 	retryJoinInterval = 30 * time.Second
 	reconcileInterval = 30 * time.Second
+	coalesceInterval  = 200 * time.Millisecond
 	eventBuffer       = 2048
 )
 
@@ -42,24 +42,6 @@ type Mesh struct {
 	memberlist *memberlist.Memberlist
 	events     <-chan memberlist.NodeEvent
 	peers      map[string]wgtypes.PeerConfig
-	shutdownCh chan struct{}
-	closeOnce  sync.Once
-}
-
-func (m *Mesh) shutdown() {
-	m.closeOnce.Do(func() { close(m.shutdownCh) })
-}
-
-func (m *Mesh) handleNodeConflict(existing, other *memberlist.Node) {
-	if existing.Name != m.cfg.Self.PublicKey {
-		slog.Warn("node name conflict",
-			"name", existing.Name,
-			"existing", existing.Address(),
-			"other", other.Address())
-		return
-	}
-	slog.Error("self pubkey conflict", "other", other.Address())
-	m.shutdown()
 }
 
 func New(cfg Config) (*Mesh, error) {
@@ -80,11 +62,10 @@ func New(cfg Config) (*Mesh, error) {
 	events := make(chan memberlist.NodeEvent, eventBuffer)
 
 	m := &Mesh{
-		cfg:        cfg,
-		meta:       meta,
-		events:     events,
-		peers:      make(map[string]wgtypes.PeerConfig),
-		shutdownCh: make(chan struct{}),
+		cfg:    cfg,
+		meta:   meta,
+		events: events,
+		peers:  make(map[string]wgtypes.PeerConfig),
 	}
 
 	d := &delegate{mesh: m}
@@ -100,14 +81,21 @@ func New(cfg Config) (*Mesh, error) {
 		return nil, fmt.Errorf("profile %q: must be lan, wan, or local", cfg.Profile)
 	}
 	mc.Name = cfg.Self.PublicKey
-	mc.BindAddr = cfg.BindAddr
-	mc.BindPort = cfg.GossipPort
 	mc.Delegate = d
-	mc.Conflict = d
 	mc.Alive = d
 	mc.Events = &memberlist.ChannelEventDelegate{Ch: events}
 	mc.Keyring = cfg.Keyring
 	mc.Logger = newMemberlistLogger()
+
+	nt, err := memberlist.NewNetTransport(&memberlist.NetTransportConfig{
+		BindAddrs: []string{cfg.BindAddr},
+		BindPort:  cfg.GossipPort,
+		Logger:    mc.Logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("transport: %w", err)
+	}
+	mc.Transport = &wgTransport{nt}
 
 	ml, err := memberlist.Create(mc)
 	if err != nil {
@@ -136,35 +124,6 @@ func (m *Mesh) join() (int, error) {
 		return 0, nil
 	}
 	return m.memberlist.Join(targets)
-}
-
-func (m *Mesh) handleJoin(node *memberlist.Node) {
-	pc, err := peerConfigFromNode(node)
-	if err != nil {
-		slog.Warn("decode meta", "node", node.Name, "err", err)
-		return
-	}
-	if cached, ok := m.peers[node.Name]; ok && reflect.DeepEqual(cached, pc) {
-		return
-	}
-	if err := m.cfg.WG.Apply(m.cfg.Iface, []wgtypes.PeerConfig{pc}); err != nil {
-		slog.Warn("apply peer", "node", node.Name, "err", err)
-		return
-	}
-	m.peers[node.Name] = pc
-}
-
-func (m *Mesh) handleLeave(node *memberlist.Node) {
-	pk, err := wgtypes.ParseKey(node.Name)
-	if err != nil {
-		slog.Warn("parse pubkey", "node", node.Name, "err", err)
-		return
-	}
-	if err := m.cfg.WG.Apply(m.cfg.Iface, []wgtypes.PeerConfig{{PublicKey: pk, Remove: true}}); err != nil {
-		slog.Warn("apply leave", "node", node.Name, "err", err)
-		return
-	}
-	delete(m.peers, node.Name)
 }
 
 func diff(applied, desired map[string]wgtypes.PeerConfig) []wgtypes.PeerConfig {
@@ -225,28 +184,33 @@ func (m *Mesh) Run(ctx context.Context) error {
 		go m.retryJoin(ctx)
 	}
 
-	reconcileTicker := time.NewTicker(reconcileInterval)
-	defer reconcileTicker.Stop()
+	if err := m.reconcile(); err != nil {
+		slog.Warn("reconcile", "err", err)
+	}
+
+	backstop := time.NewTicker(reconcileInterval)
+	defer backstop.Stop()
+	var settle <-chan time.Time
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-m.shutdownCh:
-			return fmt.Errorf("self pubkey conflict")
-		case <-reconcileTicker.C:
-			if err := m.reconcile(); err != nil {
-				slog.Warn("reconcile", "err", err)
-			}
 		case ev := <-m.events:
 			if ev.Node.Name == m.cfg.Self.PublicKey {
 				continue
 			}
-			switch ev.Event {
-			case memberlist.NodeLeave:
-				m.handleLeave(ev.Node)
-			case memberlist.NodeJoin, memberlist.NodeUpdate:
-				m.handleJoin(ev.Node)
+			if settle == nil {
+				settle = time.After(coalesceInterval)
+			}
+		case <-settle:
+			settle = nil
+			if err := m.reconcile(); err != nil {
+				slog.Warn("reconcile", "err", err)
+			}
+		case <-backstop.C:
+			if err := m.reconcile(); err != nil {
+				slog.Warn("reconcile", "err", err)
 			}
 		}
 	}
@@ -299,8 +263,6 @@ func (m *Mesh) retryJoin(ctx context.Context) {
 		wait := backoff/2 + time.Duration(rand.Int64N(int64(backoff/2)))
 		select {
 		case <-ctx.Done():
-			return
-		case <-m.shutdownCh:
 			return
 		case <-time.After(wait):
 		}

@@ -14,9 +14,8 @@ type delegate struct {
 }
 
 var (
-	_ memberlist.Delegate         = (*delegate)(nil)
-	_ memberlist.ConflictDelegate = (*delegate)(nil)
-	_ memberlist.AliveDelegate    = (*delegate)(nil)
+	_ memberlist.Delegate      = (*delegate)(nil)
+	_ memberlist.AliveDelegate = (*delegate)(nil)
 )
 
 func (d *delegate) NodeMeta(int) []byte           { return d.mesh.meta }
@@ -25,12 +24,9 @@ func (*delegate) GetBroadcasts(int, int) [][]byte { return nil }
 func (*delegate) LocalState(bool) []byte          { return nil }
 func (*delegate) MergeRemoteState([]byte, bool)   {}
 
-func (d *delegate) NotifyConflict(existing, other *memberlist.Node) {
-	d.mesh.handleNodeConflict(existing, other)
-}
-
 func (d *delegate) NotifyAlive(node *memberlist.Node) error {
-	if d.mesh.cfg.PeerPolicy == nil {
+	policy := d.mesh.cfg.PeerPolicy
+	if policy == nil {
 		return nil
 	}
 	if node.Name == d.mesh.cfg.Self.PublicKey {
@@ -41,9 +37,9 @@ func (d *delegate) NotifyAlive(node *memberlist.Node) error {
 	}
 	var p Peer
 	if err := decodeMeta(node.Meta, &p); err != nil {
-		return nil
+		return err
 	}
-	ok, err := d.mesh.cfg.PeerPolicy.accept(p, node.Addr.String())
+	ok, err := policy.accept(p, node.Addr.String())
 	if err != nil {
 		slog.Warn("peer-policy eval", "node", node.Name, "err", err)
 		return err

@@ -75,6 +75,13 @@ Live state: `wg show <interface>`.
 Stop or crash the daemon; peers detect via SWIM probes (~30s in WAN
 config) and remove the WG entry.
 
+## Performance
+
+A joining node is visible cluster-wide within seconds, and a failed node is
+detected and dropped in a few seconds on the `lan` profile or ~30 s on the
+`wan` default. Both grow only logarithmically with cluster size, so it should stay
+responsive into the thousands.
+
 ## Build
 
 ```

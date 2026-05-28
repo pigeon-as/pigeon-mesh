@@ -115,12 +115,11 @@ func main() {
 		}
 	}
 	if *peerPolicy != "" {
-		policy, err := mesh.ParsePeerPolicy(*peerPolicy)
+		cfg.PeerPolicy, err = mesh.ParsePeerPolicy(*peerPolicy)
 		if err != nil {
 			slog.Error("peer-policy", "err", err)
 			os.Exit(1)
 		}
-		cfg.PeerPolicy = policy
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
