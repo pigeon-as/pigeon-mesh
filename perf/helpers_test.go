@@ -7,15 +7,19 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/shoenig/test/must"
 )
+
+const staggerInterval = 25 * time.Millisecond
 
 var (
 	meshBin string
@@ -30,12 +34,12 @@ func TestMain(m *testing.M) {
 	for _, kv := range []struct{ k, v string }{
 		{"net.bridge.bridge-nf-call-iptables", "0"},
 		{"net.bridge.bridge-nf-call-ip6tables", "0"},
-		{"net.ipv4.neigh.default.gc_thresh1", "2048"},
-		{"net.ipv4.neigh.default.gc_thresh2", "4096"},
-		{"net.ipv4.neigh.default.gc_thresh3", "8192"},
-		{"net.ipv6.neigh.default.gc_thresh1", "2048"},
-		{"net.ipv6.neigh.default.gc_thresh2", "4096"},
-		{"net.ipv6.neigh.default.gc_thresh3", "8192"},
+		{"net.ipv4.neigh.default.gc_thresh1", "8192"},
+		{"net.ipv4.neigh.default.gc_thresh2", "16384"},
+		{"net.ipv4.neigh.default.gc_thresh3", "32768"},
+		{"net.ipv6.neigh.default.gc_thresh1", "8192"},
+		{"net.ipv6.neigh.default.gc_thresh2", "16384"},
+		{"net.ipv6.neigh.default.gc_thresh3", "32768"},
 	} {
 		if out, err := exec.Command("sysctl", "-w", kv.k+"="+kv.v).CombinedOutput(); err != nil {
 			fmt.Fprintf(os.Stderr, "sysctl %s=%s: %v: %s\n", kv.k, kv.v, err, out)
@@ -66,7 +70,31 @@ func TestMain(m *testing.M) {
 		meshBin = p
 	}
 
+	sweepStaleClusters()
+
 	os.Exit(m.Run())
+}
+
+func sweepStaleClusters() {
+	exec.Command("pkill", "-9", "-f", meshBin).Run()
+
+	out, _ := exec.Command("ip", "netns", "list").Output()
+	for _, line := range strings.Split(string(out), "\n") {
+		if fields := strings.Fields(line); len(fields) > 0 && strings.HasPrefix(fields[0], "wgp") {
+			exec.Command("ip", "netns", "del", fields[0]).Run()
+		}
+	}
+
+	out, _ = exec.Command("ip", "-o", "link", "show").Output()
+	for _, line := range strings.Split(string(out), "\n") {
+		parts := strings.SplitN(line, ":", 3)
+		if len(parts) < 2 {
+			continue
+		}
+		if name, _, _ := strings.Cut(strings.TrimSpace(parts[1]), "@"); strings.HasPrefix(name, "wgp") {
+			exec.Command("ip", "link", "del", name).Run()
+		}
+	}
 }
 
 type node struct {
@@ -150,7 +178,7 @@ func newNode(t *testing.T, name, underlay, overlay string, port int, bridge stri
 	run(t, "ip", "link", "set", hostVeth, "master", bridge)
 	run(t, "ip", "link", "set", hostVeth, "up")
 	run(t, "ip", "link", "set", nsVeth, "netns", name)
-	runIn(t, name, "ip", "addr", "add", underlay+"/24", "dev", nsVeth)
+	runIn(t, name, "ip", "addr", "add", underlay+"/16", "dev", nsVeth)
 	runIn(t, name, "ip", "link", "set", nsVeth, "up")
 
 	priv, pub := genKeypair(t)
@@ -188,14 +216,14 @@ func startMesh(t *testing.T, n *node, peers []*node, port int, extraArgs ...stri
 	return cmd
 }
 
-func waitFor(t *testing.T, what string, timeout time.Duration, cond func() bool) {
+func waitFor(t *testing.T, what string, timeout, interval time.Duration, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return
 		}
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(interval)
 	}
 	t.Fatalf("timeout waiting for: %s (after %s)", what, timeout)
 }
@@ -213,26 +241,70 @@ func applyLatency(t *testing.T, n *node, ms int) {
 	runIn(t, n.ns, "tc", "qdisc", "add", "dev", n.ns+"-vn", "root", "netem", "delay", fmt.Sprintf("%dms", ms))
 }
 
-func buildCluster(t *testing.T, tag string, port, n int) []*node {
+var clusterSeq atomic.Uint32
+
+const (
+	nodesPerCore = 25
+	procBytes    = 16 << 20
+	napiBytes    = 20 << 10
+	memBudgetNum = 6
+	memBudgetDen = 10
+)
+
+func safeMaxNodes() int {
+	cpuCap := nodesPerCore * runtime.NumCPU()
+	memKB := memTotalKB()
+	if memKB <= 0 {
+		return cpuCap
+	}
+	budget := int64(memKB) * 1024 * memBudgetNum / memBudgetDen
+	memCap := 0
+	for n := 1; ; n++ {
+		need := int64(n)*procBytes + int64(n)*int64(n-1)*napiBytes
+		if need > budget {
+			break
+		}
+		memCap = n
+	}
+	if memCap < cpuCap {
+		return memCap
+	}
+	return cpuCap
+}
+
+func memTotalKB() int {
+	data, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "MemTotal:") {
+			if f := strings.Fields(line); len(f) >= 2 {
+				kb, _ := strconv.Atoi(f[1])
+				return kb
+			}
+		}
+	}
+	return 0
+}
+
+func buildCluster(t *testing.T, port, n int) []*node {
 	t.Helper()
 	skipIfNoNetns(t)
-	bridge := "perf-" + tag
+	id := clusterSeq.Add(1)
+	bridge := fmt.Sprintf("wgpbr%x", id)
 	newBridge(t, bridge)
 
 	nodes := make([]*node, n)
 	for i := 0; i < n; i++ {
-		name := fmt.Sprintf("perf-%s-%d", tag, i)
-		underlay := fmt.Sprintf("10.200.0.%d", i+1)
-		overlay := fmt.Sprintf("fd00:%s::%x", tag, i+1)
+		name := fmt.Sprintf("wgp%x-%d", id, i)
+		underlay := fmt.Sprintf("10.200.%d.%d", i/250, i%250+1)
+		overlay := fmt.Sprintf("fd00:%x::%x", id, i+1)
 		nodes[i] = newNode(t, name, underlay, overlay, port, bridge)
 	}
-	for _, src := range nodes {
-		for _, dst := range nodes {
-			if src == dst {
-				continue
-			}
-			runIn(t, src.ns, "ip", "-6", "route", "replace", dst.overlay+"/128", "dev", "wg0")
-		}
+	route := fmt.Sprintf("fd00:%x::/64", id)
+	for _, nd := range nodes {
+		runIn(t, nd.ns, "ip", "-6", "route", "replace", route, "dev", "wg0")
 	}
 	return nodes
 }
@@ -260,13 +332,14 @@ func bootstrap(t *testing.T, nodes []*node, port, seedCount int, extraArgs ...st
 			boot = seeds
 		}
 		cmds[i] = startMesh(t, n, boot, port, extraArgs...)
+		time.Sleep(staggerInterval)
 	}
 	return cmds
 }
 
 func waitConverged(t *testing.T, nodes []*node, timeout time.Duration) {
 	t.Helper()
-	waitFor(t, fmt.Sprintf("all %d see all peers", len(nodes)), timeout, func() bool {
+	waitFor(t, fmt.Sprintf("all %d see all peers", len(nodes)), timeout, 2*time.Second, func() bool {
 		peerLists := make([]string, len(nodes))
 		var wg sync.WaitGroup
 		for i, src := range nodes {
@@ -477,4 +550,3 @@ func readProcStat(pid int) (utime, stime uint64, err error) {
 	stime, err = strconv.ParseUint(fields[12], 10, 64)
 	return
 }
-
