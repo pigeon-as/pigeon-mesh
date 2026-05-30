@@ -156,7 +156,7 @@ func TestMesh_PeerPolicyRejects(t *testing.T) {
 	c := newNode(t, "wgmp-c", "10.130.0.3", "fd00:abc:c::1", 51820, "wgmp-br")
 
 	startMesh(t, a, []*node{b}, 51820,
-		"--peer-policy", `all(peer.AllowedIPs, cidrContains("fd00:abc:b::/64", #))`)
+		"--peer-policy", `all(peer.AllowedIPs, cidrSubset("fd00:abc:b::/64", #))`)
 	startMesh(t, b, []*node{a, c}, 51820)
 	startMesh(t, c, []*node{b}, 51820)
 

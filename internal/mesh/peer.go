@@ -2,8 +2,10 @@ package mesh
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"time"
 
 	"github.com/hashicorp/go-msgpack/v2/codec"
@@ -11,10 +13,11 @@ import (
 )
 
 type Peer struct {
-	PublicKey           string   `codec:"public_key"`
-	Endpoint            string   `codec:"endpoint"`
-	AllowedIPs          []string `codec:"allowed_ips"`
-	PersistentKeepalive int      `codec:"persistent_keepalive,omitempty"`
+	PublicKey           string   `codec:"pk"`
+	Endpoint            string   `codec:"ep"`
+	AllowedIPs          []string `codec:"ai"`
+	PersistentKeepalive int      `codec:"k,omitempty"`
+	Tags                Tags     `codec:"t,omitempty"`
 }
 
 var msgpackHandle = &codec.MsgpackHandle{}
@@ -34,18 +37,15 @@ func decodeMeta(b []byte, p *Peer) error {
 	return nil
 }
 
-func peerConfigFromMeta(name string, meta []byte) (wgtypes.PeerConfig, error) {
-	if len(meta) == 0 {
-		return wgtypes.PeerConfig{}, fmt.Errorf("empty meta")
-	}
+func decodePeer(name string, meta []byte) (Peer, error) {
 	var p Peer
 	if err := decodeMeta(meta, &p); err != nil {
-		return wgtypes.PeerConfig{}, err
+		return Peer{}, err
 	}
 	if p.PublicKey != name {
-		return wgtypes.PeerConfig{}, fmt.Errorf("meta pubkey mismatch: %q vs node name %q", p.PublicKey, name)
+		return Peer{}, fmt.Errorf("meta pubkey mismatch: %q vs node name %q", p.PublicKey, name)
 	}
-	return p.toWG()
+	return p, nil
 }
 
 func (p Peer) toWG() (wgtypes.PeerConfig, error) {
@@ -53,24 +53,27 @@ func (p Peer) toWG() (wgtypes.PeerConfig, error) {
 	if err != nil {
 		return wgtypes.PeerConfig{}, fmt.Errorf("public_key: %w", err)
 	}
-	ip, port, err := parseIPPort(p.Endpoint)
+	ap, err := netip.ParseAddrPort(p.Endpoint)
 	if err != nil {
-		return wgtypes.PeerConfig{}, err
+		return wgtypes.PeerConfig{}, fmt.Errorf("endpoint %q: %w", p.Endpoint, err)
+	}
+	if ap.Port() == 0 {
+		return wgtypes.PeerConfig{}, fmt.Errorf("endpoint %q: port 0 invalid", p.Endpoint)
 	}
 	if len(p.AllowedIPs) == 0 {
-		return wgtypes.PeerConfig{}, fmt.Errorf("allowed_ips required")
+		return wgtypes.PeerConfig{}, errors.New("allowed_ips required")
 	}
 	nets := make([]net.IPNet, 0, len(p.AllowedIPs))
 	for _, c := range p.AllowedIPs {
-		_, n, err := net.ParseCIDR(c)
+		pfx, err := netip.ParsePrefix(c)
 		if err != nil {
 			return wgtypes.PeerConfig{}, fmt.Errorf("allowed_ip %q: %w", c, err)
 		}
-		nets = append(nets, *n)
+		nets = append(nets, net.IPNet{IP: pfx.Addr().AsSlice(), Mask: net.CIDRMask(pfx.Bits(), pfx.Addr().BitLen())})
 	}
 	cfg := wgtypes.PeerConfig{
 		PublicKey:         key,
-		Endpoint:          &net.UDPAddr{IP: ip, Port: port},
+		Endpoint:          net.UDPAddrFromAddrPort(ap),
 		ReplaceAllowedIPs: true,
 		AllowedIPs:        nets,
 	}

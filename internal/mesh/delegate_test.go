@@ -29,7 +29,7 @@ func TestDelegate_NotifyAlive_NilPolicyAccepts(t *testing.T) {
 }
 
 func TestDelegate_NotifyAlive_PolicyAccepts(t *testing.T) {
-	policy, err := ParsePeerPolicy(`all(peer.AllowedIPs, cidrContains("fdcc::/16", #))`)
+	policy, err := ParsePeerPolicy(`all(peer.AllowedIPs, cidrSubset("fdcc::/16", #))`)
 	must.NoError(t, err)
 	m := &Mesh{cfg: Config{Self: Peer{PublicKey: "self"}, PeerPolicy: policy}}
 	d := &delegate{mesh: m}
@@ -38,7 +38,7 @@ func TestDelegate_NotifyAlive_PolicyAccepts(t *testing.T) {
 }
 
 func TestDelegate_NotifyAlive_PolicyRejects(t *testing.T) {
-	policy, err := ParsePeerPolicy(`all(peer.AllowedIPs, cidrContains("fdcc::/16", #))`)
+	policy, err := ParsePeerPolicy(`all(peer.AllowedIPs, cidrSubset("fdcc::/16", #))`)
 	must.NoError(t, err)
 	m := &Mesh{cfg: Config{Self: Peer{PublicKey: "self"}, PeerPolicy: policy}}
 	d := &delegate{mesh: m}

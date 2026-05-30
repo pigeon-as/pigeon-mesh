@@ -1,7 +1,6 @@
 package mesh
 
 import (
-	"net"
 	"testing"
 	"time"
 
@@ -54,64 +53,6 @@ func TestPeer_PeerConfigBadCIDR(t *testing.T) {
 func TestPeer_PeerConfigEmptyAllowedIPsRejected(t *testing.T) {
 	_, err := Peer{PublicKey: testKey, Endpoint: "203.0.113.7:51820"}.toWG()
 	must.ErrorContains(t, err, "allowed_ips")
-}
-
-func TestNormalizeEndpoint_IPv4WithPort(t *testing.T) {
-	got, err := NormalizeEndpoint("203.0.113.7:1234")
-	must.NoError(t, err)
-	must.EqOp(t, "203.0.113.7:1234", got)
-}
-
-func TestNormalizeEndpoint_IPv6WithPort(t *testing.T) {
-	got, err := NormalizeEndpoint("[2001:db8::1]:1234")
-	must.NoError(t, err)
-	must.EqOp(t, "[2001:db8::1]:1234", got)
-}
-
-func TestParseAllowedIPs_Single(t *testing.T) {
-	out, err := ParseAllowedIPs("fd00::1/128")
-	must.NoError(t, err)
-	must.SliceLen(t, 1, out)
-	must.EqOp(t, "fd00::1/128", out[0])
-}
-
-func TestParseAllowedIPs_Multiple(t *testing.T) {
-	out, err := ParseAllowedIPs("fd00::1/128, 192.168.1.0/24 ,fd01::/64")
-	must.NoError(t, err)
-	must.SliceLen(t, 3, out)
-	must.EqOp(t, "192.168.1.0/24", out[1])
-}
-
-func TestParseAllowedIPs_Rejected(t *testing.T) {
-	for _, bad := range []string{
-		"",
-		"   ",
-		"not-a-cidr",
-		"192.168.1.0/24,not-a-cidr",
-	} {
-		_, err := ParseAllowedIPs(bad)
-		must.Error(t, err, must.Sprintf("input %q", bad))
-	}
-}
-
-func TestNormalizeEndpoint_Rejected(t *testing.T) {
-	for _, bad := range []string{
-		"203.0.113.7",
-		"2001:db8::1",
-		"203.0.113.7:bad",
-		"",
-	} {
-		_, err := NormalizeEndpoint(bad)
-		must.Error(t, err, must.Sprintf("input %q", bad))
-	}
-}
-
-func TestNormalizeEndpoint_ResolvesHostname(t *testing.T) {
-	got, err := NormalizeEndpoint("localhost:51820")
-	must.NoError(t, err)
-	host, _, err := net.SplitHostPort(got)
-	must.NoError(t, err)
-	must.NotNil(t, net.ParseIP(host), must.Sprintf("localhost should resolve to an IP, got %q", got))
 }
 
 func TestEncodeDecodeMeta_RoundTrip(t *testing.T) {

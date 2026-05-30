@@ -10,7 +10,7 @@ import (
 )
 
 func Run(ctx context.Context) {
-	_, _ = daemon.SdNotify(false, daemon.SdNotifyReady)
+	daemon.SdNotify(false, daemon.SdNotifyReady)
 	defer daemon.SdNotify(false, daemon.SdNotifyStopping)
 
 	interval, err := daemon.SdWatchdogEnabled(false)
@@ -25,7 +25,7 @@ func Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			_, _ = daemon.SdNotify(false, daemon.SdNotifyWatchdog)
+			daemon.SdNotify(false, daemon.SdNotifyWatchdog)
 		}
 	}
 }

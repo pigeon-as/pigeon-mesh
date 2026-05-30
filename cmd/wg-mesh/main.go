@@ -5,9 +5,8 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
 	"log/slog"
-	"net"
+	"net/netip"
 	"os"
 	"os/signal"
 	"slices"
@@ -22,7 +21,7 @@ import (
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
-	iface := flag.String("interface", "", "existing WireGuard interface (required)")
+	iface := flag.String("interface", "", "existing WireGuard interface (required); bootstrap peers need a /128 or /32 first in AllowedIPs")
 	endpoint := flag.String("endpoint", "", "this node's Endpoint as host:port; hostnames resolved at startup; go-sockaddr templates evaluated (required)")
 	address := flag.String("address", "", "this node's overlay IP; go-sockaddr templates evaluated; auto-detected from --interface if unset")
 	extraAllowedIPs := flag.String("extra-allowed-ips", "", "extra CIDRs to advertise alongside this node's host route, comma-separated")
@@ -30,11 +29,21 @@ func main() {
 	gossipKeyFile := flag.String("gossip-key-file", "", "JSON file of base64-encoded gossip encryption keys")
 	persistentKeepalive := flag.Int("persistent-keepalive", 0, "PersistentKeepalive interval in seconds advertised to peers (0 disables)")
 	profile := flag.String("profile", "wan", "memberlist timing profile: lan, wan, or local")
-	peerPolicy := flag.String("peer-policy", "", "expr predicate (returns bool) evaluated per peer at admission; false rejects. In scope: peer (Peer), peers() (other members), cidrContains(cidr, addr) bool. See docs/quickstart.md.")
+	peerPolicy := flag.String("peer-policy", "", "expr predicate (returns bool) evaluated per peer at admission; false rejects. In scope: peer (Peer), peers() (other members), cidrSubset(outer, inner) bool. See docs/quickstart.md.")
+	peersFile := flag.String("peers-file", "", "path for the peers projection file (atomic rewrite on membership change); empty disables")
+	var tagFlags []string
+	flag.Func("tag", "tag for this node, repeatable as k=v", func(v string) error {
+		tagFlags = append(tagFlags, v)
+		return nil
+	})
 	flag.Parse()
 
-	if *iface == "" || *endpoint == "" {
-		slog.Error("missing required flag", "need", "--interface --endpoint")
+	if *iface == "" {
+		slog.Error("missing required flag --interface")
+		os.Exit(2)
+	}
+	if *endpoint == "" {
+		slog.Error("missing required flag --endpoint")
 		os.Exit(2)
 	}
 	if *persistentKeepalive < 0 || *persistentKeepalive > 65535 {
@@ -47,7 +56,7 @@ func main() {
 		slog.Error("endpoint template", "err", err)
 		os.Exit(1)
 	}
-	var ip net.IP
+	var ip netip.Addr
 	if *address == "" {
 		ip, err = mesh.InterfaceAddress(*iface)
 		if err != nil {
@@ -60,9 +69,9 @@ func main() {
 			slog.Error("address template", "err", err)
 			os.Exit(1)
 		}
-		ip = net.ParseIP(addressStr)
-		if ip == nil {
-			slog.Error("address", "err", fmt.Errorf("--address %q resolved to %q, not an IP", *address, addressStr))
+		ip, err = netip.ParseAddr(addressStr)
+		if err != nil {
+			slog.Error("address template resolved to non-IP", "address", *address, "resolved", addressStr, "err", err)
 			os.Exit(1)
 		}
 	}
@@ -100,11 +109,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	tags, err := mesh.ParseTags(tagFlags)
+	if err != nil {
+		slog.Error("tag", "err", err)
+		os.Exit(2)
+	}
+
 	self := mesh.Peer{
 		PublicKey:           publicKey.String(),
 		Endpoint:            ep,
 		AllowedIPs:          allowed,
 		PersistentKeepalive: *persistentKeepalive,
+		Tags:                tags,
 	}
 
 	cfg := mesh.Config{
@@ -112,6 +128,7 @@ func main() {
 		GossipPort: *gossipPort,
 		BindAddr:   ip.String(),
 		Profile:    *profile,
+		PeersFile:  *peersFile,
 		Self:       self,
 		WG:         wgc,
 	}
@@ -140,7 +157,9 @@ func main() {
 	}
 
 	go sdnotify.Run(ctx)
-	go reloadKeyringOnSIGHUP(ctx, m, *gossipKeyFile)
+	if *gossipKeyFile != "" {
+		go reloadKeyringOnSIGHUP(ctx, m, *gossipKeyFile)
+	}
 
 	slog.Info("wg-mesh up", "interface", *iface, "endpoint", ep, "address", ip.String())
 	if err := m.Run(ctx); err != nil {
@@ -151,9 +170,6 @@ func main() {
 }
 
 func reloadKeyringOnSIGHUP(ctx context.Context, m *mesh.Mesh, path string) {
-	if path == "" {
-		return
-	}
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGHUP)
 	defer signal.Stop(sig)
