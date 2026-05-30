@@ -1,34 +1,41 @@
 package mesh
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net"
-	"strconv"
+	"net/netip"
+	"slices"
 	"strings"
 )
 
-func InterfaceAddress(iface string) (net.IP, error) {
+func InterfaceAddress(iface string) (netip.Addr, error) {
 	ifi, err := net.InterfaceByName(iface)
 	if err != nil {
-		return nil, fmt.Errorf("interface %q: %w", iface, err)
+		return netip.Addr{}, fmt.Errorf("interface %q: %w", iface, err)
 	}
 	addrs, err := ifi.Addrs()
 	if err != nil {
-		return nil, fmt.Errorf("interface %q addrs: %w", iface, err)
+		return netip.Addr{}, fmt.Errorf("interface %q addrs: %w", iface, err)
 	}
-	var found net.IP
+	var found netip.Addr
 	for _, a := range addrs {
-		n, ok := a.(*net.IPNet)
-		if !ok || !n.IP.IsGlobalUnicast() {
+		pfx, err := netip.ParsePrefix(a.String())
+		if err != nil {
 			continue
 		}
-		if found != nil {
-			return nil, fmt.Errorf("interface %q has multiple global addresses; pass --address", iface)
+		addr := pfx.Addr()
+		if !addr.IsGlobalUnicast() {
+			continue
 		}
-		found = n.IP
+		if found.IsValid() {
+			return netip.Addr{}, fmt.Errorf("interface %q has multiple global addresses; pass --address", iface)
+		}
+		found = addr
 	}
-	if found == nil {
-		return nil, fmt.Errorf("interface %q has no global address; pass --address", iface)
+	if !found.IsValid() {
+		return netip.Addr{}, fmt.Errorf("interface %q has no global address; pass --address", iface)
 	}
 	return found, nil
 }
@@ -40,72 +47,64 @@ func ParseAllowedIPs(s string) ([]string, error) {
 		if c == "" {
 			continue
 		}
-		if _, _, err := net.ParseCIDR(c); err != nil {
+		if _, err := netip.ParsePrefix(c); err != nil {
 			return nil, fmt.Errorf("allowed-ips %q: %w", c, err)
 		}
 		out = append(out, c)
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("at least one CIDR required")
+		return nil, errors.New("at least one CIDR required")
 	}
 	return out, nil
 }
 
-func HostRoute(ip net.IP) net.IPNet {
-	bits := 128
-	if v4 := ip.To4(); v4 != nil {
-		ip = v4
-		bits = 32
-	}
-	return net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)}
+func HostRoute(a netip.Addr) netip.Prefix {
+	return netip.PrefixFrom(a, a.BitLen())
 }
 
 func NormalizeEndpoint(s string) (string, error) {
+	if ap, err := netip.ParseAddrPort(s); err == nil {
+		return ap.String(), nil
+	}
 	host, portStr, err := net.SplitHostPort(s)
 	if err != nil {
 		return "", fmt.Errorf("endpoint %q: %w", s, err)
 	}
-	port, err := parsePort(portStr)
+	addrs, err := net.DefaultResolver.LookupNetIP(context.Background(), "ip", host)
+	if err != nil {
+		return "", fmt.Errorf("endpoint %q: resolve %q: %w", s, host, err)
+	}
+	pick, ok := pickEndpointAddr(addrs)
+	if !ok {
+		return "", fmt.Errorf("endpoint %q: %q resolved to no addresses", s, host)
+	}
+	ap, err := netip.ParseAddrPort(net.JoinHostPort(pick.String(), portStr))
 	if err != nil {
 		return "", fmt.Errorf("endpoint %q: %w", s, err)
 	}
-	ip := net.ParseIP(host)
-	if ip == nil {
-		ips, err := net.LookupIP(host)
-		if err != nil {
-			return "", fmt.Errorf("endpoint %q: resolve %q: %w", s, host, err)
-		}
-		if len(ips) == 0 {
-			return "", fmt.Errorf("endpoint %q: %q resolved to no addresses", s, host)
-		}
-		ip = ips[0]
-	}
-	return net.JoinHostPort(ip.String(), strconv.Itoa(port)), nil
+	return ap.String(), nil
 }
 
-func parseIPPort(s string) (net.IP, int, error) {
-	host, portStr, err := net.SplitHostPort(s)
-	if err != nil {
-		return nil, 0, fmt.Errorf("endpoint %q: %w", s, err)
+func pickEndpointAddr(addrs []netip.Addr) (netip.Addr, bool) {
+	var v4, v6 []netip.Addr
+	for _, a := range addrs {
+		a = a.Unmap()
+		if !a.IsValid() {
+			continue
+		}
+		if a.Is6() {
+			v6 = append(v6, a)
+		} else {
+			v4 = append(v4, a)
+		}
 	}
-	port, err := parsePort(portStr)
-	if err != nil {
-		return nil, 0, fmt.Errorf("endpoint %q: %w", s, err)
+	pick := v6
+	if len(pick) == 0 {
+		pick = v4
 	}
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return nil, 0, fmt.Errorf("endpoint %q: host %q is not an IP address", s, host)
+	if len(pick) == 0 {
+		return netip.Addr{}, false
 	}
-	return ip, port, nil
-}
-
-func parsePort(s string) (int, error) {
-	port, err := strconv.Atoi(s)
-	if err != nil {
-		return 0, fmt.Errorf("invalid port %q", s)
-	}
-	if port < 1 || port > 65535 {
-		return 0, fmt.Errorf("port %d out of range", port)
-	}
-	return port, nil
+	slices.SortFunc(pick, func(a, b netip.Addr) int { return a.Compare(b) })
+	return pick[0], true
 }

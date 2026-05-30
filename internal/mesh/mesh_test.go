@@ -149,19 +149,19 @@ func encodedMeta(t *testing.T, pubkey, hostRouteCIDR string) []byte {
 	return meta
 }
 
-func TestPeerConfigFromMeta_Accepts(t *testing.T) {
+func TestDecodePeer_Accepts(t *testing.T) {
 	pk, err := wgtypes.GeneratePrivateKey()
 	must.NoError(t, err)
 	pubkey := pk.PublicKey().String()
-	_, err = peerConfigFromMeta(pubkey, encodedMeta(t, pubkey, "fdcc::dead/128"))
+	_, err = decodePeer(pubkey, encodedMeta(t, pubkey, "fdcc::dead/128"))
 	must.NoError(t, err)
 }
 
-func TestPeerConfigFromMeta_PubkeyMismatch(t *testing.T) {
+func TestDecodePeer_PubkeyMismatch(t *testing.T) {
 	pk, err := wgtypes.GeneratePrivateKey()
 	must.NoError(t, err)
 	pubkey := pk.PublicKey().String()
-	_, err = peerConfigFromMeta("different-name", encodedMeta(t, pubkey, "fdcc::dead/128"))
+	_, err = decodePeer("different-name", encodedMeta(t, pubkey, "fdcc::dead/128"))
 	must.ErrorContains(t, err, "mismatch")
 }
 
@@ -171,17 +171,23 @@ func TestDiff(t *testing.T) {
 		must.NoError(t, err)
 		return pk.PublicKey().String()
 	}
+	makeMember := func(pubkey, cidr string) member {
+		meta := encodedMeta(t, pubkey, cidr)
+		var p Peer
+		must.NoError(t, decodeMeta(meta, &p))
+		return member{meta: meta, peer: p}
+	}
 	x, y, z, w := genKey(), genKey(), genKey(), genKey()
 
-	prev := map[string][]byte{
-		x: encodedMeta(t, x, "fd00::1/128"),
-		y: encodedMeta(t, y, "fd00::2/128"),
-		w: encodedMeta(t, w, "fd00::4/128"),
+	prev := map[string]member{
+		x: makeMember(x, "fd00::1/128"),
+		y: makeMember(y, "fd00::2/128"),
+		w: makeMember(w, "fd00::4/128"),
 	}
-	cur := map[string][]byte{
-		x: encodedMeta(t, x, "fd00::1/128"), // unchanged
-		z: encodedMeta(t, z, "fd00::3/128"), // new
-		w: encodedMeta(t, w, "fd00::5/128"), // changed
+	cur := map[string]member{
+		x: makeMember(x, "fd00::1/128"),
+		z: makeMember(z, "fd00::3/128"),
+		w: makeMember(w, "fd00::5/128"),
 	}
 
 	changes := diff(prev, cur)
@@ -197,5 +203,5 @@ func TestDiff(t *testing.T) {
 	must.EqOp(t, 2, adds, must.Sprint("new Z and changed W are applied"))
 	must.EqOp(t, 1, removes, must.Sprint("Y is removed"))
 
-	must.SliceEmpty(t, diff(cur, cur)) // identical state is a no-op
+	must.SliceEmpty(t, diff(cur, cur))
 }

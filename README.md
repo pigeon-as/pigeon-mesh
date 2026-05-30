@@ -10,7 +10,7 @@ gossip cluster.
 wg-mesh \
   --interface wg0 \
   --endpoint 203.0.113.1:51820 \
-  --peer-policy 'all(peer.AllowedIPs, cidrContains("fd00::/8", #))'
+  --peer-policy 'all(peer.AllowedIPs, cidrSubset("fd00::/8", #))'
 ```
 
 `wg-mesh --help` lists the full flag set.
@@ -37,7 +37,7 @@ each node's IPv6 overlay address from its WireGuard public key.
 
 Add bootstrap peers to the kernel first ([wg-quick](https://man.archlinux.org/man/wg-quick.8),
 [systemd-networkd](https://www.freedesktop.org/software/systemd/man/systemd.netdev.html),
-or `wg set`). Each peer needs a host route (`/32` or `/128`) in
+or `wg set`). Each peer needs a host route (`/32` or `/128`) first in
 `AllowedIPs`:
 
 ```
@@ -53,13 +53,13 @@ Existing kernel peers are used to bootstrap the gossip cluster.
 ```
 # keep peers inside the overlay; without this a peer can advertise ::/0
 # and hijack the default route
-all(peer.AllowedIPs, cidrContains("fd00::/8", #))
+all(peer.AllowedIPs, cidrSubset("fd00::/8", #))
 
 # lock each node to a single overlay address — no subnet or extra claims
-len(peer.AllowedIPs) == 1 && cidrContains("fd00::/8", peer.AllowedIPs[0])
+len(peer.AllowedIPs) == 1 && cidrSubset("fd00::/8", peer.AllowedIPs[0])
 
 # a trusted gateway may advertise extra routes (a subnet, an exit); others confined
-peer.PublicKey == "<gateway-pubkey>" || all(peer.AllowedIPs, cidrContains("fd00::/8", #))
+peer.PublicKey == "<gateway-pubkey>" || all(peer.AllowedIPs, cidrSubset("fd00::/8", #))
 
 # no address theft: reject any route another peer already claims
 all(peer.AllowedIPs, let r = #; none(peers(), r in #.AllowedIPs))
@@ -98,6 +98,10 @@ A joining node is visible cluster-wide within seconds, and a failed node is
 detected and dropped in a few seconds on the `lan` profile or ~30 s on the
 `wan` default. Both grow only logarithmically with cluster size, so it should stay
 responsive into the thousands.
+
+## Limitations
+
+Tags and extra AllowedIPs are limited to ~20 entries combined.
 
 ## Build
 

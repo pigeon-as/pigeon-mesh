@@ -14,9 +14,10 @@ type delegate struct {
 }
 
 var (
-	_ memberlist.Delegate      = (*delegate)(nil)
-	_ memberlist.AliveDelegate = (*delegate)(nil)
-	_ memberlist.EventDelegate = (*delegate)(nil)
+	_ memberlist.Delegate         = (*delegate)(nil)
+	_ memberlist.AliveDelegate    = (*delegate)(nil)
+	_ memberlist.EventDelegate    = (*delegate)(nil)
+	_ memberlist.ConflictDelegate = (*delegate)(nil)
 )
 
 func (d *delegate) NodeMeta(int) []byte           { return d.mesh.meta }
@@ -29,6 +30,10 @@ func (d *delegate) NotifyJoin(n *memberlist.Node)   { d.mesh.setMember(n) }
 func (d *delegate) NotifyUpdate(n *memberlist.Node) { d.mesh.setMember(n) }
 func (d *delegate) NotifyLeave(n *memberlist.Node)  { d.mesh.removeMember(n) }
 
+func (d *delegate) NotifyConflict(existing, other *memberlist.Node) {
+	d.mesh.handleNodeConflict(existing, other)
+}
+
 func (d *delegate) NotifyAlive(node *memberlist.Node) error {
 	policy := d.mesh.cfg.PeerPolicy
 	if policy == nil {
@@ -40,8 +45,8 @@ func (d *delegate) NotifyAlive(node *memberlist.Node) error {
 	if len(node.Meta) == 0 {
 		return nil
 	}
-	var p Peer
-	if err := decodeMeta(node.Meta, &p); err != nil {
+	p, err := decodePeer(node.Name, node.Meta)
+	if err != nil {
 		return err
 	}
 	peers := func() []Peer { return d.mesh.peerSnapshot(node.Name) }

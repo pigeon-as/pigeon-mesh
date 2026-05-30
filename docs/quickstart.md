@@ -16,7 +16,7 @@ ip link set wg0 up
 
 wg-mesh --interface wg0 \
   --endpoint '[{{ GetPublicInterfaces | include "type" "IPv6" | limit 1 | attr "address" }}]:51820' \
-  --peer-policy 'all(peer.AllowedIPs, cidrContains("fdcc::/16", #))'
+  --peer-policy 'all(peer.AllowedIPs, cidrSubset("fdcc::/16", #))'
 ```
 
 ## Adding a peer

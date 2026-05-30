@@ -95,4 +95,3 @@ func TestFailureDetection(t *testing.T) {
 		})
 	}
 }
-

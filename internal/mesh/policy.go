@@ -2,7 +2,7 @@ package mesh
 
 import (
 	"fmt"
-	"net"
+	"net/netip"
 
 	"github.com/expr-lang/expr"
 	"github.com/expr-lang/expr/vm"
@@ -17,9 +17,9 @@ func ParsePeerPolicy(s string) (*PeerPolicy, error) {
 	prog, err := expr.Compile(s,
 		expr.AsBool(),
 		expr.Env(map[string]any{
-			"peer":         Peer{},
-			"peers":        func() []Peer { return nil },
-			"cidrContains": cidrContains,
+			"peer":       Peer{},
+			"peers":      func() []Peer { return nil },
+			"cidrSubset": cidrSubset,
 		}),
 	)
 	if err != nil {
@@ -30,28 +30,36 @@ func ParsePeerPolicy(s string) (*PeerPolicy, error) {
 
 func (p *PeerPolicy) accept(peer Peer, peers func() []Peer) (bool, error) {
 	out, err := expr.Run(p.program, map[string]any{
-		"peer":         peer,
-		"peers":        peers,
-		"cidrContains": cidrContains,
+		"peer":       peer,
+		"peers":      peers,
+		"cidrSubset": cidrSubset,
 	})
 	if err != nil {
 		return false, fmt.Errorf("peer-policy: %w", err)
 	}
-	return out.(bool), nil
+	b, ok := out.(bool)
+	if !ok {
+		return false, fmt.Errorf("peer-policy: result %T not bool", out)
+	}
+	return b, nil
 }
 
-func cidrContains(cidr, addr string) bool {
-	_, n, err := net.ParseCIDR(cidr)
+// cidrSubset reports whether inner is a cidrSubset of outer, matching the semantics of
+// Vault's cidrutil.Subset: inner's prefix must be at least as specific as
+// outer's, and inner's network address must lie inside outer. A bare IP is
+// treated as a /32 or /128 prefix.
+func cidrSubset(outer, inner string) bool {
+	o, err := netip.ParsePrefix(outer)
 	if err != nil {
 		return false
 	}
-	ip := parseIPOrCIDR(addr)
-	return ip != nil && n.Contains(ip)
-}
-
-func parseIPOrCIDR(s string) net.IP {
-	if ip, _, err := net.ParseCIDR(s); err == nil {
-		return ip
+	var i netip.Prefix
+	if p, err := netip.ParsePrefix(inner); err == nil {
+		i = p
+	} else if a, err := netip.ParseAddr(inner); err == nil {
+		i = netip.PrefixFrom(a, a.BitLen())
+	} else {
+		return false
 	}
-	return net.ParseIP(s)
+	return i.Bits() >= o.Bits() && o.Contains(i.Addr())
 }

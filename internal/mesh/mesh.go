@@ -5,12 +5,12 @@ package mesh
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
 	"math/rand/v2"
 	"net"
-	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -30,10 +30,16 @@ type Config struct {
 	GossipPort int
 	BindAddr   string
 	Profile    string
+	PeersFile  string
 	Self       Peer
 	Keyring    *memberlist.Keyring
 	WG         *wg.Client
 	PeerPolicy *PeerPolicy
+}
+
+type member struct {
+	meta []byte
+	peer Peer
 }
 
 type Mesh struct {
@@ -41,17 +47,17 @@ type Mesh struct {
 	meta        []byte
 	memberlist  *memberlist.Memberlist
 	mu          sync.RWMutex
-	members     map[string][]byte
-	peers       map[string][]byte
+	members     map[string]member
+	peers       map[string]member
 	reconcileCh chan struct{}
 }
 
 func New(cfg Config) (*Mesh, error) {
 	if cfg.WG == nil {
-		return nil, fmt.Errorf("no wgctrl client configured")
+		return nil, errors.New("no wgctrl client configured")
 	}
 	if cfg.BindAddr == "" {
-		return nil, fmt.Errorf("no bind addr configured")
+		return nil, errors.New("no bind addr configured")
 	}
 	meta, err := encodeMeta(cfg.Self)
 	if err != nil {
@@ -64,8 +70,8 @@ func New(cfg Config) (*Mesh, error) {
 	m := &Mesh{
 		cfg:         cfg,
 		meta:        meta,
-		members:     make(map[string][]byte),
-		peers:       make(map[string][]byte),
+		members:     make(map[string]member),
+		peers:       make(map[string]member),
 		reconcileCh: make(chan struct{}, 1),
 	}
 
@@ -85,6 +91,7 @@ func New(cfg Config) (*Mesh, error) {
 	mc.Delegate = d
 	mc.Alive = d
 	mc.Events = d
+	mc.Conflict = d
 	mc.Keyring = cfg.Keyring
 	mc.Logger = newMemberlistLogger()
 
@@ -113,12 +120,17 @@ func (m *Mesh) join() (int, error) {
 	}
 	targets := make([]string, 0, len(peers))
 	for _, p := range peers {
+		var added bool
 		for _, ipnet := range p.AllowedIPs {
 			ones, bits := ipnet.Mask.Size()
 			if ones == bits {
 				targets = append(targets, net.JoinHostPort(ipnet.IP.String(), strconv.Itoa(m.cfg.GossipPort)))
+				added = true
 				break
 			}
+		}
+		if !added {
+			slog.Warn("bootstrap peer has no host route in AllowedIPs; skipping", "pubkey", p.PublicKey.String())
 		}
 	}
 	if len(targets) == 0 {
@@ -127,26 +139,26 @@ func (m *Mesh) join() (int, error) {
 	return m.memberlist.Join(targets)
 }
 
-func diff(prev, cur map[string][]byte) []wgtypes.PeerConfig {
+func diff(prev, cur map[string]member) []wgtypes.PeerConfig {
 	var changes []wgtypes.PeerConfig
-	for key, meta := range cur {
-		if bytes.Equal(prev[key], meta) {
+	for name, e := range cur {
+		if prevEntry, ok := prev[name]; ok && bytes.Equal(prevEntry.meta, e.meta) {
 			continue
 		}
-		pc, err := peerConfigFromMeta(key, meta)
+		pc, err := e.peer.toWG()
 		if err != nil {
-			slog.Warn("decode meta", "node", key, "err", err)
+			slog.Warn("peer to wg", "node", name, "err", err)
 			continue
 		}
 		changes = append(changes, pc)
 	}
-	for key := range prev {
-		if _, ok := cur[key]; ok {
+	for name := range prev {
+		if _, ok := cur[name]; ok {
 			continue
 		}
-		pk, err := wgtypes.ParseKey(key)
+		pk, err := wgtypes.ParseKey(name)
 		if err != nil {
-			slog.Warn("parse pubkey", "node", key, "err", err)
+			slog.Warn("parse pubkey", "node", name, "err", err)
 			continue
 		}
 		changes = append(changes, wgtypes.PeerConfig{PublicKey: pk, Remove: true})
@@ -158,9 +170,20 @@ func (m *Mesh) setMember(n *memberlist.Node) {
 	if n.Name == m.cfg.Self.PublicKey {
 		return
 	}
+	if len(n.Meta) == 0 {
+		return
+	}
 	m.mu.Lock()
-	m.members[n.Name] = bytes.Clone(n.Meta)
-	m.mu.Unlock()
+	defer m.mu.Unlock()
+	if existing, ok := m.members[n.Name]; ok && bytes.Equal(existing.meta, n.Meta) {
+		return
+	}
+	p, err := decodePeer(n.Name, n.Meta)
+	if err != nil {
+		slog.Warn("decode peer", "node", n.Name, "err", err)
+		return
+	}
+	m.members[n.Name] = member{meta: bytes.Clone(n.Meta), peer: p}
 	m.triggerReconcile()
 }
 
@@ -172,6 +195,19 @@ func (m *Mesh) removeMember(n *memberlist.Node) {
 	delete(m.members, n.Name)
 	m.mu.Unlock()
 	m.triggerReconcile()
+}
+
+func (m *Mesh) handleNodeConflict(existing, other *memberlist.Node) {
+	if existing.Name == m.cfg.Self.PublicKey {
+		slog.Error("name conflict: another node claims our pubkey",
+			"name", existing.Name,
+			"other_addr", other.Addr.String(), "other_port", other.Port)
+		return
+	}
+	slog.Warn("name conflict",
+		"name", existing.Name,
+		"existing_addr", existing.Addr.String(), "existing_port", existing.Port,
+		"other_addr", other.Addr.String(), "other_port", other.Port)
 }
 
 func (m *Mesh) triggerReconcile() {
@@ -186,14 +222,11 @@ func (m *Mesh) peerSnapshot(exclude string) []Peer {
 	snap := maps.Clone(m.members)
 	m.mu.RUnlock()
 	peers := make([]Peer, 0, len(snap))
-	for name, meta := range snap {
+	for name, e := range snap {
 		if name == exclude {
 			continue
 		}
-		var p Peer
-		if decodeMeta(meta, &p) == nil {
-			peers = append(peers, p)
-		}
+		peers = append(peers, e.peer)
 	}
 	return peers
 }
@@ -203,14 +236,47 @@ func (m *Mesh) reconcile() error {
 	cur := maps.Clone(m.members)
 	m.mu.RUnlock()
 	changes := diff(m.peers, cur)
-	if len(changes) == 0 {
+	if len(changes) > 0 {
+		if err := m.cfg.WG.Apply(m.cfg.Iface, changes); err != nil {
+			return err
+		}
+		m.peers = cur
+	}
+	return m.writePeersIfConfigured()
+}
+
+func (m *Mesh) writePeersIfConfigured() error {
+	if m.cfg.PeersFile == "" {
 		return nil
 	}
-	if err := m.cfg.WG.Apply(m.cfg.Iface, changes); err != nil {
-		return err
+	return writePeers(m.cfg.PeersFile, m.snapshot())
+}
+
+func (m *Mesh) snapshot() PeersFile {
+	nodes := m.memberlist.Members()
+	m.mu.RLock()
+	snap := maps.Clone(m.members)
+	m.mu.RUnlock()
+	peers := make(map[string]PeerView, len(nodes))
+	for _, n := range nodes {
+		var p Peer
+		if n.Name == m.cfg.Self.PublicKey {
+			p = m.cfg.Self
+		} else if e, ok := snap[n.Name]; ok {
+			p = e.peer
+		}
+		peers[n.Name] = PeerView{
+			Endpoint:   p.Endpoint,
+			AllowedIPs: p.AllowedIPs,
+			Tags:       p.Tags,
+			Status:     peerStatus(n),
+		}
 	}
-	m.peers = cur
-	return nil
+	return PeersFile{
+		Self:      m.cfg.Self.PublicKey,
+		UpdatedAt: nowStamp(),
+		Peers:     peers,
+	}
 }
 
 func (m *Mesh) Run(ctx context.Context) error {
@@ -267,13 +333,13 @@ func (m *Mesh) ReloadKeyringFromFile(path string) (int, error) {
 
 func (m *Mesh) ReloadKeyring(target *memberlist.Keyring) error {
 	if m.cfg.Keyring == nil {
-		return fmt.Errorf("no keyring configured")
+		return errors.New("no keyring configured")
 	}
 	targetKeys := target.GetKeys()
 	if len(targetKeys) == 0 {
-		return fmt.Errorf("target keyring is empty")
+		return errors.New("target keyring is empty")
 	}
-	liveKeys := slices.Clone(m.cfg.Keyring.GetKeys())
+	liveKeys := m.cfg.Keyring.GetKeys()
 
 	for _, k := range targetKeys {
 		if !containsKey(liveKeys, k) {

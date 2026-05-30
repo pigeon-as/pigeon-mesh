@@ -41,7 +41,7 @@ func TestPeerPolicy_RejectFalse(t *testing.T) {
 }
 
 func TestPeerPolicy_AllowedIPsInCIDR(t *testing.T) {
-	p, err := ParsePeerPolicy(`all(peer.AllowedIPs, cidrContains("fdcc::/16", #))`)
+	p, err := ParsePeerPolicy(`all(peer.AllowedIPs, cidrSubset("fdcc::/16", #))`)
 	must.NoError(t, err)
 
 	ok, err := p.accept(Peer{AllowedIPs: []string{"fdcc::dead/128"}}, noPeers)
@@ -58,7 +58,7 @@ func TestPeerPolicy_AllowedIPsInCIDR(t *testing.T) {
 }
 
 func TestPeerPolicy_ContainmentAcceptsImpersonation(t *testing.T) {
-	p, err := ParsePeerPolicy(`all(peer.AllowedIPs, cidrContains("fdcc::/16", #))`)
+	p, err := ParsePeerPolicy(`all(peer.AllowedIPs, cidrSubset("fdcc::/16", #))`)
 	must.NoError(t, err)
 
 	ok, err := p.accept(Peer{AllowedIPs: []string{"fdcc::1111/128", "fdcc::2222/128"}}, noPeers)
@@ -96,21 +96,17 @@ func TestPeerPolicy_PeerFields(t *testing.T) {
 	must.False(t, ok)
 }
 
-func TestParseIPOrCIDR(t *testing.T) {
-	for _, s := range []string{"10.0.0.1", "fdcc::1", "10.0.0.1/32", "fdcc::1/128", "10.0.0.0/8"} {
-		must.NotNil(t, parseIPOrCIDR(s), must.Sprintf("input %q", s))
-	}
-	for _, s := range []string{"", "not an ip", "fdcc::/", "10.0.0.300"} {
-		must.Nil(t, parseIPOrCIDR(s), must.Sprintf("input %q", s))
-	}
-}
-
-func TestCIDRContains(t *testing.T) {
-	must.True(t, cidrContains("fdcc::/16", "fdcc::1"))
-	must.True(t, cidrContains("fdcc::/16", "fdcc::dead/128"))
-	must.False(t, cidrContains("fdcc::/16", "fd00::1"))
-	must.False(t, cidrContains("not-a-cidr", "fdcc::1"))
-	must.False(t, cidrContains("fdcc::/16", "not-an-ip"))
-	must.True(t, cidrContains("10.0.0.0/8", "10.1.2.3"))
-	must.False(t, cidrContains("10.0.0.0/8", "192.168.1.1"))
+func TestCIDRSubset(t *testing.T) {
+	must.True(t, cidrSubset("fdcc::/16", "fdcc::1"))
+	must.True(t, cidrSubset("fdcc::/16", "fdcc::dead/128"))
+	must.True(t, cidrSubset("fdcc::/16", "fdcc::/16"))
+	must.True(t, cidrSubset("fdcc::/16", "fdcc::/32"))
+	must.False(t, cidrSubset("fdcc::/16", "fdcc::/8"))
+	must.False(t, cidrSubset("fdcc::/16", "fdcc::/4"))
+	must.False(t, cidrSubset("fdcc::/16", "fd00::1"))
+	must.False(t, cidrSubset("not-a-cidr", "fdcc::1"))
+	must.False(t, cidrSubset("fdcc::/16", "not-an-ip"))
+	must.True(t, cidrSubset("10.0.0.0/8", "10.1.2.3"))
+	must.False(t, cidrSubset("10.0.0.0/8", "192.168.1.1"))
+	must.False(t, cidrSubset("10.0.0.0/24", "10.0.0.0/8"))
 }
