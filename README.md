@@ -6,7 +6,7 @@ gossip cluster.
 
 ## Run
 
-```
+```sh
 wg-mesh \
   --interface wg0 \
   --endpoint 203.0.113.1:51820 \
@@ -19,7 +19,7 @@ wg-mesh \
 [go-sockaddr](https://github.com/hashicorp/go-sockaddr) templates for
 runtime resolution:
 
-```
+```sh
 --endpoint '[{{ GetPublicInterfaces | include "type" "IPv6" | limit 1 | attr "address" }}]:51820'
 ```
 
@@ -40,7 +40,7 @@ Add bootstrap peers to the kernel first ([wg-quick](https://man.archlinux.org/ma
 or `wg set`). Each peer needs a host route (`/32` or `/128`) first in
 `AllowedIPs`:
 
-```
+```sh
 wg set wg0 peer <base64-pubkey> \
   endpoint 203.0.113.2:51820 \
   allowed-ips fd00::2/128
@@ -50,19 +50,14 @@ Existing kernel peers are used to bootstrap the gossip cluster.
 
 ## Peer policy examples
 
-```
-# keep peers inside the overlay; without this a peer can advertise ::/0
-# and hijack the default route
+```js
+// containment: every advertised AllowedIP must be inside the overlay.
+// Without this, a peer can advertise ::/0 and hijack default routes.
 all(peer.AllowedIPs, cidrSubset("fd00::/8", #))
 
-# lock each node to a single overlay address — no subnet or extra claims
-len(peer.AllowedIPs) == 1 && cidrSubset("fd00::/8", peer.AllowedIPs[0])
-
-# a trusted gateway may advertise extra routes (a subnet, an exit); others confined
-peer.PublicKey == "<gateway-pubkey>" || all(peer.AllowedIPs, cidrSubset("fd00::/8", #))
-
-# no address theft: reject any route another peer already claims
-all(peer.AllowedIPs, let r = #; none(peers(), r in #.AllowedIPs))
+// no address theft: reject any route that overlaps with one another peer already claims.
+all(peer.AllowedIPs, let r = #;
+    none(peers(), any(#.AllowedIPs, cidrSubset(r, #) || cidrSubset(#, r))))
 ```
 
 ## Encrypted gossip
@@ -105,7 +100,7 @@ Tags and extra AllowedIPs are limited to ~20 entries combined.
 
 ## Build
 
-```
+```sh
 make build
 make test
 ```

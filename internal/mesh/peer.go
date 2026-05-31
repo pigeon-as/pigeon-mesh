@@ -34,7 +34,16 @@ func decodeMeta(b []byte, p *Peer) error {
 	if err := codec.NewDecoder(bytes.NewReader(b), msgpackHandle).Decode(p); err != nil {
 		return fmt.Errorf("decode meta: %w", err)
 	}
+	canonicalizeAllowedIPs(p.AllowedIPs)
 	return nil
+}
+
+func canonicalizeAllowedIPs(ips []string) {
+	for i, s := range ips {
+		if pfx, err := netip.ParsePrefix(s); err == nil {
+			ips[i] = pfx.String()
+		}
+	}
 }
 
 func decodePeer(name string, meta []byte) (Peer, error) {

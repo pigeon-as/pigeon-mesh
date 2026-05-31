@@ -11,6 +11,7 @@ import (
 	"maps"
 	"math/rand/v2"
 	"net"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -292,10 +293,8 @@ func (m *Mesh) Run(ctx context.Context) error {
 	}
 	if n > 0 {
 		slog.Info("joined", "reached", n)
-	} else {
-		slog.Info("starting retry join")
-		go m.retryJoin(ctx)
 	}
+	go m.retryJoin(ctx)
 
 	if err := m.reconcile(); err != nil {
 		slog.Warn("reconcile", "err", err)
@@ -339,7 +338,7 @@ func (m *Mesh) ReloadKeyring(target *memberlist.Keyring) error {
 	if len(targetKeys) == 0 {
 		return errors.New("target keyring is empty")
 	}
-	liveKeys := m.cfg.Keyring.GetKeys()
+	liveKeys := slices.Clone(m.cfg.Keyring.GetKeys())
 
 	for _, k := range targetKeys {
 		if !containsKey(liveKeys, k) {
@@ -370,16 +369,21 @@ func (m *Mesh) retryJoin(ctx context.Context) {
 			return
 		case <-time.After(wait):
 		}
+		if m.memberlist.NumMembers() > 1 {
+			backoff = retryJoinInterval
+			continue
+		}
 		n, err := m.join()
 		switch {
 		case err != nil:
 			slog.Warn("retry join", "err", err)
+			backoff = min(2*backoff, retryJoinInterval)
 		case n > 0:
 			slog.Info("joined", "reached", n)
-			return
+			backoff = retryJoinInterval
 		default:
 			slog.Info("no bootstrap peers")
+			backoff = min(2*backoff, retryJoinInterval)
 		}
-		backoff = min(2*backoff, retryJoinInterval)
 	}
 }
