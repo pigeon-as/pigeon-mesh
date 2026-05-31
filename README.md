@@ -82,7 +82,11 @@ key signs outgoing; all are accepted on receive. `SIGHUP` reloads.
 
 ## Operations
 
-Live state: `wg show <interface>`.
+Live state: `wg show <interface>` for the kernel peers, or `wg-mesh status`
+for the gossip view, showing each peer's endpoint, tags, and SWIM state
+(alive/suspect/dead). `wg-mesh status --json` for scripting. Served on
+demand over a unix socket (`--socket`, default `/run/wg-mesh.sock`; empty
+disables; set it per instance to run several on one host).
 
 Stop or crash the daemon; peers detect via SWIM probes (~30s in WAN
 config) and remove the WG entry.

@@ -31,7 +31,7 @@ type Config struct {
 	GossipPort int
 	BindAddr   string
 	Profile    string
-	PeersFile  string
+	SocketPath string
 	Self       Peer
 	Keyring    *memberlist.Keyring
 	WG         *wg.Client
@@ -51,6 +51,7 @@ type Mesh struct {
 	members     map[string]member
 	peers       map[string]member
 	reconcileCh chan struct{}
+	seedCount   int
 }
 
 func New(cfg Config) (*Mesh, error) {
@@ -95,6 +96,7 @@ func New(cfg Config) (*Mesh, error) {
 	mc.Conflict = d
 	mc.Keyring = cfg.Keyring
 	mc.Logger = newMemberlistLogger()
+	m.seedCount = mc.GossipNodes
 
 	nt, err := memberlist.NewNetTransport(&memberlist.NetTransportConfig{
 		BindAddrs: []string{cfg.BindAddr},
@@ -136,6 +138,10 @@ func (m *Mesh) join() (int, error) {
 	}
 	if len(targets) == 0 {
 		return 0, nil
+	}
+	rand.Shuffle(len(targets), func(i, j int) { targets[i], targets[j] = targets[j], targets[i] })
+	if len(targets) > m.seedCount {
+		targets = targets[:m.seedCount]
 	}
 	return m.memberlist.Join(targets)
 }
@@ -220,16 +226,22 @@ func (m *Mesh) triggerReconcile() {
 
 func (m *Mesh) peerSnapshot(exclude string) []Peer {
 	m.mu.RLock()
-	snap := maps.Clone(m.members)
-	m.mu.RUnlock()
-	peers := make([]Peer, 0, len(snap))
-	for name, e := range snap {
+	defer m.mu.RUnlock()
+	peers := make([]Peer, 0, len(m.members))
+	for name, e := range m.members {
 		if name == exclude {
 			continue
 		}
 		peers = append(peers, e.peer)
 	}
 	return peers
+}
+
+func (m *Mesh) admitted(name string, meta []byte) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	e, ok := m.members[name]
+	return ok && bytes.Equal(e.meta, meta)
 }
 
 func (m *Mesh) reconcile() error {
@@ -243,41 +255,7 @@ func (m *Mesh) reconcile() error {
 		}
 		m.peers = cur
 	}
-	return m.writePeersIfConfigured()
-}
-
-func (m *Mesh) writePeersIfConfigured() error {
-	if m.cfg.PeersFile == "" {
-		return nil
-	}
-	return writePeers(m.cfg.PeersFile, m.snapshot())
-}
-
-func (m *Mesh) snapshot() PeersFile {
-	nodes := m.memberlist.Members()
-	m.mu.RLock()
-	snap := maps.Clone(m.members)
-	m.mu.RUnlock()
-	peers := make(map[string]PeerView, len(nodes))
-	for _, n := range nodes {
-		var p Peer
-		if n.Name == m.cfg.Self.PublicKey {
-			p = m.cfg.Self
-		} else if e, ok := snap[n.Name]; ok {
-			p = e.peer
-		}
-		peers[n.Name] = PeerView{
-			Endpoint:   p.Endpoint,
-			AllowedIPs: p.AllowedIPs,
-			Tags:       p.Tags,
-			Status:     peerStatus(n),
-		}
-	}
-	return PeersFile{
-		Self:      m.cfg.Self.PublicKey,
-		UpdatedAt: nowStamp(),
-		Peers:     peers,
-	}
+	return nil
 }
 
 func (m *Mesh) Run(ctx context.Context) error {
@@ -286,6 +264,8 @@ func (m *Mesh) Run(ctx context.Context) error {
 			slog.Warn("memberlist shutdown", "err", err)
 		}
 	}()
+
+	go m.serveStatus(ctx)
 
 	n, err := m.join()
 	if err != nil {

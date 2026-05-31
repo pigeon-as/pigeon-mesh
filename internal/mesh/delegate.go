@@ -45,6 +45,9 @@ func (d *delegate) NotifyAlive(node *memberlist.Node) error {
 	if len(node.Meta) == 0 {
 		return nil
 	}
+	if d.mesh.admitted(node.Name, node.Meta) {
+		return nil
+	}
 	p, err := decodePeer(node.Name, node.Meta)
 	if err != nil {
 		return err

@@ -19,6 +19,10 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "status" {
+		os.Exit(runStatus(os.Args[2:]))
+	}
+
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
 	iface := flag.String("interface", "", "existing WireGuard interface (required); bootstrap peers need a /128 or /32 first in AllowedIPs")
@@ -30,7 +34,7 @@ func main() {
 	persistentKeepalive := flag.Int("persistent-keepalive", 0, "PersistentKeepalive interval in seconds advertised to peers (0 disables)")
 	profile := flag.String("profile", "wan", "memberlist timing profile: lan, wan, or local")
 	peerPolicy := flag.String("peer-policy", "", "expr predicate (returns bool) evaluated per peer at admission; false rejects. In scope: peer (Peer), peers() (other members), cidrSubset(outer, inner) bool. See docs/quickstart.md.")
-	peersFile := flag.String("peers-file", "", "path for the peers projection file (atomic rewrite on membership change); empty disables")
+	socket := flag.String("socket", mesh.DefaultSocketPath, "path to the status query socket served for the status command; empty disables")
 	var tagFlags []string
 	flag.Func("tag", "tag for this node, repeatable as k=v", func(v string) error {
 		tagFlags = append(tagFlags, v)
@@ -128,7 +132,7 @@ func main() {
 		GossipPort: *gossipPort,
 		BindAddr:   ip.String(),
 		Profile:    *profile,
-		PeersFile:  *peersFile,
+		SocketPath: *socket,
 		Self:       self,
 		WG:         wgc,
 	}
