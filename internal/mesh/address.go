@@ -47,10 +47,11 @@ func ParseAllowedIPs(s string) ([]string, error) {
 		if c == "" {
 			continue
 		}
-		if _, err := netip.ParsePrefix(c); err != nil {
+		pfx, err := netip.ParsePrefix(c)
+		if err != nil {
 			return nil, fmt.Errorf("allowed-ips %q: %w", c, err)
 		}
-		out = append(out, c)
+		out = append(out, pfx.String())
 	}
 	if len(out) == 0 {
 		return nil, errors.New("at least one CIDR required")
