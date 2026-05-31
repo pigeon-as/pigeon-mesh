@@ -1,13 +1,12 @@
 package mesh
 
 import (
-	"encoding/json"
-	"fmt"
 	"time"
 
 	"github.com/hashicorp/memberlist"
-	"github.com/pigeon-as/wg-mesh/internal/atomicfile"
 )
+
+const DefaultSocketPath = "/run/wg-mesh.sock"
 
 type PeerView struct {
 	Endpoint   string   `json:"endpoint"`
@@ -16,25 +15,10 @@ type PeerView struct {
 	Status     string   `json:"status"`
 }
 
-type PeersFile struct {
+type Status struct {
 	Self      string              `json:"self"`
 	UpdatedAt string              `json:"updated_at"`
 	Peers     map[string]PeerView `json:"peers"`
-}
-
-func writePeers(path string, p PeersFile) error {
-	if path == "" {
-		return nil
-	}
-	data, err := json.MarshalIndent(p, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal peers: %w", err)
-	}
-	data = append(data, '\n')
-	if err := atomicfile.Write(path, data, 0o644); err != nil {
-		return fmt.Errorf("write peers %s: %w", path, err)
-	}
-	return nil
 }
 
 func peerStatus(n *memberlist.Node) string {

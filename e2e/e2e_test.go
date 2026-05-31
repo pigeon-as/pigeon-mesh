@@ -229,36 +229,35 @@ func TestMesh_ThreeNodes_TransitiveDiscovery(t *testing.T) {
 	waitPing(t, a, c.overlay)
 }
 
-func TestMesh_PeersFile(t *testing.T) {
+func TestMesh_StatusSocket(t *testing.T) {
 	skipIfNoNetns(t)
 	newBridge(t, "wgmpf-br")
 
 	a := newNode(t, "wgmpf-a", "10.140.0.1", "fd00:e2ef:a::1", 51820, "wgmpf-br")
 	b := newNode(t, "wgmpf-b", "10.140.0.2", "fd00:e2ef:b::1", 51820, "wgmpf-br")
 
-	peersFile := filepath.Join(t.TempDir(), "peers.json")
-	startMesh(t, a, []*node{b}, 51820, "--peers-file", peersFile)
+	sock := filepath.Join(t.TempDir(), "a.sock")
+	startMesh(t, a, []*node{b}, 51820, "--socket", sock)
 	startMesh(t, b, []*node{a}, 51820)
 
-	waitFor(t, "peers file contains b", 15*time.Second, func() bool {
-		data, err := os.ReadFile(peersFile)
-		if err != nil {
-			return false
-		}
-		return strings.Contains(string(data), b.pub)
+	status := func() ([]byte, error) {
+		return exec.Command(meshBin, "status", "--socket", sock, "--json").Output()
+	}
+	waitFor(t, "status reports b", 15*time.Second, func() bool {
+		out, err := status()
+		return err == nil && strings.Contains(string(out), b.pub)
 	})
 
-	data, err := os.ReadFile(peersFile)
+	out, err := status()
 	must.NoError(t, err)
-	var pf struct {
-		Self      string                    `json:"self"`
-		UpdatedAt string                    `json:"updated_at"`
-		Peers     map[string]map[string]any `json:"peers"`
+	var st struct {
+		Self  string                    `json:"self"`
+		Peers map[string]map[string]any `json:"peers"`
 	}
-	must.NoError(t, json.Unmarshal(data, &pf))
-	must.EqOp(t, a.pub, pf.Self)
-	must.MapContainsKey(t, pf.Peers, b.pub)
-	must.EqOp(t, "alive", pf.Peers[b.pub]["status"])
+	must.NoError(t, json.Unmarshal(out, &st))
+	must.EqOp(t, a.pub, st.Self)
+	must.MapContainsKey(t, st.Peers, b.pub)
+	must.EqOp(t, "alive", st.Peers[b.pub]["status"])
 }
 
 func TestMesh_TagPolicy(t *testing.T) {
