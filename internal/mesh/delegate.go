@@ -52,8 +52,7 @@ func (d *delegate) NotifyAlive(node *memberlist.Node) error {
 	if err != nil {
 		return err
 	}
-	peers := func() []Peer { return d.mesh.peerSnapshot(node.Name) }
-	ok, err := policy.accept(p, peers)
+	ok, err := policy.accept(p, d.mesh.cfg.Self)
 	if err != nil {
 		slog.Warn("peer-policy eval", "node", node.Name, "err", err)
 		return err

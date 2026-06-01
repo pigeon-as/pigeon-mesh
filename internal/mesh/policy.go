@@ -14,26 +14,15 @@ func ParsePeerPolicy(s string) (*PeerPolicy, error) {
 	if s == "" {
 		return nil, nil
 	}
-	prog, err := expr.Compile(s,
-		expr.AsBool(),
-		expr.Env(map[string]any{
-			"peer":       Peer{},
-			"peers":      func() []Peer { return nil },
-			"cidrSubset": cidrSubset,
-		}),
-	)
+	prog, err := expr.Compile(s, expr.AsBool(), expr.Env(policyEnv(Peer{}, Peer{})))
 	if err != nil {
 		return nil, fmt.Errorf("peer-policy: %w", err)
 	}
 	return &PeerPolicy{program: prog}, nil
 }
 
-func (p *PeerPolicy) accept(peer Peer, peers func() []Peer) (bool, error) {
-	out, err := expr.Run(p.program, map[string]any{
-		"peer":       peer,
-		"peers":      peers,
-		"cidrSubset": cidrSubset,
-	})
+func (p *PeerPolicy) accept(peer, self Peer) (bool, error) {
+	out, err := expr.Run(p.program, policyEnv(peer, self))
 	if err != nil {
 		return false, fmt.Errorf("peer-policy: %w", err)
 	}
@@ -42,6 +31,14 @@ func (p *PeerPolicy) accept(peer Peer, peers func() []Peer) (bool, error) {
 		return false, fmt.Errorf("peer-policy: result %T not bool", out)
 	}
 	return b, nil
+}
+
+func policyEnv(peer, self Peer) map[string]any {
+	return map[string]any{
+		"peer":       peer,
+		"self":       self,
+		"cidrSubset": cidrSubset,
+	}
 }
 
 // cidrSubset reports whether inner is a cidrSubset of outer, matching the semantics of

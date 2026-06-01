@@ -282,7 +282,7 @@ func TestMesh_TagPolicy(t *testing.T) {
 		must.Sprint("A must reject C (role != trusted)"))
 }
 
-func TestMesh_PeersRejectsDuplicateRoute(t *testing.T) {
+func TestMesh_DuplicateRouteDropped(t *testing.T) {
 	skipIfNoNetns(t)
 	newBridge(t, "wgmdup-br")
 
@@ -290,18 +290,15 @@ func TestMesh_PeersRejectsDuplicateRoute(t *testing.T) {
 	b := newNode(t, "wgmdup-b", "10.144.0.2", "fd00:e2ed:b::1", 51820, "wgmdup-br")
 	c := newNode(t, "wgmdup-c", "10.144.0.3", "fd00:e2ed:c::1", 51820, "wgmdup-br")
 
-	policy := `all(peer.AllowedIPs, let r = #;
-		none(peers(), any(#.AllowedIPs, cidrSubset(r, #) || cidrSubset(#, r))))`
-	startMesh(t, a, []*node{b}, 51820, "--peer-policy", policy)
+	startMesh(t, a, []*node{b}, 51820)
 	startMesh(t, b, []*node{a, c}, 51820)
-
-	waitFor(t, "a sees b", 15*time.Second, func() bool {
-		return strings.Contains(wgPeers(a), b.pub)
-	})
-
 	startMesh(t, c, []*node{b}, 51820, "--extra-allowed-ips", b.overlay+"/128")
 
-	time.Sleep(5 * time.Second)
-	must.False(t, strings.Contains(wgPeers(a), c.pub),
-		must.Sprint("A must reject C (claims B's /128)"))
+	waitFor(t, "a sees c", 15*time.Second, func() bool {
+		return strings.Contains(wgPeers(a), c.pub)
+	})
+
+	time.Sleep(3 * time.Second)
+	must.False(t, strings.Contains(wgPeers(a), b.pub),
+		must.Sprint("B's sole route is contested by C, so B must not be installed"))
 }

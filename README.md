@@ -23,10 +23,8 @@ runtime resolution:
 --endpoint '[{{ GetPublicInterfaces | include "type" "IPv6" | limit 1 | attr "address" }}]:51820'
 ```
 
-`--peer-policy` is an [expr](https://expr-lang.org) boolean predicate
-evaluated per peer at admission. Anything expressible in expr (CIDR
-range, identity binding, multi-attribute checks) works as policy.
-Rejected peers are skipped; pigeon-mesh keeps running.
+`--peer-policy` is an optional [expr](https://expr-lang.org) predicate run
+per peer at admission; a false result rejects the peer.
 
 Runs as systemd `Type=notify`; honors `WatchdogSec=`.
 
@@ -48,17 +46,16 @@ wg set wg0 peer <base64-pubkey> \
 
 Existing kernel peers are used to bootstrap the gossip cluster.
 
-## Peer policy examples
+## Peer policy
+
+Recommended baseline, confining each peer to the overlay so none can
+advertise `::/0` or a route outside it:
 
 ```js
-// containment: every advertised AllowedIP must be inside the overlay.
-// Without this, a peer can advertise ::/0 and hijack default routes.
 all(peer.AllowedIPs, cidrSubset("fd00::/8", #))
-
-// no address theft: reject any route that overlaps with one another peer already claims.
-all(peer.AllowedIPs, let r = #;
-    none(peers(), any(#.AllowedIPs, cidrSubset(r, #) || cidrSubset(#, r))))
 ```
+
+In scope: `peer` (the candidate), `self` (this node), `cidrSubset(outer, inner)`.
 
 ## Encrypted gossip
 
