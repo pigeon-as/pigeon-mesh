@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"maps"
 	"math/rand/v2"
 	"net"
 	"reflect"
@@ -172,6 +171,9 @@ func diff(prev, cur map[string]Peer) []wgtypes.PeerConfig {
 		}
 		changes = append(changes, wgtypes.PeerConfig{PublicKey: pk, Remove: true})
 	}
+	slices.SortFunc(changes, func(a, b wgtypes.PeerConfig) int {
+		return bytes.Compare(a.PublicKey[:], b.PublicKey[:])
+	})
 	return changes
 }
 
@@ -226,28 +228,6 @@ func (m *Mesh) triggerReconcile() {
 	}
 }
 
-func resolveConflicts(members map[string]member) map[string]Peer {
-	claims := make(map[string]int)
-	for _, e := range members {
-		for _, ip := range e.peer.AllowedIPs {
-			claims[ip]++
-		}
-	}
-	effective := make(map[string]Peer, len(members))
-	for name, e := range members {
-		kept := slices.DeleteFunc(slices.Clone(e.peer.AllowedIPs), func(ip string) bool {
-			return claims[ip] > 1
-		})
-		if len(kept) == 0 {
-			continue
-		}
-		p := e.peer
-		p.AllowedIPs = kept
-		effective[name] = p
-	}
-	return effective
-}
-
 func (m *Mesh) admitted(name string, meta []byte) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -257,16 +237,18 @@ func (m *Mesh) admitted(name string, meta []byte) bool {
 
 func (m *Mesh) reconcile() error {
 	m.mu.RLock()
-	cur := maps.Clone(m.members)
+	cur := make(map[string]Peer, len(m.members))
+	for name, e := range m.members {
+		cur[name] = e.peer
+	}
 	m.mu.RUnlock()
 
-	effective := resolveConflicts(cur)
-	changes := diff(m.peers, effective)
+	changes := diff(m.peers, cur)
 	if len(changes) > 0 {
 		if err := m.cfg.WG.Apply(m.cfg.Iface, changes); err != nil {
 			return err
 		}
-		m.peers = effective
+		m.peers = cur
 	}
 	return nil
 }

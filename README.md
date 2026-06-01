@@ -10,7 +10,7 @@ gossip cluster.
 pigeon-mesh \
   --interface wg0 \
   --endpoint 203.0.113.1:51820 \
-  --peer-policy 'all(peer.AllowedIPs, cidrSubset("fd00::/8", #))'
+  --peer-policy 'all(peer.AllowedIPs, cidrSubset("fdcc::/16", #))'
 ```
 
 `pigeon-mesh --help` lists the full flag set.
@@ -48,14 +48,29 @@ Existing kernel peers are used to bootstrap the gossip cluster.
 
 ## Peer policy
 
-Recommended baseline, confining each peer to the overlay so none can
-advertise `::/0` or a route outside it:
+Addresses can be human-chosen or self-certifying, not both without an authority
+(Zooko's triangle). Pick a model with `--peer-policy`.
+
+Contain to the overlay:
 
 ```js
-all(peer.AllowedIPs, cidrSubset("fd00::/8", #))
+all(peer.AllowedIPs, cidrSubset("fdcc::/16", #))
 ```
 
-In scope: `peer` (the candidate), `self` (this node), `cidrSubset(outer, inner)`.
+Self-certify, so no one can claim another's address:
+
+```js
+hostbits("fdcc::/16", peer.AllowedIPs[0]) == sha256(base64decode(peer.PublicKey))[0:28]
+```
+
+Both:
+
+```js
+hostbits("fdcc::/16", peer.AllowedIPs[0]) == sha256(base64decode(peer.PublicKey))[0:28]
+  && all(peer.AllowedIPs, cidrSubset("fdcc::/16", #))
+```
+
+Helpers: `cidrSubset`, `sha256`, `hostbits`, `base64decode`.
 
 ## Encrypted gossip
 
@@ -72,10 +87,11 @@ key signs outgoing; all are accepted on receive. `SIGHUP` reloads.
 
 - WireGuard's Noise handshake is the only transport security. pigeon-mesh
   never reads or persists the private key.
-- Gossip is unencrypted unless `--gossip-key-file` is set.
-- By default, peers are trusted with whatever `allowed_ips` they
-  advertise. Optional `--peer-policy` enforces an operator-defined expr
-  predicate per peer at admission.
+- Gossip is unencrypted unless `--gossip-key-file` is set; the gossip key and
+  the WireGuard peers you add are the trust boundary, and inside it members are
+  trusted.
+- A member can claim any overlay address unless `--peer-policy` binds addresses
+  to keys (see Peer policy).
 
 ## Operations
 
