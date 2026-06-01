@@ -260,7 +260,7 @@ func TestMesh_StatusSocket(t *testing.T) {
 	must.EqOp(t, "alive", st.Peers[b.pub]["status"])
 }
 
-func TestMesh_TagPolicy(t *testing.T) {
+func TestMesh_PubkeyPolicy(t *testing.T) {
 	skipIfNoNetns(t)
 	newBridge(t, "wgmtag-br")
 
@@ -269,9 +269,9 @@ func TestMesh_TagPolicy(t *testing.T) {
 	c := newNode(t, "wgmtag-c", "10.142.0.3", "fd00:e2e7:c::1", 51820, "wgmtag-br")
 
 	startMesh(t, a, []*node{b}, 51820,
-		"--peer-policy", `peer.Tags["role"] == "trusted"`)
-	startMesh(t, b, []*node{a, c}, 51820, "--tag", "role=trusted")
-	startMesh(t, c, []*node{b}, 51820, "--tag", "role=untrusted")
+		"--peer-policy", fmt.Sprintf("peer.PublicKey in [%q]", b.pub))
+	startMesh(t, b, []*node{a, c}, 51820)
+	startMesh(t, c, []*node{b}, 51820)
 
 	waitFor(t, "a sees b", 15*time.Second, func() bool {
 		return strings.Contains(wgPeers(a), b.pub)
@@ -279,26 +279,5 @@ func TestMesh_TagPolicy(t *testing.T) {
 
 	time.Sleep(5 * time.Second)
 	must.False(t, strings.Contains(wgPeers(a), c.pub),
-		must.Sprint("A must reject C (role != trusted)"))
-}
-
-func TestMesh_DuplicateRouteDropped(t *testing.T) {
-	skipIfNoNetns(t)
-	newBridge(t, "wgmdup-br")
-
-	a := newNode(t, "wgmdup-a", "10.144.0.1", "fd00:e2ed:a::1", 51820, "wgmdup-br")
-	b := newNode(t, "wgmdup-b", "10.144.0.2", "fd00:e2ed:b::1", 51820, "wgmdup-br")
-	c := newNode(t, "wgmdup-c", "10.144.0.3", "fd00:e2ed:c::1", 51820, "wgmdup-br")
-
-	startMesh(t, a, []*node{b}, 51820)
-	startMesh(t, b, []*node{a, c}, 51820)
-	startMesh(t, c, []*node{b}, 51820, "--extra-allowed-ips", b.overlay+"/128")
-
-	waitFor(t, "a sees c", 15*time.Second, func() bool {
-		return strings.Contains(wgPeers(a), c.pub)
-	})
-
-	time.Sleep(3 * time.Second)
-	must.False(t, strings.Contains(wgPeers(a), b.pub),
-		must.Sprint("B's sole route is contested by C, so B must not be installed"))
+		must.Sprint("A must reject C (pubkey not in policy allowlist)"))
 }

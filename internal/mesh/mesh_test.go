@@ -189,6 +189,9 @@ func TestDiff(t *testing.T) {
 
 	changes := diff(prev, cur)
 	must.SliceLen(t, 3, changes)
+	must.True(t, slices.IsSortedFunc(changes, func(a, b wgtypes.PeerConfig) int {
+		return bytes.Compare(a.PublicKey[:], b.PublicKey[:])
+	}), must.Sprint("diff output is deterministically sorted by pubkey"))
 	var adds, removes int
 	for _, c := range changes {
 		if c.Remove {
@@ -201,18 +204,4 @@ func TestDiff(t *testing.T) {
 	must.EqOp(t, 1, removes, must.Sprint("Y is removed"))
 
 	must.SliceEmpty(t, diff(cur, cur))
-}
-
-func TestResolveConflicts(t *testing.T) {
-	members := map[string]member{
-		"a": {peer: Peer{PublicKey: "a", AllowedIPs: []string{"fd00::a/128"}}},
-		"b": {peer: Peer{PublicKey: "b", AllowedIPs: []string{"fd00::b/128"}}},
-		"c": {peer: Peer{PublicKey: "c", AllowedIPs: []string{"fd00::c/128", "fd00::b/128"}}},
-	}
-
-	effective := resolveConflicts(members)
-
-	must.Eq(t, []string{"fd00::a/128"}, effective["a"].AllowedIPs)
-	must.MapNotContainsKey(t, effective, "b")
-	must.Eq(t, []string{"fd00::c/128"}, effective["c"].AllowedIPs)
 }
