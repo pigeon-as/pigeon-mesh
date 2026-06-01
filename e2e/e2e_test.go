@@ -30,11 +30,11 @@ func TestMain(m *testing.M) {
 	}
 	exec.Command("ip", "link", "del", "wg-probe").Run()
 
-	meshBin = filepath.Join("..", "build", "wg-mesh")
+	meshBin = filepath.Join("..", "build", "pigeon-mesh")
 	if _, err := os.Stat(meshBin); err != nil {
-		p, err := exec.LookPath("wg-mesh")
+		p, err := exec.LookPath("pigeon-mesh")
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "wg-mesh binary not found (run 'make build' first)")
+			fmt.Fprintln(os.Stderr, "pigeon-mesh binary not found (run 'make build' first)")
 			os.Exit(1)
 		}
 		meshBin = p

@@ -14,7 +14,7 @@ addr="${prefix}::${hex:0:4}:${hex:4:4}:${hex:8:4}:${hex:12:4}"
 ip -6 addr add "$addr/128" dev wg0
 ip link set wg0 up
 
-wg-mesh --interface wg0 \
+pigeon-mesh --interface wg0 \
   --endpoint '[{{ GetPublicInterfaces | include "type" "IPv6" | limit 1 | attr "address" }}]:51820' \
   --peer-policy 'all(peer.AllowedIPs, cidrSubset("fdcc::/16", #))'
 ```
@@ -30,4 +30,4 @@ wg set wg0 peer <their-pubkey> \
   allowed-ips "$addr/128"
 ```
 
-wg-mesh picks the peer up from `wg show`.
+pigeon-mesh picks the peer up from `wg show`.

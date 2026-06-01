@@ -1,4 +1,4 @@
-module github.com/pigeon-as/wg-mesh
+module github.com/pigeon-as/pigeon-mesh
 
 go 1.25
 

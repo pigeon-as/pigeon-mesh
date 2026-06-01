@@ -13,9 +13,9 @@ import (
 	"syscall"
 
 	sockaddr "github.com/hashicorp/go-sockaddr/template"
-	"github.com/pigeon-as/wg-mesh/internal/mesh"
-	"github.com/pigeon-as/wg-mesh/internal/sdnotify"
-	"github.com/pigeon-as/wg-mesh/internal/wg"
+	"github.com/pigeon-as/pigeon-mesh/internal/mesh"
+	"github.com/pigeon-as/pigeon-mesh/internal/sdnotify"
+	"github.com/pigeon-as/pigeon-mesh/internal/wg"
 )
 
 func main() {
@@ -165,12 +165,12 @@ func main() {
 		go reloadKeyringOnSIGHUP(ctx, m, *gossipKeyFile)
 	}
 
-	slog.Info("wg-mesh up", "interface", *iface, "endpoint", ep, "address", ip.String())
+	slog.Info("pigeon-mesh up", "interface", *iface, "endpoint", ep, "address", ip.String())
 	if err := m.Run(ctx); err != nil {
-		slog.Error("wg-mesh stopped", "err", err)
+		slog.Error("pigeon-mesh stopped", "err", err)
 		os.Exit(1)
 	}
-	slog.Info("wg-mesh stopped")
+	slog.Info("pigeon-mesh stopped")
 }
 
 func reloadKeyringOnSIGHUP(ctx context.Context, m *mesh.Mesh, path string) {

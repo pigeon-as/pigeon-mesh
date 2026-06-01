@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"github.com/hashicorp/memberlist"
-	"github.com/pigeon-as/wg-mesh/internal/wg"
+	"github.com/pigeon-as/pigeon-mesh/internal/wg"
 	"github.com/shoenig/test/must"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
