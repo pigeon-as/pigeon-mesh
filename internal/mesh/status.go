@@ -6,7 +6,7 @@ import (
 	"github.com/hashicorp/memberlist"
 )
 
-const DefaultSocketPath = "/run/wg-mesh.sock"
+const DefaultSocketPath = "/run/pigeon-mesh.sock"
 
 type PeerView struct {
 	Endpoint   string   `json:"endpoint"`

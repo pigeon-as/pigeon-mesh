@@ -6,8 +6,6 @@ import (
 	"github.com/shoenig/test/must"
 )
 
-func noPeers() []Peer { return nil }
-
 func TestParsePeerPolicy_EmptyReturnsNil(t *testing.T) {
 	p, err := ParsePeerPolicy("")
 	must.NoError(t, err)
@@ -24,10 +22,15 @@ func TestParsePeerPolicy_NonBoolRejected(t *testing.T) {
 	must.ErrorContains(t, err, "peer-policy")
 }
 
+func TestParsePeerPolicy_PeersRemoved(t *testing.T) {
+	_, err := ParsePeerPolicy("peers()")
+	must.ErrorContains(t, err, "peer-policy", must.Sprint("peers() is no longer in scope"))
+}
+
 func TestPeerPolicy_AcceptTrue(t *testing.T) {
 	p, err := ParsePeerPolicy("true")
 	must.NoError(t, err)
-	ok, err := p.accept(Peer{}, noPeers)
+	ok, err := p.accept(Peer{}, Peer{})
 	must.NoError(t, err)
 	must.True(t, ok)
 }
@@ -35,7 +38,7 @@ func TestPeerPolicy_AcceptTrue(t *testing.T) {
 func TestPeerPolicy_RejectFalse(t *testing.T) {
 	p, err := ParsePeerPolicy("false")
 	must.NoError(t, err)
-	ok, err := p.accept(Peer{}, noPeers)
+	ok, err := p.accept(Peer{}, Peer{})
 	must.NoError(t, err)
 	must.False(t, ok)
 }
@@ -44,54 +47,43 @@ func TestPeerPolicy_AllowedIPsInCIDR(t *testing.T) {
 	p, err := ParsePeerPolicy(`all(peer.AllowedIPs, cidrSubset("fdcc::/16", #))`)
 	must.NoError(t, err)
 
-	ok, err := p.accept(Peer{AllowedIPs: []string{"fdcc::dead/128"}}, noPeers)
+	ok, err := p.accept(Peer{AllowedIPs: []string{"fdcc::dead/128"}}, Peer{})
 	must.NoError(t, err)
 	must.True(t, ok, must.Sprint("inside fdcc::/16 must accept"))
 
-	ok, err = p.accept(Peer{AllowedIPs: []string{"fd00::dead/128"}}, noPeers)
+	ok, err = p.accept(Peer{AllowedIPs: []string{"fd00::dead/128"}}, Peer{})
 	must.NoError(t, err)
 	must.False(t, ok, must.Sprint("outside fdcc::/16 must reject"))
 
-	ok, err = p.accept(Peer{AllowedIPs: []string{"fdcc::dead/128", "fd00::dead/128"}}, noPeers)
+	ok, err = p.accept(Peer{AllowedIPs: []string{"fdcc::dead/128", "fd00::dead/128"}}, Peer{})
 	must.NoError(t, err)
 	must.False(t, ok, must.Sprint("any outside must reject when 'all' is the predicate"))
 }
 
-func TestPeerPolicy_ContainmentAcceptsImpersonation(t *testing.T) {
-	p, err := ParsePeerPolicy(`all(peer.AllowedIPs, cidrSubset("fdcc::/16", #))`)
+func TestPeerPolicy_SelfRelative(t *testing.T) {
+	p, err := ParsePeerPolicy(`peer.Tags["region"] == self.Tags["region"]`)
 	must.NoError(t, err)
 
-	ok, err := p.accept(Peer{AllowedIPs: []string{"fdcc::1111/128", "fdcc::2222/128"}}, noPeers)
-	must.NoError(t, err)
-	must.True(t, ok, must.Sprint("both inside fdcc::/16, so containment accepts even if one is a victim's address"))
-}
+	self := Peer{Tags: Tags{"region": "eu"}}
 
-func TestPeerPolicy_PeersRejectsDuplicateRoute(t *testing.T) {
-	p, err := ParsePeerPolicy(`all(peer.AllowedIPs, let r = #; none(peers(), r in #.AllowedIPs))`)
+	ok, err := p.accept(Peer{Tags: Tags{"region": "eu"}}, self)
 	must.NoError(t, err)
+	must.True(t, ok, must.Sprint("same region must accept"))
 
-	established := func() []Peer {
-		return []Peer{{PublicKey: "established", AllowedIPs: []string{"fdcc::1/128"}}}
-	}
-
-	ok, err := p.accept(Peer{AllowedIPs: []string{"fdcc::1/128"}}, established)
+	ok, err = p.accept(Peer{Tags: Tags{"region": "us"}}, self)
 	must.NoError(t, err)
-	must.False(t, ok, must.Sprint("a route already claimed by another peer must be rejected"))
-
-	ok, err = p.accept(Peer{AllowedIPs: []string{"fdcc::2/128"}}, established)
-	must.NoError(t, err)
-	must.True(t, ok, must.Sprint("an unclaimed route must be accepted"))
+	must.False(t, ok, must.Sprint("different region must reject"))
 }
 
 func TestPeerPolicy_PeerFields(t *testing.T) {
 	p, err := ParsePeerPolicy(`peer.PublicKey == "trusted"`)
 	must.NoError(t, err)
 
-	ok, err := p.accept(Peer{PublicKey: "trusted"}, noPeers)
+	ok, err := p.accept(Peer{PublicKey: "trusted"}, Peer{})
 	must.NoError(t, err)
 	must.True(t, ok)
 
-	ok, err = p.accept(Peer{PublicKey: "other"}, noPeers)
+	ok, err = p.accept(Peer{PublicKey: "other"}, Peer{})
 	must.NoError(t, err)
 	must.False(t, ok)
 }

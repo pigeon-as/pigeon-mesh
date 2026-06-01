@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"github.com/hashicorp/memberlist"
-	"github.com/pigeon-as/wg-mesh/internal/wg"
+	"github.com/pigeon-as/pigeon-mesh/internal/wg"
 	"github.com/shoenig/test/must"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
@@ -171,23 +171,20 @@ func TestDiff(t *testing.T) {
 		must.NoError(t, err)
 		return pk.PublicKey().String()
 	}
-	makeMember := func(pubkey, cidr string) member {
-		meta := encodedMeta(t, pubkey, cidr)
-		var p Peer
-		must.NoError(t, decodeMeta(meta, &p))
-		return member{meta: meta, peer: p}
+	makePeer := func(pubkey, cidr string) Peer {
+		return Peer{PublicKey: pubkey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{cidr}}
 	}
 	x, y, z, w := genKey(), genKey(), genKey(), genKey()
 
-	prev := map[string]member{
-		x: makeMember(x, "fd00::1/128"),
-		y: makeMember(y, "fd00::2/128"),
-		w: makeMember(w, "fd00::4/128"),
+	prev := map[string]Peer{
+		x: makePeer(x, "fd00::1/128"),
+		y: makePeer(y, "fd00::2/128"),
+		w: makePeer(w, "fd00::4/128"),
 	}
-	cur := map[string]member{
-		x: makeMember(x, "fd00::1/128"),
-		z: makeMember(z, "fd00::3/128"),
-		w: makeMember(w, "fd00::5/128"),
+	cur := map[string]Peer{
+		x: makePeer(x, "fd00::1/128"),
+		z: makePeer(z, "fd00::3/128"),
+		w: makePeer(w, "fd00::5/128"),
 	}
 
 	changes := diff(prev, cur)
@@ -204,4 +201,18 @@ func TestDiff(t *testing.T) {
 	must.EqOp(t, 1, removes, must.Sprint("Y is removed"))
 
 	must.SliceEmpty(t, diff(cur, cur))
+}
+
+func TestResolveConflicts(t *testing.T) {
+	members := map[string]member{
+		"a": {peer: Peer{PublicKey: "a", AllowedIPs: []string{"fd00::a/128"}}},
+		"b": {peer: Peer{PublicKey: "b", AllowedIPs: []string{"fd00::b/128"}}},
+		"c": {peer: Peer{PublicKey: "c", AllowedIPs: []string{"fd00::c/128", "fd00::b/128"}}},
+	}
+
+	effective := resolveConflicts(members)
+
+	must.Eq(t, []string{"fd00::a/128"}, effective["a"].AllowedIPs)
+	must.MapNotContainsKey(t, effective, "b")
+	must.Eq(t, []string{"fd00::c/128"}, effective["c"].AllowedIPs)
 }

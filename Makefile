@@ -1,11 +1,11 @@
-BINARY := wg-mesh
+BINARY := pigeon-mesh
 OUTDIR := build
 
 .PHONY: build clean test vet e2e perf
 
 build:
 	@mkdir -p $(OUTDIR)
-	go build -o $(OUTDIR)/$(BINARY) ./cmd/wg-mesh
+	go build -o $(OUTDIR)/$(BINARY) ./cmd/pigeon-mesh
 
 clean:
 	rm -rf $(OUTDIR)

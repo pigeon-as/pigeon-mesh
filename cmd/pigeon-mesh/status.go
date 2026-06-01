@@ -17,14 +17,14 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/pigeon-as/wg-mesh/internal/mesh"
+	"github.com/pigeon-as/pigeon-mesh/internal/mesh"
 )
 
 const statusTimeout = 5 * time.Second
 
 func runStatus(args []string) int {
-	fs := flag.NewFlagSet("wg-mesh status", flag.ContinueOnError)
-	socket := fs.String("socket", mesh.DefaultSocketPath, "path to the wg-mesh status socket")
+	fs := flag.NewFlagSet("pigeon-mesh status", flag.ContinueOnError)
+	socket := fs.String("socket", mesh.DefaultSocketPath, "path to the pigeon-mesh status socket")
 	asJSON := fs.Bool("json", false, "print the raw JSON response")
 	switch err := fs.Parse(args); {
 	case errors.Is(err, flag.ErrHelp):
@@ -34,7 +34,7 @@ func runStatus(args []string) int {
 	}
 
 	if err := showStatus(*socket, *asJSON); err != nil {
-		fmt.Fprintln(os.Stderr, "wg-mesh status:", err)
+		fmt.Fprintln(os.Stderr, "pigeon-mesh status:", err)
 		return 1
 	}
 	return 0

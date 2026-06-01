@@ -13,9 +13,9 @@ import (
 	"syscall"
 
 	sockaddr "github.com/hashicorp/go-sockaddr/template"
-	"github.com/pigeon-as/wg-mesh/internal/mesh"
-	"github.com/pigeon-as/wg-mesh/internal/sdnotify"
-	"github.com/pigeon-as/wg-mesh/internal/wg"
+	"github.com/pigeon-as/pigeon-mesh/internal/mesh"
+	"github.com/pigeon-as/pigeon-mesh/internal/sdnotify"
+	"github.com/pigeon-as/pigeon-mesh/internal/wg"
 )
 
 func main() {
@@ -33,7 +33,7 @@ func main() {
 	gossipKeyFile := flag.String("gossip-key-file", "", "JSON file of base64-encoded gossip encryption keys")
 	persistentKeepalive := flag.Int("persistent-keepalive", 0, "PersistentKeepalive interval in seconds advertised to peers (0 disables)")
 	profile := flag.String("profile", "wan", "memberlist timing profile: lan, wan, or local")
-	peerPolicy := flag.String("peer-policy", "", "expr predicate (returns bool) evaluated per peer at admission; false rejects. In scope: peer (Peer), peers() (other members), cidrSubset(outer, inner) bool. See docs/quickstart.md.")
+	peerPolicy := flag.String("peer-policy", "", "expr predicate (returns bool) evaluated per peer at admission; false rejects. In scope: peer (candidate Peer), self (this node's Peer), cidrSubset(outer, inner) bool. Tags are self-declared; bind to pubkeys for trust. See docs/quickstart.md.")
 	socket := flag.String("socket", mesh.DefaultSocketPath, "path to the status query socket served for the status command; empty disables")
 	var tagFlags []string
 	flag.Func("tag", "tag for this node, repeatable as k=v", func(v string) error {
@@ -165,12 +165,12 @@ func main() {
 		go reloadKeyringOnSIGHUP(ctx, m, *gossipKeyFile)
 	}
 
-	slog.Info("wg-mesh up", "interface", *iface, "endpoint", ep, "address", ip.String())
+	slog.Info("pigeon-mesh up", "interface", *iface, "endpoint", ep, "address", ip.String())
 	if err := m.Run(ctx); err != nil {
-		slog.Error("wg-mesh stopped", "err", err)
+		slog.Error("pigeon-mesh stopped", "err", err)
 		os.Exit(1)
 	}
-	slog.Info("wg-mesh stopped")
+	slog.Info("pigeon-mesh stopped")
 }
 
 func reloadKeyringOnSIGHUP(ctx context.Context, m *mesh.Mesh, path string) {

@@ -11,19 +11,21 @@ import (
 	"maps"
 	"math/rand/v2"
 	"net"
+	"reflect"
 	"slices"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/hashicorp/memberlist"
-	"github.com/pigeon-as/wg-mesh/internal/wg"
+	"github.com/pigeon-as/pigeon-mesh/internal/wg"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
 const (
 	retryJoinInterval = 30 * time.Second
 	reconcileInterval = 60 * time.Second
+	retryFailInterval = 15 * time.Second
 )
 
 type Config struct {
@@ -49,7 +51,7 @@ type Mesh struct {
 	memberlist  *memberlist.Memberlist
 	mu          sync.RWMutex
 	members     map[string]member
-	peers       map[string]member
+	peers       map[string]Peer
 	reconcileCh chan struct{}
 	seedCount   int
 }
@@ -73,7 +75,7 @@ func New(cfg Config) (*Mesh, error) {
 		cfg:         cfg,
 		meta:        meta,
 		members:     make(map[string]member),
-		peers:       make(map[string]member),
+		peers:       make(map[string]Peer),
 		reconcileCh: make(chan struct{}, 1),
 	}
 
@@ -146,13 +148,13 @@ func (m *Mesh) join() (int, error) {
 	return m.memberlist.Join(targets)
 }
 
-func diff(prev, cur map[string]member) []wgtypes.PeerConfig {
+func diff(prev, cur map[string]Peer) []wgtypes.PeerConfig {
 	var changes []wgtypes.PeerConfig
-	for name, e := range cur {
-		if prevEntry, ok := prev[name]; ok && bytes.Equal(prevEntry.meta, e.meta) {
+	for name, p := range cur {
+		if prevPeer, ok := prev[name]; ok && reflect.DeepEqual(prevPeer, p) {
 			continue
 		}
-		pc, err := e.peer.toWG()
+		pc, err := p.toWG()
 		if err != nil {
 			slog.Warn("peer to wg", "node", name, "err", err)
 			continue
@@ -206,14 +208,14 @@ func (m *Mesh) removeMember(n *memberlist.Node) {
 
 func (m *Mesh) handleNodeConflict(existing, other *memberlist.Node) {
 	if existing.Name == m.cfg.Self.PublicKey {
-		slog.Error("name conflict: another node claims our pubkey",
-			"name", existing.Name,
+		slog.Error("another node is advertising our WireGuard key; the same private key is on more than one host. staying up as the key holder, regenerate the key on the other host",
+			"pubkey", existing.Name,
 			"other_addr", other.Addr.String(), "other_port", other.Port)
 		return
 	}
-	slog.Warn("name conflict",
-		"name", existing.Name,
-		"existing_addr", existing.Addr.String(), "existing_port", existing.Port,
+	slog.Warn("two peers advertise the same WireGuard key; keeping the first-seen endpoint until the duplicate key is regenerated",
+		"pubkey", existing.Name,
+		"kept_addr", existing.Addr.String(), "kept_port", existing.Port,
 		"other_addr", other.Addr.String(), "other_port", other.Port)
 }
 
@@ -224,17 +226,26 @@ func (m *Mesh) triggerReconcile() {
 	}
 }
 
-func (m *Mesh) peerSnapshot(exclude string) []Peer {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	peers := make([]Peer, 0, len(m.members))
-	for name, e := range m.members {
-		if name == exclude {
+func resolveConflicts(members map[string]member) map[string]Peer {
+	claims := make(map[string]int)
+	for _, e := range members {
+		for _, ip := range e.peer.AllowedIPs {
+			claims[ip]++
+		}
+	}
+	effective := make(map[string]Peer, len(members))
+	for name, e := range members {
+		kept := slices.DeleteFunc(slices.Clone(e.peer.AllowedIPs), func(ip string) bool {
+			return claims[ip] > 1
+		})
+		if len(kept) == 0 {
 			continue
 		}
-		peers = append(peers, e.peer)
+		p := e.peer
+		p.AllowedIPs = kept
+		effective[name] = p
 	}
-	return peers
+	return effective
 }
 
 func (m *Mesh) admitted(name string, meta []byte) bool {
@@ -248,12 +259,14 @@ func (m *Mesh) reconcile() error {
 	m.mu.RLock()
 	cur := maps.Clone(m.members)
 	m.mu.RUnlock()
-	changes := diff(m.peers, cur)
+
+	effective := resolveConflicts(cur)
+	changes := diff(m.peers, effective)
 	if len(changes) > 0 {
 		if err := m.cfg.WG.Apply(m.cfg.Iface, changes); err != nil {
 			return err
 		}
-		m.peers = cur
+		m.peers = effective
 	}
 	return nil
 }
@@ -276,25 +289,28 @@ func (m *Mesh) Run(ctx context.Context) error {
 	}
 	go m.retryJoin(ctx)
 
-	if err := m.reconcile(); err != nil {
-		slog.Warn("reconcile", "err", err)
-	}
-
 	ticker := time.NewTicker(reconcileInterval)
 	defer ticker.Stop()
 
+	retryAfter := func(err error) <-chan time.Time {
+		if err != nil {
+			slog.Warn("reconcile", "err", err)
+			return time.After(retryFailInterval)
+		}
+		return nil
+	}
+
+	retry := retryAfter(m.reconcile())
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-m.reconcileCh:
-			if err := m.reconcile(); err != nil {
-				slog.Warn("reconcile", "err", err)
-			}
+			retry = retryAfter(m.reconcile())
 		case <-ticker.C:
-			if err := m.reconcile(); err != nil {
-				slog.Warn("reconcile", "err", err)
-			}
+			retry = retryAfter(m.reconcile())
+		case <-retry:
+			retry = retryAfter(m.reconcile())
 		}
 	}
 }

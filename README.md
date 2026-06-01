@@ -1,4 +1,4 @@
-# wg-mesh
+# pigeon-mesh
 
 A peer-to-peer WireGuard full-mesh daemon. No central server. Nodes are
 identified by WireGuard public key; the kernel WG peer set follows the
@@ -7,13 +7,13 @@ gossip cluster.
 ## Run
 
 ```sh
-wg-mesh \
+pigeon-mesh \
   --interface wg0 \
   --endpoint 203.0.113.1:51820 \
   --peer-policy 'all(peer.AllowedIPs, cidrSubset("fd00::/8", #))'
 ```
 
-`wg-mesh --help` lists the full flag set.
+`pigeon-mesh --help` lists the full flag set.
 
 `--endpoint` and `--address` accept
 [go-sockaddr](https://github.com/hashicorp/go-sockaddr) templates for
@@ -23,10 +23,8 @@ runtime resolution:
 --endpoint '[{{ GetPublicInterfaces | include "type" "IPv6" | limit 1 | attr "address" }}]:51820'
 ```
 
-`--peer-policy` is an [expr](https://expr-lang.org) boolean predicate
-evaluated per peer at admission. Anything expressible in expr (CIDR
-range, identity binding, multi-attribute checks) works as policy.
-Rejected peers are skipped; wg-mesh keeps running.
+`--peer-policy` is an optional [expr](https://expr-lang.org) predicate run
+per peer at admission; a false result rejects the peer.
 
 Runs as systemd `Type=notify`; honors `WatchdogSec=`.
 
@@ -48,17 +46,16 @@ wg set wg0 peer <base64-pubkey> \
 
 Existing kernel peers are used to bootstrap the gossip cluster.
 
-## Peer policy examples
+## Peer policy
+
+Recommended baseline, confining each peer to the overlay so none can
+advertise `::/0` or a route outside it:
 
 ```js
-// containment: every advertised AllowedIP must be inside the overlay.
-// Without this, a peer can advertise ::/0 and hijack default routes.
 all(peer.AllowedIPs, cidrSubset("fd00::/8", #))
-
-// no address theft: reject any route that overlaps with one another peer already claims.
-all(peer.AllowedIPs, let r = #;
-    none(peers(), any(#.AllowedIPs, cidrSubset(r, #) || cidrSubset(#, r))))
 ```
+
+In scope: `peer` (the candidate), `self` (this node), `cidrSubset(outer, inner)`.
 
 ## Encrypted gossip
 
@@ -73,7 +70,7 @@ key signs outgoing; all are accepted on receive. `SIGHUP` reloads.
 
 ## Trust model
 
-- WireGuard's Noise handshake is the only transport security. wg-mesh
+- WireGuard's Noise handshake is the only transport security. pigeon-mesh
   never reads or persists the private key.
 - Gossip is unencrypted unless `--gossip-key-file` is set.
 - By default, peers are trusted with whatever `allowed_ips` they
@@ -82,10 +79,10 @@ key signs outgoing; all are accepted on receive. `SIGHUP` reloads.
 
 ## Operations
 
-Live state: `wg show <interface>` for the kernel peers, or `wg-mesh status`
+Live state: `wg show <interface>` for the kernel peers, or `pigeon-mesh status`
 for the gossip view, showing each peer's endpoint, tags, and SWIM state
-(alive/suspect/dead). `wg-mesh status --json` for scripting. Served on
-demand over a unix socket (`--socket`, default `/run/wg-mesh.sock`; empty
+(alive/suspect/dead). `pigeon-mesh status --json` for scripting. Served on
+demand over a unix socket (`--socket`, default `/run/pigeon-mesh.sock`; empty
 disables; set it per instance to run several on one host).
 
 Stop or crash the daemon; peers detect via SWIM probes (~30s in WAN
