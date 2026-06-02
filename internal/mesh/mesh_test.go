@@ -205,3 +205,19 @@ func TestDiff(t *testing.T) {
 
 	must.SliceEmpty(t, diff(cur, cur))
 }
+
+func TestResolveConflicts(t *testing.T) {
+	peers := map[string]Peer{
+		"a": {PublicKey: "a", AllowedIPs: []string{"fd00::a/128"}},
+		"b": {PublicKey: "b", AllowedIPs: []string{"fd00::b/128"}},
+		"c": {PublicKey: "c", AllowedIPs: []string{"fd00::c/128", "fd00::b/128"}},
+	}
+
+	effective, conflicts := resolveConflicts(peers)
+
+	must.Eq(t, []string{"fd00::a/128"}, effective["a"].AllowedIPs)
+	must.Eq(t, []string{"fd00::c/128"}, effective["c"].AllowedIPs, must.Sprint("c keeps its unconflicting route"))
+	must.MapNotContainsKey(t, effective, "b", must.Sprint("b's only route conflicts, so b is dropped"))
+	must.MapLen(t, 1, conflicts)
+	must.Eq(t, []string{"b", "c"}, conflicts["fd00::b/128"], must.Sprint("conflicting route lists both claimants, sorted"))
+}

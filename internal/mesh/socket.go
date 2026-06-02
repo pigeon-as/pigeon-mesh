@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -88,10 +89,12 @@ func (m *Mesh) status() Status {
 			Status:     peerStatus(n),
 		}
 	}
+	conflicts := maps.Clone(m.conflicts)
 	m.mu.RUnlock()
 	return Status{
 		Self:      m.cfg.Self.PublicKey,
 		UpdatedAt: nowStamp(),
 		Peers:     peers,
+		Conflicts: conflicts,
 	}
 }

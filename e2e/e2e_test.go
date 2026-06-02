@@ -281,3 +281,30 @@ func TestMesh_PubkeyPolicy(t *testing.T) {
 	must.False(t, strings.Contains(wgPeers(a), c.pub),
 		must.Sprint("A must reject C (pubkey not in policy allowlist)"))
 }
+
+func TestMesh_DuplicateRouteDropped(t *testing.T) {
+	skipIfNoNetns(t)
+	newBridge(t, "wgmdup-br")
+
+	a := newNode(t, "wgmdup-a", "10.144.0.1", "fd00:e2ed:a::1", 51820, "wgmdup-br")
+	b := newNode(t, "wgmdup-b", "10.144.0.2", "fd00:e2ed:b::1", 51820, "wgmdup-br")
+	c := newNode(t, "wgmdup-c", "10.144.0.3", "fd00:e2ed:c::1", 51820, "wgmdup-br")
+
+	sock := filepath.Join(t.TempDir(), "a.sock")
+	startMesh(t, a, []*node{b}, 51820, "--socket", sock)
+	startMesh(t, b, []*node{a, c}, 51820)
+	startMesh(t, c, []*node{b}, 51820, "--extra-allowed-ips", b.overlay+"/128")
+
+	waitFor(t, "a sees c", 15*time.Second, func() bool {
+		return strings.Contains(wgPeers(a), c.pub)
+	})
+	time.Sleep(3 * time.Second)
+
+	must.False(t, strings.Contains(wgPeers(a), b.pub),
+		must.Sprint("b's route is also claimed by c, so it is installed for neither"))
+
+	out, err := exec.Command(meshBin, "status", "--socket", sock, "--json").Output()
+	must.NoError(t, err)
+	must.StrContains(t, string(out), b.overlay,
+		must.Sprint("the conflicting route must be surfaced in status"))
+}

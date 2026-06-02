@@ -52,9 +52,6 @@ func sha256Hex(msg string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// b64decode decodes a standard-base64 string (such as a WireGuard public key)
-// to its raw bytes, so a policy can hash the key material itself rather than
-// its text, e.g. sha256(base64decode(peer.PublicKey)). Returns "" on bad input.
 func b64decode(s string) string {
 	raw, err := base64.StdEncoding.DecodeString(s)
 	if err != nil {
@@ -63,11 +60,6 @@ func b64decode(s string) string {
 	return string(raw)
 }
 
-// hostbits returns the host portion of addr (the bytes below a byte-aligned
-// prefix) as lowercase hex, so a policy can compare an address against a hash
-// of the key, e.g. hostbits("fdcc::/16", peer.AllowedIPs[0]) ==
-// sha256(base64decode(peer.PublicKey))[0:28]. Returns "" on bad input or a
-// prefix length that is not a multiple of 8.
 func hostbits(prefix, addr string) string {
 	pfx, err := netip.ParsePrefix(prefix)
 	if err != nil || pfx.Bits()%8 != 0 {

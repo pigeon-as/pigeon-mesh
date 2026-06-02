@@ -51,6 +51,7 @@ type Mesh struct {
 	mu          sync.RWMutex
 	members     map[string]member
 	peers       map[string]Peer
+	conflicts   map[string][]string
 	reconcileCh chan struct{}
 	seedCount   int
 }
@@ -75,6 +76,7 @@ func New(cfg Config) (*Mesh, error) {
 		meta:        meta,
 		members:     make(map[string]member),
 		peers:       make(map[string]Peer),
+		conflicts:   make(map[string][]string),
 		reconcileCh: make(chan struct{}, 1),
 	}
 
@@ -235,6 +237,52 @@ func (m *Mesh) admitted(name string, meta []byte) bool {
 	return ok && bytes.Equal(e.meta, meta)
 }
 
+func resolveConflicts(peers map[string]Peer) (map[string]Peer, map[string][]string) {
+	claims := make(map[string][]string)
+	for name, p := range peers {
+		for _, ip := range p.AllowedIPs {
+			claims[ip] = append(claims[ip], name)
+		}
+	}
+	var conflicts map[string][]string
+	for ip, owners := range claims {
+		if len(owners) > 1 {
+			if conflicts == nil {
+				conflicts = make(map[string][]string)
+			}
+			slices.Sort(owners)
+			conflicts[ip] = owners
+		}
+	}
+	if conflicts == nil {
+		return peers, nil
+	}
+	effective := make(map[string]Peer, len(peers))
+	for name, p := range peers {
+		kept := slices.DeleteFunc(slices.Clone(p.AllowedIPs), func(ip string) bool {
+			return len(claims[ip]) > 1
+		})
+		if len(kept) == 0 {
+			continue
+		}
+		p.AllowedIPs = kept
+		effective[name] = p
+	}
+	return effective, conflicts
+}
+
+func (m *Mesh) setConflicts(conflicts map[string][]string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for route, owners := range conflicts {
+		if _, seen := m.conflicts[route]; !seen {
+			slog.Warn("route claimed by more than one peer; installed for none until resolved",
+				"route", route, "claimed_by", owners)
+		}
+	}
+	m.conflicts = conflicts
+}
+
 func (m *Mesh) reconcile() error {
 	m.mu.RLock()
 	cur := make(map[string]Peer, len(m.members))
@@ -243,12 +291,15 @@ func (m *Mesh) reconcile() error {
 	}
 	m.mu.RUnlock()
 
-	changes := diff(m.peers, cur)
+	effective, conflicts := resolveConflicts(cur)
+	m.setConflicts(conflicts)
+
+	changes := diff(m.peers, effective)
 	if len(changes) > 0 {
 		if err := m.cfg.WG.Apply(m.cfg.Iface, changes); err != nil {
 			return err
 		}
-		m.peers = cur
+		m.peers = effective
 	}
 	return nil
 }
