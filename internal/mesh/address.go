@@ -51,7 +51,7 @@ func ParseAllowedIPs(s string) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("allowed-ips %q: %w", c, err)
 		}
-		out = append(out, pfx.String())
+		out = append(out, pfx.Masked().String())
 	}
 	if len(out) == 0 {
 		return nil, errors.New("at least one CIDR required")

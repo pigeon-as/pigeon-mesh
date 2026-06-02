@@ -99,7 +99,7 @@ func TestHostbits(t *testing.T) {
 }
 
 func TestPeerPolicy_SelfCert(t *testing.T) {
-	p, err := ParsePeerPolicy(`hostbits("fdcc::/16", peer.AllowedIPs[0]) == sha256(base64decode(peer.PublicKey))[0:28]`)
+	p, err := ParsePeerPolicy(`all(peer.AllowedIPs, hostbits("fdcc::/16", #) == sha256(base64decode(peer.PublicKey))[0:28])`)
 	must.NoError(t, err)
 
 	pk := base64.StdEncoding.EncodeToString([]byte("example key material"))
@@ -113,6 +113,10 @@ func TestPeerPolicy_SelfCert(t *testing.T) {
 	ok, err = p.accept(Peer{PublicKey: pk, AllowedIPs: []string{"fdcc::dead/128"}}, Peer{})
 	must.NoError(t, err)
 	must.False(t, ok, must.Sprint("a different address must reject"))
+
+	ok, err = p.accept(Peer{PublicKey: pk, AllowedIPs: []string{want, "fdcc::/64"}}, Peer{})
+	must.NoError(t, err)
+	must.False(t, ok, must.Sprint("derived address plus an appended uncertified route must reject"))
 
 	other := base64.StdEncoding.EncodeToString([]byte("a different key value"))
 	ok, err = p.accept(Peer{PublicKey: other, AllowedIPs: []string{want}}, Peer{})
