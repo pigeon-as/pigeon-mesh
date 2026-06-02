@@ -77,8 +77,6 @@ func showStatus(socket string, asJSON bool) error {
 
 func printStatus(st mesh.Status) {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	defer w.Flush()
-
 	row := func(cols ...string) {
 		for i, c := range cols {
 			cols[i] = cmp.Or(c, "-")
@@ -94,6 +92,14 @@ func printStatus(st mesh.Status) {
 			name += " (self)"
 		}
 		row(name, p.Endpoint, strings.Join(p.AllowedIPs, ","), p.Status, formatTags(p.Tags))
+	}
+	w.Flush()
+
+	if len(st.Conflicts) > 0 {
+		fmt.Println("\nconflicting routes (installed for no peer):")
+		for _, route := range slices.Sorted(maps.Keys(st.Conflicts)) {
+			fmt.Printf("  %s  claimed by %s\n", route, strings.Join(st.Conflicts[route], ", "))
+		}
 	}
 }
 

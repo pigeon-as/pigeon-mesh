@@ -51,7 +51,13 @@ Existing kernel peers are used to bootstrap the gossip cluster.
 Addresses can be human-chosen or self-certifying, not both without an authority
 (Zooko's triangle). Pick a model with `--peer-policy`.
 
-Contain to the overlay:
+Allowlist known keys (Consul's ACL model, translated):
+
+```js
+peer.PublicKey in ["<key-a>", "<key-b>"]
+```
+
+Contain everyone to the overlay:
 
 ```js
 all(peer.AllowedIPs, cidrSubset("fdcc::/16", #))
@@ -63,14 +69,12 @@ Self-certify, so no one can claim another's address:
 hostbits("fdcc::/16", peer.AllowedIPs[0]) == sha256(base64decode(peer.PublicKey))[0:28]
 ```
 
-Both:
+Predicates compose with `&&`. Helpers: `cidrSubset`, `sha256`, `hostbits`,
+`base64decode`.
 
-```js
-hostbits("fdcc::/16", peer.AllowedIPs[0]) == sha256(base64decode(peer.PublicKey))[0:28]
-  && all(peer.AllowedIPs, cidrSubset("fdcc::/16", #))
-```
-
-Helpers: `cidrSubset`, `sha256`, `hostbits`, `base64decode`.
+A route claimed by two peers is one the daemon can't adjudicate, so it installs
+that route for neither and reports it in `pigeon-mesh status`. Self-certifying
+addresses prevent the conflict.
 
 ## Encrypted gossip
 
@@ -90,14 +94,16 @@ key signs outgoing; all are accepted on receive. `SIGHUP` reloads.
 - Gossip is unencrypted unless `--gossip-key-file` is set; the gossip key and
   the WireGuard peers you add are the trust boundary, and inside it members are
   trusted.
-- A member can claim any overlay address unless `--peer-policy` binds addresses
-  to keys (see Peer policy).
+- Without a binding `--peer-policy`, a member can claim any overlay address; a
+  route two members claim is installed for neither and shown in `status`.
+  Self-certification (see Peer policy) prevents the conflict.
 
 ## Operations
 
 Live state: `wg show <interface>` for the kernel peers, or `pigeon-mesh status`
 for the gossip view, showing each peer's endpoint, tags, and SWIM state
-(alive/suspect/dead). `pigeon-mesh status --json` for scripting. Served on
+(alive/suspect/dead), plus any conflicting routes. `pigeon-mesh status --json`
+for scripting. Served on
 demand over a unix socket (`--socket`, default `/run/pigeon-mesh.sock`; empty
 disables; set it per instance to run several on one host).
 
