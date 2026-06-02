@@ -15,7 +15,7 @@ ip link set wg0 up
 
 pigeon-mesh --interface wg0 \
   --endpoint '[{{ GetPublicInterfaces | include "type" "IPv6" | limit 1 | attr "address" }}]:51820' \
-  --peer-policy 'hostbits("fdcc::/16", peer.AllowedIPs[0]) == sha256(base64decode(peer.PublicKey))[0:28]'
+  --peer-policy 'all(peer.AllowedIPs, hostbits("fdcc::/16", #) == sha256(base64decode(peer.PublicKey))[0:28])'
 ```
 
 ## Adding a peer

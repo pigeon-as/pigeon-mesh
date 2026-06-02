@@ -72,3 +72,9 @@ func TestEncodeDecodeMeta_RoundTrip(t *testing.T) {
 	must.SliceLen(t, 2, out.AllowedIPs)
 	must.EqOp(t, in.PersistentKeepalive, out.PersistentKeepalive)
 }
+
+func TestCanonicalizeAllowedIPs_MasksHostBits(t *testing.T) {
+	ips := []string{"fdcc::dead/64", "fdcc::1/128", "192.168.1.5/24"}
+	canonicalizeAllowedIPs(ips)
+	must.Eq(t, []string{"fdcc::/64", "fdcc::1/128", "192.168.1.0/24"}, ips)
+}

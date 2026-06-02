@@ -51,7 +51,7 @@ Existing kernel peers are used to bootstrap the gossip cluster.
 Addresses can be human-chosen or self-certifying, not both without an authority
 (Zooko's triangle). Pick a model with `--peer-policy`.
 
-Allowlist known keys (Consul's ACL model, translated):
+Allowlist known keys:
 
 ```js
 peer.PublicKey in ["<key-a>", "<key-b>"]
@@ -66,7 +66,7 @@ all(peer.AllowedIPs, cidrSubset("fdcc::/16", #))
 Self-certify, so no one can claim another's address:
 
 ```js
-hostbits("fdcc::/16", peer.AllowedIPs[0]) == sha256(base64decode(peer.PublicKey))[0:28]
+all(peer.AllowedIPs, hostbits("fdcc::/16", #) == sha256(base64decode(peer.PublicKey))[0:28])
 ```
 
 Predicates compose with `&&`. Helpers: `cidrSubset`, `sha256`, `hostbits`,

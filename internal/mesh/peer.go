@@ -41,7 +41,7 @@ func decodeMeta(b []byte, p *Peer) error {
 func canonicalizeAllowedIPs(ips []string) {
 	for i, s := range ips {
 		if pfx, err := netip.ParsePrefix(s); err == nil {
-			ips[i] = pfx.String()
+			ips[i] = pfx.Masked().String()
 		}
 	}
 }

@@ -89,6 +89,13 @@ func TestParseAllowedIPs_Multiple(t *testing.T) {
 	must.EqOp(t, "192.168.1.0/24", out[1])
 }
 
+func TestParseAllowedIPs_MasksHostBits(t *testing.T) {
+	out, err := ParseAllowedIPs("fdcc::dead/64")
+	must.NoError(t, err)
+	must.SliceLen(t, 1, out)
+	must.EqOp(t, "fdcc::/64", out[0])
+}
+
 func TestParseAllowedIPs_Rejected(t *testing.T) {
 	for _, bad := range []string{
 		"",
