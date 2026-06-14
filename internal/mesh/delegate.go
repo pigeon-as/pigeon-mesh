@@ -3,9 +3,6 @@
 package mesh
 
 import (
-	"fmt"
-	"log/slog"
-
 	"github.com/hashicorp/memberlist"
 )
 
@@ -15,7 +12,6 @@ type delegate struct {
 
 var (
 	_ memberlist.Delegate         = (*delegate)(nil)
-	_ memberlist.AliveDelegate    = (*delegate)(nil)
 	_ memberlist.EventDelegate    = (*delegate)(nil)
 	_ memberlist.ConflictDelegate = (*delegate)(nil)
 )
@@ -32,34 +28,4 @@ func (d *delegate) NotifyLeave(n *memberlist.Node)  { d.mesh.removeMember(n) }
 
 func (d *delegate) NotifyConflict(existing, other *memberlist.Node) {
 	d.mesh.handleNodeConflict(existing, other)
-}
-
-func (d *delegate) NotifyAlive(node *memberlist.Node) error {
-	policy := d.mesh.cfg.PeerPolicy
-	if policy == nil {
-		return nil
-	}
-	if node.Name == d.mesh.cfg.Self.PublicKey {
-		return nil
-	}
-	if len(node.Meta) == 0 {
-		return nil
-	}
-	if d.mesh.admitted(node.Name, node.Meta) {
-		return nil
-	}
-	p, err := decodePeer(node.Name, node.Meta)
-	if err != nil {
-		return err
-	}
-	ok, err := policy.accept(p, d.mesh.cfg.Self)
-	if err != nil {
-		slog.Warn("peer-policy eval", "node", node.Name, "err", err)
-		return err
-	}
-	if !ok {
-		slog.Warn("peer rejected by policy", "node", node.Name)
-		return fmt.Errorf("peer %s rejected by policy", node.Name)
-	}
-	return nil
 }

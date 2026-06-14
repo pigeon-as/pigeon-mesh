@@ -2,6 +2,8 @@ package mesh
 
 import (
 	"context"
+	"crypto/sha512"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
@@ -9,6 +11,45 @@ import (
 	"slices"
 	"strings"
 )
+
+func DeriveAddr(pubkey string, prefix netip.Prefix) (netip.Addr, error) {
+	if !prefix.Addr().Is6() || prefix.Bits()%8 != 0 {
+		return netip.Addr{}, fmt.Errorf("overlay prefix %s must be a byte-aligned IPv6 prefix", prefix)
+	}
+	raw, err := base64.StdEncoding.DecodeString(pubkey)
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("pubkey %q: %w", pubkey, err)
+	}
+	sum := sha512.Sum512(raw)
+	addr := prefix.Masked().Addr().As16()
+	copy(addr[prefix.Bits()/8:], sum[:])
+	return netip.AddrFrom16(addr), nil
+}
+
+func validateOverlayAddr(pubkey string, p Peer, prefix netip.Prefix) error {
+	want, err := DeriveAddr(pubkey, prefix)
+	if err != nil {
+		return err
+	}
+	var claimsSelf bool
+	for _, c := range p.AllowedIPs {
+		pfx, err := netip.ParsePrefix(c)
+		if err != nil {
+			return fmt.Errorf("allowed-ip %q: %w", c, err)
+		}
+		if !prefix.Contains(pfx.Addr()) {
+			continue
+		}
+		if pfx.Bits() != pfx.Addr().BitLen() || pfx.Addr() != want {
+			return fmt.Errorf("claims overlay route %s but key derives %s", c, want)
+		}
+		claimsSelf = true
+	}
+	if !claimsSelf {
+		return fmt.Errorf("advertises no overlay address; key derives %s", want)
+	}
+	return nil
+}
 
 func InterfaceAddress(iface string) (netip.Addr, error) {
 	ifi, err := net.InterfaceByName(iface)

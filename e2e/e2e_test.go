@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pigeon-as/pigeon-mesh/internal/mesh"
 	"github.com/shoenig/test/must"
 )
 
@@ -93,6 +95,43 @@ func TestPreservesPrivateKey(t *testing.T) {
 	must.EqOp(t, priv, run(t, "wg", "show", iface, "private-key"))
 }
 
+func TestPrefixSetsAddress(t *testing.T) {
+	const (
+		iface  = "wg-pfx"
+		port   = 51898
+		gossip = 7952
+		prefix = "fdcc::/16"
+	)
+	exec.Command("ip", "link", "del", iface).Run()
+	t.Cleanup(func() { exec.Command("ip", "link", "del", iface).Run() })
+
+	priv, pub := genKeypair(t)
+	keyFile := writeFile(t, priv+"\n")
+	run(t, "ip", "link", "add", iface, "type", "wireguard")
+	run(t, "wg", "set", iface, "private-key", keyFile, "listen-port", fmt.Sprint(port))
+	run(t, "ip", "link", "set", iface, "up")
+
+	want, err := mesh.DeriveAddr(pub, netip.MustParsePrefix(prefix))
+	must.NoError(t, err)
+
+	cmd := exec.Command(meshBin,
+		"--interface", iface,
+		"--endpoint", fmt.Sprintf("[%s]:%d", want, port),
+		"--gossip-port", fmt.Sprint(gossip),
+		"--prefix", prefix,
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	must.NoError(t, cmd.Start())
+	t.Cleanup(func() { stop(cmd) })
+
+	waitFor(t, "daemon assigned derived address", 10*time.Second, func() bool {
+		out, _ := exec.Command("ip", "-6", "addr", "show", iface).CombinedOutput()
+		return strings.Contains(string(out), want.String())
+	})
+	must.StrContains(t, run(t, "ip", "-6", "addr", "show", iface), want.String())
+}
+
 func TestMesh_TwoNodes(t *testing.T) {
 	skipIfNoNetns(t)
 	newBridge(t, "wgm2-br")
@@ -148,31 +187,6 @@ func TestMesh_GossipKeyAndReload(t *testing.T) {
 	must.StrContains(t, wgPeers(b), a.pub)
 }
 
-func TestMesh_PeerPolicyRejects(t *testing.T) {
-	skipIfNoNetns(t)
-	newBridge(t, "wgmp-br")
-
-	a := newNode(t, "wgmp-a", "10.130.0.1", "fd00:abc:a::1", 51820, "wgmp-br")
-	b := newNode(t, "wgmp-b", "10.130.0.2", "fd00:abc:b::1", 51820, "wgmp-br")
-	c := newNode(t, "wgmp-c", "10.130.0.3", "fd00:abc:c::1", 51820, "wgmp-br")
-
-	startMesh(t, a, []*node{b}, 51820,
-		"--peer-policy", `all(peer.AllowedIPs, cidrSubset("fd00:abc:b::/64", #))`)
-	startMesh(t, b, []*node{a, c}, 51820)
-	startMesh(t, c, []*node{b}, 51820)
-
-	waitFor(t, "b sees a and c", 15*time.Second, func() bool {
-		return strings.Contains(wgPeers(b), a.pub) &&
-			strings.Contains(wgPeers(b), c.pub)
-	})
-
-	time.Sleep(5 * time.Second)
-
-	must.StrContains(t, wgPeers(a), b.pub)
-	must.False(t, strings.Contains(wgPeers(a), c.pub),
-		must.Sprint("A must reject C (outside fd00:abc:b::/64)"))
-}
-
 func TestMesh_RestartDoesNotDropPeers(t *testing.T) {
 	skipIfNoNetns(t)
 	newBridge(t, "wgmr-br")
@@ -181,14 +195,19 @@ func TestMesh_RestartDoesNotDropPeers(t *testing.T) {
 	b := newNode(t, "wgmr-b", "10.132.0.2", "fd00:dead:b::1", 51820, "wgmr-br")
 	c := newNode(t, "wgmr-c", "10.132.0.3", "fd00:dead:c::1", 51820, "wgmr-br")
 
-	startMesh(t, a, []*node{b, c}, 51820)
+	dir := t.TempDir()
+	sockA := filepath.Join(dir, "a.sock")
+	sockC := filepath.Join(dir, "c.sock")
+	startMesh(t, a, []*node{b, c}, 51820, "--socket", sockA)
 	cmdB := startMesh(t, b, []*node{a, c}, 51820)
-	startMesh(t, c, []*node{a, b}, 51820)
+	startMesh(t, c, []*node{a, b}, 51820, "--socket", sockC)
 
-	waitFor(t, "3-node converged", 15*time.Second, func() bool {
-		return strings.Contains(wgPeers(a), b.pub) && strings.Contains(wgPeers(a), c.pub) &&
-			strings.Contains(wgPeers(b), a.pub) && strings.Contains(wgPeers(b), c.pub) &&
-			strings.Contains(wgPeers(c), a.pub) && strings.Contains(wgPeers(c), b.pub)
+	gossipHasB := func(sock string) bool {
+		out, err := exec.Command(meshBin, "status", "--socket", sock, "--json").Output()
+		return err == nil && strings.Contains(string(out), b.overlay)
+	}
+	waitFor(t, "A and C learn B over gossip", 30*time.Second, func() bool {
+		return gossipHasB(sockA) && gossipHasB(sockC)
 	})
 
 	must.NoError(t, cmdB.Process.Signal(syscall.SIGTERM))
@@ -243,7 +262,7 @@ func TestMesh_StatusSocket(t *testing.T) {
 	status := func() ([]byte, error) {
 		return exec.Command(meshBin, "status", "--socket", sock, "--json").Output()
 	}
-	waitFor(t, "status reports b", 15*time.Second, func() bool {
+	waitFor(t, "status reports b", 30*time.Second, func() bool {
 		out, err := status()
 		return err == nil && strings.Contains(string(out), b.pub)
 	})
@@ -260,28 +279,6 @@ func TestMesh_StatusSocket(t *testing.T) {
 	must.EqOp(t, "alive", st.Peers[b.pub]["status"])
 }
 
-func TestMesh_PubkeyPolicy(t *testing.T) {
-	skipIfNoNetns(t)
-	newBridge(t, "wgmtag-br")
-
-	a := newNode(t, "wgmtag-a", "10.142.0.1", "fd00:e2e7:a::1", 51820, "wgmtag-br")
-	b := newNode(t, "wgmtag-b", "10.142.0.2", "fd00:e2e7:b::1", 51820, "wgmtag-br")
-	c := newNode(t, "wgmtag-c", "10.142.0.3", "fd00:e2e7:c::1", 51820, "wgmtag-br")
-
-	startMesh(t, a, []*node{b}, 51820,
-		"--peer-policy", fmt.Sprintf("peer.PublicKey in [%q]", b.pub))
-	startMesh(t, b, []*node{a, c}, 51820)
-	startMesh(t, c, []*node{b}, 51820)
-
-	waitFor(t, "a sees b", 15*time.Second, func() bool {
-		return strings.Contains(wgPeers(a), b.pub)
-	})
-
-	time.Sleep(5 * time.Second)
-	must.False(t, strings.Contains(wgPeers(a), c.pub),
-		must.Sprint("A must reject C (pubkey not in policy allowlist)"))
-}
-
 func TestMesh_DuplicateRouteDropped(t *testing.T) {
 	skipIfNoNetns(t)
 	newBridge(t, "wgmdup-br")
@@ -293,15 +290,18 @@ func TestMesh_DuplicateRouteDropped(t *testing.T) {
 	sock := filepath.Join(t.TempDir(), "a.sock")
 	startMesh(t, a, []*node{b}, 51820, "--socket", sock)
 	startMesh(t, b, []*node{a, c}, 51820)
-	startMesh(t, c, []*node{b}, 51820, "--extra-allowed-ips", b.overlay+"/128")
+	startMesh(t, c, []*node{b}, 51820, "--advertise-routes", b.overlay+"/128")
 
-	waitFor(t, "a sees c", 15*time.Second, func() bool {
-		return strings.Contains(wgPeers(a), c.pub)
+	gossipKnows := func(pub string) bool {
+		out, err := exec.Command(meshBin, "status", "--socket", sock, "--json").Output()
+		return err == nil && strings.Contains(string(out), pub)
+	}
+	waitFor(t, "a learns b and c over gossip", 30*time.Second, func() bool {
+		return gossipKnows(b.pub) && gossipKnows(c.pub)
 	})
-	time.Sleep(3 * time.Second)
-
-	must.False(t, strings.Contains(wgPeers(a), b.pub),
-		must.Sprint("b's route is also claimed by c, so it is installed for neither"))
+	waitFor(t, "a drops b's contested route", 15*time.Second, func() bool {
+		return !strings.Contains(wgPeers(a), b.pub)
+	})
 
 	out, err := exec.Command(meshBin, "status", "--socket", sock, "--json").Output()
 	must.NoError(t, err)

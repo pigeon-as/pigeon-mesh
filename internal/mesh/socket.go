@@ -66,6 +66,13 @@ func (m *Mesh) handleStatus(conn net.Conn) {
 			return
 		}
 		conn.Write(append(data, '\n'))
+	case "leave":
+		_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
+		if err := m.requestLeave(5 * time.Second); err != nil {
+			fmt.Fprintf(conn, "error: %v\n", err)
+			return
+		}
+		conn.Write([]byte("ok\n"))
 	default:
 		fmt.Fprintf(conn, "error: unknown request %q\n", strings.TrimSpace(req))
 	}
@@ -90,11 +97,13 @@ func (m *Mesh) status() Status {
 		}
 	}
 	conflicts := maps.Clone(m.conflicts)
+	rejected := maps.Clone(m.rejected)
 	m.mu.RUnlock()
 	return Status{
 		Self:      m.cfg.Self.PublicKey,
 		UpdatedAt: nowStamp(),
 		Peers:     peers,
 		Conflicts: conflicts,
+		Rejected:  rejected,
 	}
 }

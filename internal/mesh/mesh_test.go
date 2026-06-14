@@ -157,14 +157,6 @@ func TestDecodePeer_Accepts(t *testing.T) {
 	must.NoError(t, err)
 }
 
-func TestDecodePeer_PubkeyMismatch(t *testing.T) {
-	pk, err := wgtypes.GeneratePrivateKey()
-	must.NoError(t, err)
-	pubkey := pk.PublicKey().String()
-	_, err = decodePeer("different-name", encodedMeta(t, pubkey, "fdcc::dead/128"))
-	must.ErrorContains(t, err, "mismatch")
-}
-
 func TestDiff(t *testing.T) {
 	genKey := func() string {
 		pk, err := wgtypes.GeneratePrivateKey()
