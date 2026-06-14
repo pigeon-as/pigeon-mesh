@@ -1,6 +1,8 @@
 package mesh
 
 import (
+	"bytes"
+	"encoding/base64"
 	"net"
 	"net/netip"
 	"testing"
@@ -105,5 +107,61 @@ func TestParseAllowedIPs_Rejected(t *testing.T) {
 	} {
 		_, err := ParseAllowedIPs(bad)
 		must.Error(t, err, must.Sprintf("input %q", bad))
+	}
+}
+
+func TestDeriveAddr_Deterministic(t *testing.T) {
+	prefix := netip.MustParsePrefix("fdcc::/16")
+	a, err := DeriveAddr(testKey, prefix)
+	must.NoError(t, err)
+	b, err := DeriveAddr(testKey, prefix)
+	must.NoError(t, err)
+	must.EqOp(t, a, b)
+}
+
+func TestDeriveAddr_InPrefixAndDistinct(t *testing.T) {
+	prefix := netip.MustParsePrefix("fdcc::/16")
+	a, err := DeriveAddr(testKey, prefix)
+	must.NoError(t, err)
+	must.True(t, prefix.Contains(a), must.Sprintf("derived %s not in %s", a, prefix))
+	must.EqOp(t, 128, a.BitLen())
+
+	other := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 32))
+	b, err := DeriveAddr(other, prefix)
+	must.NoError(t, err)
+	must.NotEqOp(t, a, b)
+}
+
+func TestDeriveAddr_Rejected(t *testing.T) {
+	for _, bad := range []struct {
+		prefix string
+		key    string
+	}{
+		{"10.0.0.0/8", testKey},
+		{"fdcc::/17", testKey},
+		{"fdcc::/16", "not base64"},
+	} {
+		_, err := DeriveAddr(bad.key, netip.MustParsePrefix(bad.prefix))
+		must.Error(t, err, must.Sprintf("%+v", bad))
+	}
+}
+
+func TestValidateOverlayAddr(t *testing.T) {
+	prefix := netip.MustParsePrefix("fdcc::/16")
+	want, err := DeriveAddr(testKey, prefix)
+	must.NoError(t, err)
+	self := HostRoute(want).String()
+
+	must.NoError(t, validateOverlayAddr(testKey, Peer{AllowedIPs: []string{self}}, prefix))
+	must.NoError(t, validateOverlayAddr(testKey, Peer{AllowedIPs: []string{self, "10.0.0.0/24"}}, prefix),
+		must.Sprint("out-of-prefix extra route is allowed"))
+
+	for _, bad := range [][]string{
+		{"fdcc::dead/128"},
+		{"10.0.0.0/24"},
+		{self, "fdcc:1::/64"},
+	} {
+		must.Error(t, validateOverlayAddr(testKey, Peer{AllowedIPs: bad}, prefix),
+			must.Sprintf("AllowedIPs %v", bad))
 	}
 }

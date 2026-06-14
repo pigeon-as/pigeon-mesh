@@ -4,7 +4,10 @@ package wg
 
 import (
 	"fmt"
+	"net"
+	"net/netip"
 
+	"github.com/vishvananda/netlink"
 	"golang.zx2c4.com/wireguard/wgctrl"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
@@ -45,6 +48,18 @@ func (c *Client) Peers(iface string) ([]wgtypes.Peer, error) {
 func (c *Client) Apply(iface string, peers []wgtypes.PeerConfig) error {
 	if err := c.client.ConfigureDevice(iface, wgtypes.Config{Peers: peers}); err != nil {
 		return fmt.Errorf("apply %q: %w", iface, err)
+	}
+	return nil
+}
+
+func (c *Client) SetAddr(iface string, ip netip.Addr) error {
+	link, err := netlink.LinkByName(iface)
+	if err != nil {
+		return fmt.Errorf("link %q: %w", iface, err)
+	}
+	addr := &netlink.Addr{IPNet: &net.IPNet{IP: ip.AsSlice(), Mask: net.CIDRMask(ip.BitLen(), ip.BitLen())}}
+	if err := netlink.AddrReplace(link, addr); err != nil {
+		return fmt.Errorf("set %s on %q: %w", ip, iface, err)
 	}
 	return nil
 }

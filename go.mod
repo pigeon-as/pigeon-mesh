@@ -4,11 +4,11 @@ go 1.25
 
 require (
 	github.com/coreos/go-systemd/v22 v22.7.0
-	github.com/expr-lang/expr v1.17.8
 	github.com/hashicorp/go-msgpack/v2 v2.1.5
 	github.com/hashicorp/go-sockaddr v1.0.7
 	github.com/hashicorp/memberlist v0.5.4
 	github.com/shoenig/test v1.12.2
+	github.com/vishvananda/netlink v1.3.1
 	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20241231184526-a9ab2273dd10
 )
 
@@ -27,6 +27,7 @@ require (
 	github.com/mdlayher/socket v0.5.1 // indirect
 	github.com/miekg/dns v1.1.68 // indirect
 	github.com/sean-/seed v0.0.0-20170313163322-e2103e2c3529 // indirect
+	github.com/vishvananda/netns v0.0.5 // indirect
 	golang.org/x/crypto v0.45.0 // indirect
 	golang.org/x/mod v0.28.0 // indirect
 	golang.org/x/net v0.47.0 // indirect

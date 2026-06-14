@@ -20,6 +20,7 @@ type Status struct {
 	UpdatedAt string              `json:"updated_at"`
 	Peers     map[string]PeerView `json:"peers"`
 	Conflicts map[string][]string `json:"conflicts,omitempty"`
+	Rejected  map[string]string   `json:"rejected,omitempty"`
 }
 
 func peerStatus(n *memberlist.Node) string {

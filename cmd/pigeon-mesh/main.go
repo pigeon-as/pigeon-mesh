@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"slices"
 	"syscall"
+	"time"
 
 	sockaddr "github.com/hashicorp/go-sockaddr/template"
 	"github.com/pigeon-as/pigeon-mesh/internal/mesh"
@@ -22,19 +23,23 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "status" {
 		os.Exit(runStatus(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "leave" {
+		os.Exit(runLeave(os.Args[2:]))
+	}
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
 	iface := flag.String("interface", "", "existing WireGuard interface (required); bootstrap peers need a /128 or /32 first in AllowedIPs")
 	endpoint := flag.String("endpoint", "", "this node's Endpoint as host:port; hostnames resolved at startup; go-sockaddr templates evaluated (required)")
 	address := flag.String("address", "", "this node's overlay IP; go-sockaddr templates evaluated; auto-detected from --interface if unset")
-	extraAllowedIPs := flag.String("extra-allowed-ips", "", "extra CIDRs to advertise alongside this node's host route, comma-separated")
+	advertiseRoutes := flag.String("advertise-routes", "", "extra routes this node advertises to peers beyond its own /128, comma-separated")
 	gossipPort := flag.Int("gossip-port", 7946, "port to listen on for gossip (TCP and UDP)")
 	gossipKeyFile := flag.String("gossip-key-file", "", "JSON file of base64-encoded gossip encryption keys")
 	persistentKeepalive := flag.Int("persistent-keepalive", 0, "PersistentKeepalive interval in seconds advertised to peers (0 disables)")
 	profile := flag.String("profile", "wan", "memberlist timing profile: lan, wan, or local")
-	peerPolicy := flag.String("peer-policy", "", "expr predicate (returns bool) evaluated per peer at admission; false rejects. In scope: peer (candidate Peer), self (this node's Peer), cidrSubset(outer, inner) bool. Tags are self-declared; bind to pubkeys for trust. See docs/quickstart.md.")
 	socket := flag.String("socket", mesh.DefaultSocketPath, "path to the status query socket served for the status command; empty disables")
+	prefix := flag.String("prefix", "", "optional byte-aligned IPv6 ULA prefix (e.g. fdcc::/16); when set, the daemon derives this node's overlay address from its key and assigns it to the interface, and requires every peer's address to be the same derivation of its key (self-certifying)")
+	reconnectTimeout := flag.Duration("reconnect-timeout", 10*time.Minute, "grace window to keep a failed peer's tunnel before reaping it; survives restarts and brief partitions")
 	var tagFlags []string
 	flag.Func("tag", "tag for this node, repeatable as k=v", func(v string) error {
 		tagFlags = append(tagFlags, v)
@@ -60,40 +65,6 @@ func main() {
 		slog.Error("endpoint template", "err", err)
 		os.Exit(1)
 	}
-	var ip netip.Addr
-	if *address == "" {
-		ip, err = mesh.InterfaceAddress(*iface)
-		if err != nil {
-			slog.Error("address", "err", err)
-			os.Exit(1)
-		}
-	} else {
-		addressStr, err := sockaddr.Parse(*address)
-		if err != nil {
-			slog.Error("address template", "err", err)
-			os.Exit(1)
-		}
-		ip, err = netip.ParseAddr(addressStr)
-		if err != nil {
-			slog.Error("address template resolved to non-IP", "address", *address, "resolved", addressStr, "err", err)
-			os.Exit(1)
-		}
-	}
-	host := mesh.HostRoute(ip)
-	allowed := []string{host.String()}
-	if *extraAllowedIPs != "" {
-		extras, err := mesh.ParseAllowedIPs(*extraAllowedIPs)
-		if err != nil {
-			slog.Error("extra-allowed-ips", "err", err)
-			os.Exit(1)
-		}
-		for _, e := range extras {
-			if !slices.Contains(allowed, e) {
-				allowed = append(allowed, e)
-			}
-		}
-	}
-
 	wgc, err := wg.New()
 	if err != nil {
 		slog.Error("open wgctrl", "err", err)
@@ -105,6 +76,58 @@ func main() {
 	if err != nil {
 		slog.Error("wireguard device", "err", err)
 		os.Exit(1)
+	}
+
+	var ip netip.Addr
+	var overlayPrefix netip.Prefix
+	switch {
+	case *prefix != "":
+		overlayPrefix, err = netip.ParsePrefix(*prefix)
+		if err != nil {
+			slog.Error("prefix", "err", err)
+			os.Exit(2)
+		}
+		ip, err = mesh.DeriveAddr(publicKey.String(), overlayPrefix)
+		if err != nil {
+			slog.Error("prefix", "err", err)
+			os.Exit(2)
+		}
+		if err = wgc.SetAddr(*iface, ip); err != nil {
+			slog.Error("set address", "err", err)
+			os.Exit(1)
+		}
+	case *address != "":
+		addressStr, perr := sockaddr.Parse(*address)
+		if perr != nil {
+			slog.Error("address template", "err", perr)
+			os.Exit(1)
+		}
+		ip, err = netip.ParseAddr(addressStr)
+		if err != nil {
+			slog.Error("address template resolved to non-IP", "address", *address, "resolved", addressStr, "err", err)
+			os.Exit(1)
+		}
+	default:
+		ip, err = mesh.InterfaceAddress(*iface)
+		if err != nil {
+			slog.Error("address", "err", err)
+			os.Exit(1)
+		}
+	}
+
+	host := mesh.HostRoute(ip)
+	allowed := []string{host.String()}
+	if *advertiseRoutes != "" {
+		extras, err := mesh.ParseAllowedIPs(*advertiseRoutes)
+		if err != nil {
+			slog.Error("advertise-routes", "err", err)
+			os.Exit(1)
+		}
+		for _, e := range extras {
+			if !slices.Contains(allowed, e) {
+				allowed = append(allowed, e)
+			}
+		}
 	}
 
 	ep, err := mesh.NormalizeEndpoint(endpointStr)
@@ -128,13 +151,15 @@ func main() {
 	}
 
 	cfg := mesh.Config{
-		Iface:      *iface,
-		GossipPort: *gossipPort,
-		BindAddr:   ip.String(),
-		Profile:    *profile,
-		SocketPath: *socket,
-		Self:       self,
-		WG:         wgc,
+		Iface:            *iface,
+		GossipPort:       *gossipPort,
+		BindAddr:         ip.String(),
+		Profile:          *profile,
+		SocketPath:       *socket,
+		Self:             self,
+		Prefix:           overlayPrefix,
+		ReconnectTimeout: *reconnectTimeout,
+		WG:               wgc,
 	}
 	if *gossipKeyFile != "" {
 		cfg.Keyring, err = mesh.LoadKeyring(*gossipKeyFile)
@@ -143,14 +168,6 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	if *peerPolicy != "" {
-		cfg.PeerPolicy, err = mesh.ParsePeerPolicy(*peerPolicy)
-		if err != nil {
-			slog.Error("peer-policy", "err", err)
-			os.Exit(1)
-		}
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 

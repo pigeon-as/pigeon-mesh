@@ -10,7 +10,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net"
-	"reflect"
+	"net/netip"
 	"slices"
 	"strconv"
 	"sync"
@@ -25,23 +25,30 @@ const (
 	retryJoinInterval = 30 * time.Second
 	reconcileInterval = 60 * time.Second
 	retryFailInterval = 15 * time.Second
+	reconnectInterval = 30 * time.Second
+	reapInterval      = 15 * time.Second
+	joinSeedCount     = 16
 )
 
 type Config struct {
-	Iface      string
-	GossipPort int
-	BindAddr   string
-	Profile    string
-	SocketPath string
-	Self       Peer
-	Keyring    *memberlist.Keyring
-	WG         *wg.Client
-	PeerPolicy *PeerPolicy
+	Iface            string
+	GossipPort       int
+	BindAddr         string
+	Profile          string
+	SocketPath       string
+	Self             Peer
+	Keyring          *memberlist.Keyring
+	Prefix           netip.Prefix
+	ReconnectTimeout time.Duration
+	WG               *wg.Client
 }
 
 type member struct {
-	meta []byte
-	peer Peer
+	meta      []byte
+	peer      Peer
+	reject    string
+	failed    bool
+	leaveTime time.Time
 }
 
 type Mesh struct {
@@ -52,8 +59,10 @@ type Mesh struct {
 	members     map[string]member
 	peers       map[string]Peer
 	conflicts   map[string][]string
+	rejected    map[string]string
 	reconcileCh chan struct{}
-	seedCount   int
+	leave       chan struct{}
+	bootstrap   map[string]bool
 }
 
 func New(cfg Config) (*Mesh, error) {
@@ -77,7 +86,10 @@ func New(cfg Config) (*Mesh, error) {
 		members:     make(map[string]member),
 		peers:       make(map[string]Peer),
 		conflicts:   make(map[string][]string),
+		rejected:    make(map[string]string),
 		reconcileCh: make(chan struct{}, 1),
+		leave:       make(chan struct{}, 1),
+		bootstrap:   make(map[string]bool),
 	}
 
 	d := &delegate{mesh: m}
@@ -94,12 +106,11 @@ func New(cfg Config) (*Mesh, error) {
 	}
 	mc.Name = cfg.Self.PublicKey
 	mc.Delegate = d
-	mc.Alive = d
 	mc.Events = d
 	mc.Conflict = d
 	mc.Keyring = cfg.Keyring
 	mc.Logger = newMemberlistLogger()
-	m.seedCount = mc.GossipNodes
+	mc.DeadNodeReclaimTime = 30 * time.Second
 
 	nt, err := memberlist.NewNetTransport(&memberlist.NetTransportConfig{
 		BindAddrs: []string{cfg.BindAddr},
@@ -143,8 +154,8 @@ func (m *Mesh) join() (int, error) {
 		return 0, nil
 	}
 	rand.Shuffle(len(targets), func(i, j int) { targets[i], targets[j] = targets[j], targets[i] })
-	if len(targets) > m.seedCount {
-		targets = targets[:m.seedCount]
+	if len(targets) > joinSeedCount {
+		targets = targets[:joinSeedCount]
 	}
 	return m.memberlist.Join(targets)
 }
@@ -152,13 +163,18 @@ func (m *Mesh) join() (int, error) {
 func diff(prev, cur map[string]Peer) []wgtypes.PeerConfig {
 	var changes []wgtypes.PeerConfig
 	for name, p := range cur {
-		if prevPeer, ok := prev[name]; ok && reflect.DeepEqual(prevPeer, p) {
+		prevPeer, known := prev[name]
+		if known && prevPeer.equal(p) {
 			continue
 		}
 		pc, err := p.toWG()
 		if err != nil {
 			slog.Warn("peer to wg", "node", name, "err", err)
 			continue
+		}
+		if known {
+			pc.Endpoint = nil
+			pc.UpdateOnly = true
 		}
 		changes = append(changes, pc)
 	}
@@ -186,9 +202,13 @@ func (m *Mesh) setMember(n *memberlist.Node) {
 	if len(n.Meta) == 0 {
 		return
 	}
+	if len(n.Meta) > memberlist.MetaMaxSize {
+		slog.Warn("peer meta exceeds limit; ignoring", "node", n.Name, "size", len(n.Meta))
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if existing, ok := m.members[n.Name]; ok && bytes.Equal(existing.meta, n.Meta) {
+	if existing, ok := m.members[n.Name]; ok && !existing.failed && bytes.Equal(existing.meta, n.Meta) {
 		return
 	}
 	p, err := decodePeer(n.Name, n.Meta)
@@ -196,7 +216,14 @@ func (m *Mesh) setMember(n *memberlist.Node) {
 		slog.Warn("decode peer", "node", n.Name, "err", err)
 		return
 	}
-	m.members[n.Name] = member{meta: bytes.Clone(n.Meta), peer: p}
+	mem := member{meta: bytes.Clone(n.Meta), peer: p}
+	if m.cfg.Prefix.IsValid() {
+		if err := validateOverlayAddr(n.Name, p, m.cfg.Prefix); err != nil {
+			mem.reject = err.Error()
+		}
+	}
+	m.members[n.Name] = mem
+	delete(m.bootstrap, n.Name)
 	m.triggerReconcile()
 }
 
@@ -205,9 +232,12 @@ func (m *Mesh) removeMember(n *memberlist.Node) {
 		return
 	}
 	m.mu.Lock()
-	delete(m.members, n.Name)
+	if e, ok := m.members[n.Name]; ok && !e.failed {
+		e.failed = true
+		e.leaveTime = time.Now()
+		m.members[n.Name] = e
+	}
 	m.mu.Unlock()
-	m.triggerReconcile()
 }
 
 func (m *Mesh) handleNodeConflict(existing, other *memberlist.Node) {
@@ -228,13 +258,6 @@ func (m *Mesh) triggerReconcile() {
 	case m.reconcileCh <- struct{}{}:
 	default:
 	}
-}
-
-func (m *Mesh) admitted(name string, meta []byte) bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	e, ok := m.members[name]
-	return ok && bytes.Equal(e.meta, meta)
 }
 
 func resolveConflicts(peers map[string]Peer) (map[string]Peer, map[string][]string) {
@@ -283,16 +306,62 @@ func (m *Mesh) setConflicts(conflicts map[string][]string) {
 	m.conflicts = conflicts
 }
 
+func (m *Mesh) setRejected(rejected map[string]string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for pubkey, reason := range rejected {
+		if _, seen := m.rejected[pubkey]; !seen {
+			slog.Warn("peer rejected: overlay address is not derived from its key", "pubkey", pubkey, "reason", reason)
+		}
+	}
+	m.rejected = rejected
+}
+
+func (m *Mesh) seedPeersFromKernel() error {
+	peers, err := m.cfg.WG.Peers(m.cfg.Iface)
+	if err != nil {
+		return err
+	}
+	seeded := make(map[string]Peer, len(peers))
+	m.mu.Lock()
+	for _, p := range peers {
+		name := p.PublicKey.String()
+		seeded[name] = Peer{PublicKey: name}
+		m.bootstrap[name] = true
+	}
+	m.mu.Unlock()
+	m.peers = seeded
+	return nil
+}
+
 func (m *Mesh) reconcile() error {
 	m.mu.RLock()
 	cur := make(map[string]Peer, len(m.members))
+	rejected := make(map[string]string)
 	for name, e := range m.members {
+		if e.reject != "" {
+			rejected[name] = e.reject
+			continue
+		}
 		cur[name] = e.peer
+	}
+	bootstrap := make(map[string]struct{}, len(m.bootstrap))
+	for name := range m.bootstrap {
+		bootstrap[name] = struct{}{}
 	}
 	m.mu.RUnlock()
 
+	m.setRejected(rejected)
 	effective, conflicts := resolveConflicts(cur)
 	m.setConflicts(conflicts)
+
+	for name := range bootstrap {
+		if _, ok := effective[name]; !ok {
+			if p, ok := m.peers[name]; ok {
+				effective[name] = p
+			}
+		}
+	}
 
 	changes := diff(m.peers, effective)
 	if len(changes) > 0 {
@@ -311,6 +380,10 @@ func (m *Mesh) Run(ctx context.Context) error {
 		}
 	}()
 
+	if err := m.seedPeersFromKernel(); err != nil {
+		slog.Warn("seed peers from kernel; departed peers may persist this run", "err", err)
+	}
+
 	go m.serveStatus(ctx)
 
 	n, err := m.join()
@@ -321,6 +394,8 @@ func (m *Mesh) Run(ctx context.Context) error {
 		slog.Info("joined", "reached", n)
 	}
 	go m.retryJoin(ctx)
+	go m.reconnect(ctx)
+	go m.reap(ctx)
 
 	ticker := time.NewTicker(reconcileInterval)
 	defer ticker.Stop()
@@ -337,6 +412,8 @@ func (m *Mesh) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			return nil
+		case <-m.leave:
 			return nil
 		case <-m.reconcileCh:
 			retry = retryAfter(m.reconcile())
@@ -415,4 +492,92 @@ func (m *Mesh) retryJoin(ctx context.Context) {
 			backoff = min(2*backoff, retryJoinInterval)
 		}
 	}
+}
+
+func (m *Mesh) reap(ctx context.Context) {
+	ticker := time.NewTicker(reapInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			now := time.Now()
+			var reaped bool
+			m.mu.Lock()
+			for name, e := range m.members {
+				if e.failed && now.Sub(e.leaveTime) > m.cfg.ReconnectTimeout {
+					delete(m.members, name)
+					reaped = true
+				}
+			}
+			m.mu.Unlock()
+			if reaped {
+				m.triggerReconcile()
+			}
+		}
+	}
+}
+
+func (m *Mesh) reconnect(ctx context.Context) {
+	ticker := time.NewTicker(reconnectInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.reconnectOnce()
+		}
+	}
+}
+
+func (m *Mesh) reconnectOnce() {
+	m.mu.RLock()
+	var targets []string
+	var failed, alive int
+	for _, e := range m.members {
+		if !e.failed {
+			alive++
+			continue
+		}
+		failed++
+		if t := gossipTarget(e.peer, m.cfg.GossipPort); t != "" {
+			targets = append(targets, t)
+		}
+	}
+	m.mu.RUnlock()
+	if len(targets) == 0 {
+		return
+	}
+	if alive == 0 {
+		alive = 1
+	}
+	if rand.Float32() > float32(failed)/float32(alive) {
+		return
+	}
+	target := targets[rand.IntN(len(targets))]
+	if _, err := m.memberlist.Join([]string{target}); err != nil {
+		slog.Debug("reconnect", "target", target, "err", err)
+	}
+}
+
+func gossipTarget(p Peer, port int) string {
+	for _, c := range p.AllowedIPs {
+		if pfx, err := netip.ParsePrefix(c); err == nil && pfx.IsSingleIP() {
+			return net.JoinHostPort(pfx.Addr().String(), strconv.Itoa(port))
+		}
+	}
+	return ""
+}
+
+func (m *Mesh) requestLeave(timeout time.Duration) error {
+	if err := m.memberlist.Leave(timeout); err != nil {
+		return err
+	}
+	select {
+	case m.leave <- struct{}{}:
+	default:
+	}
+	return nil
 }

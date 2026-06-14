@@ -67,7 +67,6 @@ func TestEncodeDecodeMeta_RoundTrip(t *testing.T) {
 	must.Less(t, 512, len(b), must.Sprintf("meta exceeds memberlist MetaMaxSize=512: %d", len(b)))
 	var out Peer
 	must.NoError(t, decodeMeta(b, &out))
-	must.EqOp(t, in.PublicKey, out.PublicKey)
 	must.EqOp(t, in.Endpoint, out.Endpoint)
 	must.SliceLen(t, 2, out.AllowedIPs)
 	must.EqOp(t, in.PersistentKeepalive, out.PersistentKeepalive)

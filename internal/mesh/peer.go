@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/netip"
+	"slices"
 	"time"
 
 	"github.com/hashicorp/go-msgpack/v2/codec"
@@ -13,7 +15,7 @@ import (
 )
 
 type Peer struct {
-	PublicKey           string   `codec:"pk"`
+	PublicKey           string   `codec:"-"`
 	Endpoint            string   `codec:"ep"`
 	AllowedIPs          []string `codec:"ai"`
 	PersistentKeepalive int      `codec:"k,omitempty"`
@@ -51,9 +53,7 @@ func decodePeer(name string, meta []byte) (Peer, error) {
 	if err := decodeMeta(meta, &p); err != nil {
 		return Peer{}, err
 	}
-	if p.PublicKey != name {
-		return Peer{}, fmt.Errorf("meta pubkey mismatch: %q vs node name %q", p.PublicKey, name)
-	}
+	p.PublicKey = name
 	return p, nil
 }
 
@@ -91,4 +91,12 @@ func (p Peer) toWG() (wgtypes.PeerConfig, error) {
 		cfg.PersistentKeepaliveInterval = &d
 	}
 	return cfg, nil
+}
+
+func (p Peer) equal(o Peer) bool {
+	return p.PublicKey == o.PublicKey &&
+		p.Endpoint == o.Endpoint &&
+		p.PersistentKeepalive == o.PersistentKeepalive &&
+		slices.Equal(p.AllowedIPs, o.AllowedIPs) &&
+		maps.Equal(p.Tags, o.Tags)
 }

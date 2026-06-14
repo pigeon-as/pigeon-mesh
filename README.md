@@ -9,8 +9,7 @@ gossip cluster.
 ```sh
 pigeon-mesh \
   --interface wg0 \
-  --endpoint 203.0.113.1:51820 \
-  --peer-policy 'all(peer.AllowedIPs, cidrSubset("fdcc::/16", #))'
+  --endpoint 203.0.113.1:51820
 ```
 
 `pigeon-mesh --help` lists the full flag set.
@@ -22,9 +21,6 @@ runtime resolution:
 ```sh
 --endpoint '[{{ GetPublicInterfaces | include "type" "IPv6" | limit 1 | attr "address" }}]:51820'
 ```
-
-`--peer-policy` is an optional [expr](https://expr-lang.org) predicate run
-per peer at admission; a false result rejects the peer.
 
 Runs as systemd `Type=notify`; honors `WatchdogSec=`.
 
@@ -46,35 +42,14 @@ wg set wg0 peer <base64-pubkey> \
 
 Existing kernel peers are used to bootstrap the gossip cluster.
 
-## Peer policy
+## Self-certifying addresses
 
-Addresses can be human-chosen or self-certifying, not both without an authority
-(Zooko's triangle). Pick a model with `--peer-policy`.
-
-Allowlist known keys:
-
-```js
-peer.PublicKey in ["<key-a>", "<key-b>"]
-```
-
-Contain everyone to the overlay:
-
-```js
-all(peer.AllowedIPs, cidrSubset("fdcc::/16", #))
-```
-
-Self-certify, so no one can claim another's address:
-
-```js
-all(peer.AllowedIPs, hostbits("fdcc::/16", #) == sha256(base64decode(peer.PublicKey))[0:28])
-```
-
-Predicates compose with `&&`. Helpers: `cidrSubset`, `sha256`, `hostbits`,
-`base64decode`.
-
-A route claimed by two peers is one the daemon can't adjudicate, so it installs
-that route for neither and reports it in `pigeon-mesh status`. Self-certifying
-addresses prevent the conflict.
+`--prefix fdcc::/16` (optional, off by default) makes each node's overlay `/128`
+the leftmost host bits of `SHA-512(public key)` under the prefix (an RFC 4193
+ULA). pigeon-mesh derives this node's address, assigns it to the interface, and
+rejects any peer whose `/128` isn't its own key-derived address; mismatches show
+in `status` under `rejected`. Without `--prefix`, the daemon uses whatever
+address is already on the interface.
 
 ## Encrypted gossip
 
@@ -94,9 +69,12 @@ key signs outgoing; all are accepted on receive. `SIGHUP` reloads.
 - Gossip is unencrypted unless `--gossip-key-file` is set; the gossip key and
   the WireGuard peers you add are the trust boundary, and inside it members are
   trusted.
-- Without a binding `--peer-policy`, a member can claim any overlay address; a
-  route two members claim is installed for neither and shown in `status`.
-  Self-certification (see Peer policy) prevents the conflict.
+- Admission control is the gossip key: who holds it is who may join, and inside
+  that boundary members are trusted. With `--prefix` a member's `/128` is pinned
+  to its key-derived address, so it cannot claim another's; without it, a member
+  may claim any address. Any other route two members both advertise is one the
+  daemon can't adjudicate, so it installs it for neither and shows it in
+  `status`.
 
 ## Operations
 
@@ -107,8 +85,9 @@ for scripting. Served on
 demand over a unix socket (`--socket`, default `/run/pigeon-mesh.sock`; empty
 disables; set it per instance to run several on one host).
 
-Stop or crash the daemon; peers detect via SWIM probes (~30s in WAN
-config) and remove the WG entry.
+`pigeon-mesh leave` gracefully departs the mesh (for decommission). A node that
+stops or fails is held through `--reconnect-timeout` so a restart or brief
+partition doesn't churn peers, then reaped.
 
 ## Performance
 
@@ -119,7 +98,7 @@ responsive into the thousands.
 
 ## Limitations
 
-Tags and extra AllowedIPs are limited to ~20 entries combined.
+Tags and advertised routes are limited to ~20 entries combined.
 
 ## Build
 
