@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"syscall"
+	"time"
 
 	"github.com/godbus/dbus/v5"
 	"github.com/hashicorp/memberlist"
@@ -19,6 +20,10 @@ const (
 	resolvedDest         = "org.freedesktop.resolve1"
 	resolvedPath         = dbus.ObjectPath("/org/freedesktop/resolve1")
 	resolvedManagerIface = "org.freedesktop.resolve1.Manager"
+
+	dbusBroker       = "org.freedesktop.DBus"
+	dbusBrokerPath   = dbus.ObjectPath("/org/freedesktop/DBus")
+	nameOwnerChanged = "NameOwnerChanged"
 )
 
 type resolvedLinkDNS struct {
@@ -59,14 +64,103 @@ func (m *Mesh) serveResolver(ctx context.Context) {
 
 	if err := m.programResolved(zone); err != nil {
 		slog.Warn("resolved split-DNS not programmed; query the overlay address directly", "err", err)
-	} else {
-		defer m.revertResolved()
 	}
+	watchDone := make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		m.watchResolved(ctx, zone)
+	}()
 	slog.Info("overlay dns up", "addr", addr, "zone", zone)
 
 	<-ctx.Done()
+	<-watchDone
+	m.revertResolved()
 	_ = udp.Shutdown()
 	_ = tcp.Shutdown()
+}
+
+func (m *Mesh) watchResolved(ctx context.Context, zone string) {
+	match := []dbus.MatchOption{
+		dbus.WithMatchObjectPath(dbusBrokerPath),
+		dbus.WithMatchInterface(dbusBroker),
+		dbus.WithMatchMember(nameOwnerChanged),
+		dbus.WithMatchArg(0, resolvedDest),
+	}
+	backoff := time.Second
+	for {
+		if err := m.watchResolvedOnce(ctx, zone, match); err != nil && ctx.Err() == nil {
+			slog.Warn("resolved watch reconnect", "err", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		backoff = min(2*backoff, reconnectInterval)
+	}
+}
+
+func (m *Mesh) watchResolvedOnce(ctx context.Context, zone string, match []dbus.MatchOption) error {
+	conn, err := dbus.SystemBus()
+	if err != nil {
+		return err
+	}
+	if err := conn.AddMatchSignal(match...); err != nil {
+		slog.Warn("resolved watch filter", "err", err)
+	}
+	sig := make(chan *dbus.Signal, 16)
+	conn.Signal(sig)
+	defer func() {
+		conn.RemoveSignal(sig)
+		_ = conn.RemoveMatchSignal(match...)
+	}()
+
+	var owned bool
+	if call := conn.BusObject().Call(dbusBroker+".NameHasOwner", 0, resolvedDest); call.Err == nil {
+		_ = call.Store(&owned)
+	}
+	if owned {
+		m.reprogramResolved(ctx, zone)
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case s, ok := <-sig:
+			if !ok {
+				return fmt.Errorf("system bus signal channel closed")
+			}
+			if s.Path != dbusBrokerPath || s.Name != dbusBroker+"."+nameOwnerChanged || len(s.Body) != 3 {
+				continue
+			}
+			name, _ := s.Body[0].(string)
+			newOwner, _ := s.Body[2].(string)
+			if name != resolvedDest || newOwner == "" {
+				continue
+			}
+			slog.Info("systemd-resolved (re)started; reprogramming split-DNS")
+			m.reprogramResolved(ctx, zone)
+		}
+	}
+}
+
+func (m *Mesh) reprogramResolved(ctx context.Context, zone string) {
+	backoff := 200 * time.Millisecond
+	for attempt := 0; ; attempt++ {
+		if err := m.programResolved(zone); err == nil {
+			return
+		} else if attempt >= 2 {
+			slog.Warn("resolved resync", "err", err)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+	}
 }
 
 func (m *Mesh) dnsTable() map[string]netip.Addr {

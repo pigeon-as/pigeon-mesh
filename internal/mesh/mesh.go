@@ -391,12 +391,23 @@ func (m *Mesh) Run(ctx context.Context) error {
 		}
 	}()
 
+	runCtx, cancel := context.WithCancel(ctx)
+	var resolverWG sync.WaitGroup
+	defer func() {
+		cancel()
+		resolverWG.Wait()
+	}()
+
 	if err := m.seedPeersFromKernel(); err != nil {
 		slog.Warn("seed peers from kernel; departed peers may persist this run", "err", err)
 	}
 
-	go m.serveStatus(ctx)
-	go m.serveResolver(ctx)
+	go m.serveStatus(runCtx)
+	resolverWG.Add(1)
+	go func() {
+		defer resolverWG.Done()
+		m.serveResolver(runCtx)
+	}()
 
 	n, err := m.join()
 	if err != nil {
@@ -405,9 +416,9 @@ func (m *Mesh) Run(ctx context.Context) error {
 	if n > 0 {
 		slog.Info("joined", "reached", n)
 	}
-	go m.retryJoin(ctx)
-	go m.reconnect(ctx)
-	go m.reap(ctx)
+	go m.retryJoin(runCtx)
+	go m.reconnect(runCtx)
+	go m.reap(runCtx)
 
 	ticker := time.NewTicker(reconcileInterval)
 	defer ticker.Stop()

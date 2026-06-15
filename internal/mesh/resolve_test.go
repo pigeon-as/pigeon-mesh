@@ -29,12 +29,12 @@ func TestSanitizeLabel(t *testing.T) {
 		"dot.ted",
 		"spaces in",
 		"héllo",
-		"012345678901234567890123456789012345678901234567890123456789abcd", // 64 chars
+		"012345678901234567890123456789012345678901234567890123456789abcd",
 	} {
 		must.EqOp(t, "", SanitizeLabel(bad), must.Sprintf("input %q", bad))
 	}
 
-	must.EqOp(t, "012345678901234567890123456789012345678901234567890123456789abc", // 63 chars
+	must.EqOp(t, "012345678901234567890123456789012345678901234567890123456789abc",
 		SanitizeLabel("012345678901234567890123456789012345678901234567890123456789abc"))
 }
 
@@ -44,9 +44,9 @@ func TestQueryLabel(t *testing.T) {
 		ok          bool
 	}{
 		{"beta.mesh.internal", "beta", true},
-		{"mesh.internal", "", false},     // apex, not a label under the zone
-		{"a.b.mesh.internal", "", false}, // multi-label head
-		{"beta.example.com", "", false},  // out of zone
+		{"mesh.internal", "", false},
+		{"a.b.mesh.internal", "", false},
+		{"beta.example.com", "", false},
 	} {
 		got, ok := queryLabel(tc.qname, "mesh.internal")
 		must.EqOp(t, tc.ok, ok, must.Sprintf("qname %q", tc.qname))
