@@ -85,9 +85,9 @@ for scripting. Served on
 demand over a unix socket (`--socket`, default `/run/pigeon-mesh.sock`; empty
 disables; set it per instance to run several on one host).
 
-`pigeon-mesh leave` gracefully departs the mesh (for decommission). A node that
-stops or fails is held through `--reconnect-timeout` so a restart or brief
-partition doesn't churn peers, then reaped.
+`pigeon-mesh leave` gracefully departs the mesh (for decommission); peers drop it
+immediately. A node that fails or restarts is held through `--reconnect-timeout`
+so a brief partition doesn't churn peers, then reaped.
 
 ## Performance
 
