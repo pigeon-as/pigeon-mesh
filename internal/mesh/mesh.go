@@ -231,6 +231,16 @@ func (m *Mesh) removeMember(n *memberlist.Node) {
 	if n.Name == m.cfg.Self.PublicKey {
 		return
 	}
+	if n.State == memberlist.StateLeft {
+		m.mu.Lock()
+		_, ok := m.members[n.Name]
+		delete(m.members, n.Name)
+		m.mu.Unlock()
+		if ok {
+			m.triggerReconcile()
+		}
+		return
+	}
 	m.mu.Lock()
 	if e, ok := m.members[n.Name]; ok && !e.failed {
 		e.failed = true
