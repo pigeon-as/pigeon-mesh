@@ -18,6 +18,7 @@ type PeerView struct {
 type Status struct {
 	Self      string              `json:"self"`
 	UpdatedAt string              `json:"updated_at"`
+	Health    int                 `json:"health"`
 	Peers     map[string]PeerView `json:"peers"`
 	Conflicts map[string][]string `json:"conflicts,omitempty"`
 	Rejected  map[string]string   `json:"rejected,omitempty"`

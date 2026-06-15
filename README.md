@@ -62,6 +62,16 @@ Pass `--gossip-key-file keys.json`:
 Keys are 16/24/32 raw bytes (AES-128/192/256), base64-encoded. The first
 key signs outgoing; all are accepted on receive. `SIGHUP` reloads.
 
+## Names
+
+`--dns` (requires `--prefix`) serves AAAA records so peers are reachable by
+name. The zone defaults to `mesh.internal`; `--dns=corp.example` overrides it. A
+node's name defaults to its hostname, overridable with `--tag name=alpha` (or
+`--tag name=` to opt out); the resolver answers `<name>.<zone>` with that peer's
+derived `/128`. It binds the overlay address on port 53 (so needs root or
+`CAP_NET_BIND_SERVICE`) and programs systemd-resolved so only the zone routes to
+it. Without systemd-resolved it still answers on the overlay address directly.
+
 ## Trust model
 
 - WireGuard's Noise handshake is the only transport security. pigeon-mesh
