@@ -102,6 +102,7 @@ func (m *Mesh) status() Status {
 	return Status{
 		Self:      m.cfg.Self.PublicKey,
 		UpdatedAt: nowStamp(),
+		Health:    m.memberlist.GetHealthScore(),
 		Peers:     peers,
 		Conflicts: conflicts,
 		Rejected:  rejected,

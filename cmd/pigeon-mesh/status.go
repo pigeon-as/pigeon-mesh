@@ -76,6 +76,9 @@ func showStatus(socket string, asJSON bool) error {
 }
 
 func printStatus(st mesh.Status) {
+	if st.Health > 0 {
+		fmt.Printf("health %d (degraded; 0 is healthy)\n\n", st.Health)
+	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	row := func(cols ...string) {
 		for i, c := range cols {
