@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/miekg/dns"
 	"github.com/pigeon-as/pigeon-mesh/internal/mesh"
 	"github.com/shoenig/test/must"
 )
@@ -130,6 +132,67 @@ func TestPrefixSetsAddress(t *testing.T) {
 		return strings.Contains(string(out), want.String())
 	})
 	must.StrContains(t, run(t, "ip", "-6", "addr", "show", iface), want.String())
+}
+
+func TestMesh_DNS(t *testing.T) {
+	const (
+		iface  = "wg-dns"
+		port   = 51897
+		gossip = 7953
+		prefix = "fdcc::/16"
+		zone   = "mesh.internal"
+	)
+	host, _ := os.Hostname()
+	name := mesh.SanitizeLabel(host)
+	if name == "" {
+		t.Skip("hostname is not a usable DNS label")
+	}
+	exec.Command("ip", "link", "del", iface).Run()
+	t.Cleanup(func() { exec.Command("ip", "link", "del", iface).Run() })
+
+	priv, pub := genKeypair(t)
+	keyFile := writeFile(t, priv+"\n")
+	run(t, "ip", "link", "add", iface, "type", "wireguard")
+	run(t, "wg", "set", iface, "private-key", keyFile, "listen-port", fmt.Sprint(port))
+	run(t, "ip", "link", "set", iface, "up")
+
+	want, err := mesh.DeriveAddr(pub, netip.MustParsePrefix(prefix))
+	must.NoError(t, err)
+
+	cmd := exec.Command(meshBin,
+		"--interface", iface,
+		"--endpoint", fmt.Sprintf("[%s]:%d", want, port),
+		"--gossip-port", fmt.Sprint(gossip),
+		"--prefix", prefix,
+		"--dns",
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	must.NoError(t, cmd.Start())
+	t.Cleanup(func() { stop(cmd) })
+
+	server := net.JoinHostPort(want.String(), "53")
+	query := func(qname string) (*dns.Msg, error) {
+		c := &dns.Client{Timeout: 2 * time.Second}
+		msg := new(dns.Msg)
+		msg.SetQuestion(dns.Fqdn(qname), dns.TypeAAAA)
+		resp, _, err := c.Exchange(msg, server)
+		return resp, err
+	}
+
+	waitFor(t, "resolver answers its own name", 15*time.Second, func() bool {
+		resp, err := query(name + "." + zone)
+		if err != nil || len(resp.Answer) == 0 {
+			return false
+		}
+		aaaa, ok := resp.Answer[0].(*dns.AAAA)
+		return ok && aaaa.AAAA.String() == want.String()
+	})
+
+	resp, err := query("nope." + zone)
+	must.NoError(t, err)
+	must.EqOp(t, dns.RcodeNameError, resp.Rcode)
+	must.SliceLen(t, 0, resp.Answer)
 }
 
 func TestMesh_TwoNodes(t *testing.T) {

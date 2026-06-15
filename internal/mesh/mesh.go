@@ -39,6 +39,7 @@ type Config struct {
 	Self             Peer
 	Keyring          *memberlist.Keyring
 	Prefix           netip.Prefix
+	DNSZone          string
 	ReconnectTimeout time.Duration
 	WG               *wg.Client
 }
@@ -395,6 +396,7 @@ func (m *Mesh) Run(ctx context.Context) error {
 	}
 
 	go m.serveStatus(ctx)
+	go m.serveResolver(ctx)
 
 	n, err := m.join()
 	if err != nil {

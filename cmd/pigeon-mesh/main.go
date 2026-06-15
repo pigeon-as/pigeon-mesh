@@ -19,6 +19,8 @@ import (
 	"github.com/pigeon-as/pigeon-mesh/internal/wg"
 )
 
+const defaultDNSZone = "mesh.internal"
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "status" {
 		os.Exit(runStatus(os.Args[2:]))
@@ -38,6 +40,8 @@ func main() {
 	persistentKeepalive := flag.Int("persistent-keepalive", 0, "PersistentKeepalive interval in seconds advertised to peers (0 disables)")
 	profile := flag.String("profile", "wan", "memberlist timing profile: lan, wan, or local")
 	socket := flag.String("socket", mesh.DefaultSocketPath, "path to the status query socket served for the status command; empty disables")
+	var dnsZone dnsZoneFlag
+	flag.Var(&dnsZone, "dns", "serve AAAA records for peers' name= tag and program systemd-resolved split-DNS; bare --dns uses the "+defaultDNSZone+" zone, --dns=zone overrides; requires --prefix")
 	prefix := flag.String("prefix", "", "optional byte-aligned IPv6 ULA prefix (e.g. fdcc::/16); when set, the daemon derives this node's overlay address from its key and assigns it to the interface, and requires every peer's address to be the same derivation of its key (self-certifying)")
 	reconnectTimeout := flag.Duration("reconnect-timeout", 10*time.Minute, "grace window to keep a failed peer's tunnel before reaping it; survives restarts and brief partitions")
 	var tagFlags []string
@@ -47,6 +51,10 @@ func main() {
 	})
 	flag.Parse()
 
+	if flag.NArg() > 0 {
+		slog.Error("unexpected arguments; set a custom DNS zone with --dns=zone (note the =)", "args", flag.Args())
+		os.Exit(2)
+	}
 	if *iface == "" {
 		slog.Error("missing required flag --interface")
 		os.Exit(2)
@@ -57,6 +65,10 @@ func main() {
 	}
 	if *persistentKeepalive < 0 || *persistentKeepalive > 65535 {
 		slog.Error("persistent-keepalive out of range", "got", *persistentKeepalive, "range", "0-65535")
+		os.Exit(2)
+	}
+	if dnsZone.zone != "" && *prefix == "" {
+		slog.Error("--dns requires --prefix")
 		os.Exit(2)
 	}
 
@@ -141,6 +153,16 @@ func main() {
 		slog.Error("tag", "err", err)
 		os.Exit(2)
 	}
+	if _, ok := tags["name"]; !ok {
+		if h, herr := os.Hostname(); herr == nil {
+			if label := mesh.SanitizeLabel(h); label != "" {
+				if tags == nil {
+					tags = mesh.Tags{}
+				}
+				tags["name"] = label
+			}
+		}
+	}
 
 	self := mesh.Peer{
 		PublicKey:           publicKey.String(),
@@ -158,6 +180,7 @@ func main() {
 		SocketPath:       *socket,
 		Self:             self,
 		Prefix:           overlayPrefix,
+		DNSZone:          dnsZone.zone,
 		ReconnectTimeout: *reconnectTimeout,
 		WG:               wgc,
 	}
@@ -208,3 +231,25 @@ func reloadKeyringOnSIGHUP(ctx context.Context, m *mesh.Mesh, path string) {
 		}
 	}
 }
+
+type dnsZoneFlag struct {
+	zone string
+}
+
+func (f *dnsZoneFlag) String() string {
+	if f == nil {
+		return ""
+	}
+	return f.zone
+}
+
+func (f *dnsZoneFlag) Set(v string) error {
+	if v == "" || v == "true" {
+		f.zone = defaultDNSZone
+	} else {
+		f.zone = v
+	}
+	return nil
+}
+
+func (f *dnsZoneFlag) IsBoolFlag() bool { return true }
