@@ -39,8 +39,9 @@ wg set wg0 peer <base64-pubkey> endpoint 203.0.113.2:51820
 ```
 
 Without `--prefix`, put the peer's host address (`/32` or `/128`) first in its
-`AllowedIPs` so the daemon can find its gossip address (this is WireGuard
-cryptokey routing, not a kernel route):
+`AllowedIPs`; the daemon reads that host route as the peer's overlay address and
+dials it to seed gossip (this is WireGuard cryptokey routing, not a kernel
+route):
 
 ```sh
 wg set wg0 peer <base64-pubkey> \

@@ -19,9 +19,9 @@ pigeon-mesh --interface wg0 \
 ## Adding a peer
 
 Add one bootstrap peer to the kernel so gossip can start; pigeon-mesh discovers
-the rest. Its `allowed-ips` is that node's overlay address (`ip -6 addr show wg0`
-on it):
+the rest. With `--prefix` the daemon derives the peer's overlay address from its
+key, so you only need its public key and endpoint:
 
 ```sh
-wg set wg0 peer <their-pubkey> endpoint <their-public-ip>:51820 allowed-ips <their-overlay-addr>/128
+wg set wg0 peer <their-pubkey> endpoint <their-public-ip>:51820
 ```
