@@ -152,16 +152,18 @@ func TestValidateOverlayAddr(t *testing.T) {
 	must.NoError(t, err)
 	self := HostRoute(want).String()
 
-	must.NoError(t, validateOverlayAddr(testKey, Peer{AllowedIPs: []string{self}}, prefix))
-	must.NoError(t, validateOverlayAddr(testKey, Peer{AllowedIPs: []string{self, "10.0.0.0/24"}}, prefix),
-		must.Sprint("out-of-prefix extra route is allowed"))
+	addr, err := validateOverlayAddr(testKey, Peer{AllowedIPs: []string{self}}, prefix)
+	must.NoError(t, err)
+	must.EqOp(t, want, addr)
+	_, err = validateOverlayAddr(testKey, Peer{AllowedIPs: []string{self, "10.0.0.0/24"}}, prefix)
+	must.NoError(t, err, must.Sprint("out-of-prefix extra route is allowed"))
 
 	for _, bad := range [][]string{
 		{"fdcc::dead/128"},
 		{"10.0.0.0/24"},
 		{self, "fdcc:1::/64"},
 	} {
-		must.Error(t, validateOverlayAddr(testKey, Peer{AllowedIPs: bad}, prefix),
-			must.Sprintf("AllowedIPs %v", bad))
+		_, err := validateOverlayAddr(testKey, Peer{AllowedIPs: bad}, prefix)
+		must.Error(t, err, must.Sprintf("AllowedIPs %v", bad))
 	}
 }

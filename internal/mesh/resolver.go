@@ -169,13 +169,9 @@ func (m *Mesh) dnsTable() map[string]netip.Addr {
 	defer m.mu.RUnlock()
 	table := make(map[string]netip.Addr, len(nodes))
 	collided := make(map[string]bool)
-	add := func(pubkey string, tags Tags) {
+	add := func(addr netip.Addr, tags Tags) {
 		label := SanitizeLabel(tags["name"])
-		if label == "" || collided[label] {
-			return
-		}
-		addr, err := DeriveAddr(pubkey, m.cfg.Prefix)
-		if err != nil {
+		if label == "" || collided[label] || !addr.IsValid() {
 			return
 		}
 		if existing, dup := table[label]; dup && existing != addr {
@@ -186,7 +182,9 @@ func (m *Mesh) dnsTable() map[string]netip.Addr {
 		}
 		table[label] = addr
 	}
-	add(m.cfg.Self.PublicKey, m.cfg.Self.Tags)
+	if self, err := netip.ParseAddr(m.cfg.BindAddr); err == nil {
+		add(self, m.cfg.Self.Tags)
+	}
 	for _, n := range nodes {
 		if n.Name == m.cfg.Self.PublicKey || n.State != memberlist.StateAlive {
 			continue
@@ -195,7 +193,7 @@ func (m *Mesh) dnsTable() map[string]netip.Addr {
 		if !ok || e.failed || e.reject != "" {
 			continue
 		}
-		add(n.Name, e.peer.Tags)
+		add(e.addr, e.peer.Tags)
 	}
 	return table
 }
@@ -232,18 +230,18 @@ func (m *Mesh) programResolved(zone string) error {
 }
 
 func (m *Mesh) revertResolved() {
-	ifi, err := net.InterfaceByName(m.cfg.Iface)
-	if err != nil {
-		slog.Warn("revert resolved", "err", err)
-		return
-	}
 	conn, err := dbus.SystemBus()
 	if err != nil {
-		slog.Warn("revert resolved", "err", err)
+		slog.Debug("revert resolved", "err", err)
+		return
+	}
+	ifi, err := net.InterfaceByName(m.cfg.Iface)
+	if err != nil {
+		slog.Debug("revert resolved", "err", err)
 		return
 	}
 	mgr := conn.Object(resolvedDest, resolvedPath)
 	if err := mgr.Call(resolvedManagerIface+".RevertLink", 0, int32(ifi.Index)).Store(); err != nil {
-		slog.Warn("revert resolved", "err", err)
+		slog.Debug("revert resolved", "err", err)
 	}
 }
