@@ -108,6 +108,10 @@ func main() {
 			slog.Error("set address", "err", err)
 			os.Exit(1)
 		}
+		if err = wgc.SetRoute(*iface, overlayPrefix); err != nil {
+			slog.Error("set route", "err", err)
+			os.Exit(1)
+		}
 	case *address != "":
 		addressStr, perr := sockaddr.Parse(*address)
 		if perr != nil {

@@ -195,6 +195,29 @@ func TestMesh_DNS(t *testing.T) {
 	must.SliceLen(t, 0, resp.Answer)
 }
 
+func TestMesh_PrefixReachability(t *testing.T) {
+	skipIfNoNetns(t)
+	newBridge(t, "wgmpx-br")
+	const prefix = "fdcc::/16"
+
+	a := newPrefixNode(t, "wgmpx-a", "10.150.0.1", 51820, "wgmpx-br", prefix)
+	b := newPrefixNode(t, "wgmpx-b", "10.150.0.2", 51820, "wgmpx-br", prefix)
+
+	startMesh(t, a, []*node{b}, 51820, "--prefix", prefix)
+	startMesh(t, b, []*node{a}, 51820, "--prefix", prefix)
+
+	hasRoute := func(n *node) bool {
+		out, _ := exec.Command("ip", "netns", "exec", n.ns, "ip", "-6", "route", "show").CombinedOutput()
+		return strings.Contains(string(out), prefix)
+	}
+	waitFor(t, "daemon installs the covering overlay route, not the harness", 10*time.Second, func() bool {
+		return hasRoute(a) && hasRoute(b)
+	})
+
+	waitPing(t, a, b.overlay)
+	waitPing(t, b, a.overlay)
+}
+
 func TestMesh_TwoNodes(t *testing.T) {
 	skipIfNoNetns(t)
 	newBridge(t, "wgm2-br")

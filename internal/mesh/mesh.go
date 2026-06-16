@@ -349,6 +349,11 @@ func (m *Mesh) seedPeersFromKernel() error {
 }
 
 func (m *Mesh) reconcile() error {
+	if m.cfg.Prefix.IsValid() {
+		if err := m.cfg.WG.SetRoute(m.cfg.Iface, m.cfg.Prefix); err != nil {
+			slog.Warn("overlay route", "err", err)
+		}
+	}
 	m.mu.RLock()
 	cur := make(map[string]Peer, len(m.members))
 	rejected := make(map[string]string)
