@@ -46,18 +46,29 @@ func (m *Mesh) serveResolver(ctx context.Context) {
 		return
 	}
 	addr := net.JoinHostPort(m.cfg.BindAddr, "53")
+	pc, err := net.ListenPacket("udp", addr)
+	if err != nil {
+		slog.Error("dns bind", "addr", addr, "err", err)
+		return
+	}
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		_ = pc.Close()
+		slog.Error("dns bind", "addr", addr, "err", err)
+		return
+	}
 	h := dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
 		_ = w.WriteMsg(buildReply(r, zone, m.dnsTable()))
 	})
-	udp := &dns.Server{Addr: addr, Net: "udp", Handler: h}
-	tcp := &dns.Server{Addr: addr, Net: "tcp", Handler: h}
+	udp := &dns.Server{PacketConn: pc, Handler: h}
+	tcp := &dns.Server{Listener: l, Handler: h}
 	go func() {
-		if err := udp.ListenAndServe(); err != nil && ctx.Err() == nil {
+		if err := udp.ActivateAndServe(); err != nil && ctx.Err() == nil {
 			slog.Warn("dns udp", "err", err)
 		}
 	}()
 	go func() {
-		if err := tcp.ListenAndServe(); err != nil && ctx.Err() == nil {
+		if err := tcp.ActivateAndServe(); err != nil && ctx.Err() == nil {
 			slog.Warn("dns tcp", "err", err)
 		}
 	}()
