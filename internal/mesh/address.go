@@ -37,7 +37,7 @@ func validateOverlayAddr(pubkey string, p Peer, prefix netip.Prefix) (netip.Addr
 		if err != nil {
 			return netip.Addr{}, fmt.Errorf("allowed-ip %q: %w", c, err)
 		}
-		if !prefix.Contains(pfx.Addr()) {
+		if !prefix.Overlaps(pfx) {
 			continue
 		}
 		if pfx.Bits() != pfx.Addr().BitLen() || pfx.Addr() != want {

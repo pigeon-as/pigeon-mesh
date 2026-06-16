@@ -4,14 +4,17 @@ package e2e
 
 import (
 	"fmt"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/pigeon-as/pigeon-mesh/internal/mesh"
 	"github.com/shoenig/test/must"
 )
 
@@ -114,9 +117,47 @@ func newNode(t *testing.T, name, underlay, overlay string, port int, bridge stri
 	return &node{ns: name, underlay: underlay, overlay: overlay, pub: pub}
 }
 
+func newPrefixNode(t *testing.T, name, underlay string, port int, bridge, prefix string) *node {
+	t.Helper()
+	hostVeth, nsVeth := name+"-vh", name+"-vn"
+	exec.Command("ip", "netns", "del", name).Run()
+	exec.Command("ip", "link", "del", hostVeth).Run()
+
+	run(t, "ip", "netns", "add", name)
+	runIn(t, name, "ip", "link", "set", "lo", "up")
+
+	run(t, "ip", "link", "add", hostVeth, "type", "veth", "peer", "name", nsVeth)
+	run(t, "ip", "link", "set", hostVeth, "master", bridge)
+	run(t, "ip", "link", "set", hostVeth, "up")
+	run(t, "ip", "link", "set", nsVeth, "netns", name)
+	runIn(t, name, "ip", "addr", "add", underlay+"/24", "dev", nsVeth)
+	runIn(t, name, "ip", "link", "set", nsVeth, "up")
+
+	priv, pub := genKeypair(t)
+	overlay, err := mesh.DeriveAddr(pub, netip.MustParsePrefix(prefix))
+	must.NoError(t, err)
+	keyFile := writeFile(t, priv+"\n")
+	runIn(t, name, "ip", "link", "add", "wg0", "type", "wireguard")
+	runIn(t, name, "wg", "set", "wg0", "private-key", keyFile, "listen-port", fmt.Sprint(port))
+	runIn(t, name, "ip", "link", "set", "wg0", "up")
+
+	t.Cleanup(func() {
+		exec.Command("ip", "netns", "del", name).Run()
+		exec.Command("ip", "link", "del", hostVeth).Run()
+	})
+
+	return &node{ns: name, underlay: underlay, overlay: overlay.String(), pub: pub}
+}
+
 func startMesh(t *testing.T, n *node, peers []*node, port int, extraArgs ...string) *exec.Cmd {
 	t.Helper()
+	prefixMode := slices.Contains(extraArgs, "--prefix")
 	for _, p := range peers {
+		if prefixMode {
+			runIn(t, n.ns, "wg", "set", "wg0", "peer", p.pub,
+				"endpoint", fmt.Sprintf("%s:%d", p.underlay, port))
+			continue
+		}
 		runIn(t, n.ns, "wg", "set", "wg0", "peer", p.pub,
 			"endpoint", fmt.Sprintf("%s:%d", p.underlay, port),
 			"allowed-ips", p.overlay+"/128")
