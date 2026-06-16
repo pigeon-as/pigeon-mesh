@@ -47,6 +47,7 @@ type Config struct {
 type member struct {
 	meta      []byte
 	peer      Peer
+	addr      netip.Addr
 	reject    string
 	failed    bool
 	leaveTime time.Time
@@ -219,8 +220,10 @@ func (m *Mesh) setMember(n *memberlist.Node) {
 	}
 	mem := member{meta: bytes.Clone(n.Meta), peer: p}
 	if m.cfg.Prefix.IsValid() {
-		if err := validateOverlayAddr(n.Name, p, m.cfg.Prefix); err != nil {
+		if addr, err := validateOverlayAddr(n.Name, p, m.cfg.Prefix); err != nil {
 			mem.reject = err.Error()
+		} else {
+			mem.addr = addr
 		}
 	}
 	m.members[n.Name] = mem
@@ -403,11 +406,9 @@ func (m *Mesh) Run(ctx context.Context) error {
 	}
 
 	go m.serveStatus(runCtx)
-	resolverWG.Add(1)
-	go func() {
-		defer resolverWG.Done()
+	resolverWG.Go(func() {
 		m.serveResolver(runCtx)
-	}()
+	})
 
 	n, err := m.join()
 	if err != nil {

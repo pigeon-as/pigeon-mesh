@@ -26,29 +26,29 @@ func DeriveAddr(pubkey string, prefix netip.Prefix) (netip.Addr, error) {
 	return netip.AddrFrom16(addr), nil
 }
 
-func validateOverlayAddr(pubkey string, p Peer, prefix netip.Prefix) error {
+func validateOverlayAddr(pubkey string, p Peer, prefix netip.Prefix) (netip.Addr, error) {
 	want, err := DeriveAddr(pubkey, prefix)
 	if err != nil {
-		return err
+		return netip.Addr{}, err
 	}
 	var claimsSelf bool
 	for _, c := range p.AllowedIPs {
 		pfx, err := netip.ParsePrefix(c)
 		if err != nil {
-			return fmt.Errorf("allowed-ip %q: %w", c, err)
+			return netip.Addr{}, fmt.Errorf("allowed-ip %q: %w", c, err)
 		}
 		if !prefix.Contains(pfx.Addr()) {
 			continue
 		}
 		if pfx.Bits() != pfx.Addr().BitLen() || pfx.Addr() != want {
-			return fmt.Errorf("claims overlay route %s but key derives %s", c, want)
+			return netip.Addr{}, fmt.Errorf("claims overlay route %s but key derives %s", c, want)
 		}
 		claimsSelf = true
 	}
 	if !claimsSelf {
-		return fmt.Errorf("advertises no overlay address; key derives %s", want)
+		return netip.Addr{}, fmt.Errorf("advertises no overlay address; key derives %s", want)
 	}
-	return nil
+	return want, nil
 }
 
 func InterfaceAddress(iface string) (netip.Addr, error) {
