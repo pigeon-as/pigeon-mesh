@@ -243,16 +243,17 @@ func TestMesh_GossipKeyAndReload(t *testing.T) {
 	skipIfNoNetns(t)
 	newBridge(t, "wgmk-br")
 
-	a := newNode(t, "wgmk-a", "10.126.0.1", "fd00:e2e4:a::1", 51820, "wgmk-br")
-	b := newNode(t, "wgmk-b", "10.126.0.2", "fd00:e2e4:b::1", 51820, "wgmk-br")
+	const prefix = "fdcc::/16"
+	a := newPrefixNode(t, "wgmk-a", "10.126.0.1", 51820, "wgmk-br", prefix)
+	b := newPrefixNode(t, "wgmk-b", "10.126.0.2", 51820, "wgmk-br", prefix)
 
 	keyA := base64.StdEncoding.EncodeToString(append([]byte{0xa1}, make([]byte, 31)...))
 	keyB := base64.StdEncoding.EncodeToString(append([]byte{0xb2}, make([]byte, 31)...))
 	keyFile := filepath.Join(t.TempDir(), "keys.json")
 	must.NoError(t, os.WriteFile(keyFile, []byte(`["`+keyA+`"]`), 0o600))
 
-	cmdA := startMesh(t, a, []*node{b}, 51820, "--gossip-key-file", keyFile)
-	cmdB := startMesh(t, b, []*node{a}, 51820, "--gossip-key-file", keyFile)
+	cmdA := startMesh(t, a, []*node{b}, 51820, "--gossip-key-file", keyFile, "--prefix", prefix)
+	cmdB := startMesh(t, b, []*node{a}, 51820, "--gossip-key-file", keyFile, "--prefix", prefix)
 
 	waitFor(t, "converged with key A", 15*time.Second, func() bool {
 		return strings.Contains(wgPeers(a), b.pub) && strings.Contains(wgPeers(b), a.pub)
@@ -277,16 +278,17 @@ func TestMesh_RestartDoesNotDropPeers(t *testing.T) {
 	skipIfNoNetns(t)
 	newBridge(t, "wgmr-br")
 
-	a := newNode(t, "wgmr-a", "10.132.0.1", "fd00:dead:a::1", 51820, "wgmr-br")
-	b := newNode(t, "wgmr-b", "10.132.0.2", "fd00:dead:b::1", 51820, "wgmr-br")
-	c := newNode(t, "wgmr-c", "10.132.0.3", "fd00:dead:c::1", 51820, "wgmr-br")
+	const prefix = "fdcc::/16"
+	a := newPrefixNode(t, "wgmr-a", "10.132.0.1", 51820, "wgmr-br", prefix)
+	b := newPrefixNode(t, "wgmr-b", "10.132.0.2", 51820, "wgmr-br", prefix)
+	c := newPrefixNode(t, "wgmr-c", "10.132.0.3", 51820, "wgmr-br", prefix)
 
 	dir := t.TempDir()
 	sockA := filepath.Join(dir, "a.sock")
 	sockC := filepath.Join(dir, "c.sock")
-	startMesh(t, a, []*node{b, c}, 51820, "--socket", sockA)
-	cmdB := startMesh(t, b, []*node{a, c}, 51820)
-	startMesh(t, c, []*node{a, b}, 51820, "--socket", sockC)
+	startMesh(t, a, []*node{b, c}, 51820, "--socket", sockA, "--prefix", prefix)
+	cmdB := startMesh(t, b, []*node{a, c}, 51820, "--prefix", prefix)
+	startMesh(t, c, []*node{a, b}, 51820, "--socket", sockC, "--prefix", prefix)
 
 	gossipHasB := func(sock string) bool {
 		out, err := exec.Command(meshBin, "status", "--socket", sock, "--json").Output()
@@ -306,7 +308,7 @@ func TestMesh_RestartDoesNotDropPeers(t *testing.T) {
 	must.StrContains(t, wgPeers(a), b.pub, must.Sprint("A dropped B during 3s gap"))
 	must.StrContains(t, wgPeers(c), b.pub, must.Sprint("C dropped B during 3s gap"))
 
-	startMesh(t, b, []*node{a, c}, 51820)
+	startMesh(t, b, []*node{a, c}, 51820, "--prefix", prefix)
 	time.Sleep(3 * time.Second)
 	must.StrContains(t, wgPeers(a), b.pub, must.Sprint("A dropped B after restart"))
 	must.StrContains(t, wgPeers(c), b.pub, must.Sprint("C dropped B after restart"))
@@ -316,21 +318,20 @@ func TestMesh_ThreeNodes_TransitiveDiscovery(t *testing.T) {
 	skipIfNoNetns(t)
 	newBridge(t, "wgm3-br")
 
-	a := newNode(t, "wgm3-a", "10.124.0.1", "fd00:e2e3:a::1", 51820, "wgm3-br")
-	b := newNode(t, "wgm3-b", "10.124.0.2", "fd00:e2e3:b::1", 51820, "wgm3-br")
-	c := newNode(t, "wgm3-c", "10.124.0.3", "fd00:e2e3:c::1", 51820, "wgm3-br")
+	const prefix = "fdcc::/16"
+	a := newPrefixNode(t, "wgm3-a", "10.124.0.1", 51820, "wgm3-br", prefix)
+	b := newPrefixNode(t, "wgm3-b", "10.124.0.2", 51820, "wgm3-br", prefix)
+	c := newPrefixNode(t, "wgm3-c", "10.124.0.3", 51820, "wgm3-br", prefix)
 
-	startMesh(t, a, []*node{b}, 51820)
-	startMesh(t, b, []*node{a, c}, 51820)
-	startMesh(t, c, []*node{b}, 51820)
+	startMesh(t, a, []*node{b}, 51820, "--prefix", prefix)
+	startMesh(t, b, []*node{a, c}, 51820, "--prefix", prefix)
+	startMesh(t, c, []*node{b}, 51820, "--prefix", prefix)
 
 	waitFor(t, "a discovers c via b", 30*time.Second, func() bool {
 		return strings.Contains(wgPeers(a), c.pub) &&
 			strings.Contains(wgPeers(c), a.pub)
 	})
 
-	runIn(t, a.ns, "ip", "-6", "route", "add", c.overlay+"/128", "dev", "wg0")
-	runIn(t, c.ns, "ip", "-6", "route", "add", a.overlay+"/128", "dev", "wg0")
 	waitPing(t, a, c.overlay)
 }
 
@@ -338,12 +339,13 @@ func TestMesh_StatusSocket(t *testing.T) {
 	skipIfNoNetns(t)
 	newBridge(t, "wgmpf-br")
 
-	a := newNode(t, "wgmpf-a", "10.140.0.1", "fd00:e2ef:a::1", 51820, "wgmpf-br")
-	b := newNode(t, "wgmpf-b", "10.140.0.2", "fd00:e2ef:b::1", 51820, "wgmpf-br")
+	const prefix = "fdcc::/16"
+	a := newPrefixNode(t, "wgmpf-a", "10.140.0.1", 51820, "wgmpf-br", prefix)
+	b := newPrefixNode(t, "wgmpf-b", "10.140.0.2", 51820, "wgmpf-br", prefix)
 
 	sock := filepath.Join(t.TempDir(), "a.sock")
-	startMesh(t, a, []*node{b}, 51820, "--socket", sock)
-	startMesh(t, b, []*node{a}, 51820)
+	startMesh(t, a, []*node{b}, 51820, "--socket", sock, "--prefix", prefix)
+	startMesh(t, b, []*node{a}, 51820, "--prefix", prefix)
 
 	status := func() ([]byte, error) {
 		return exec.Command(meshBin, "status", "--socket", sock, "--json").Output()

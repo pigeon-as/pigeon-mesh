@@ -31,9 +31,16 @@ each node's IPv6 overlay address from its WireGuard public key.
 
 Add bootstrap peers to the kernel first ([wg-quick](https://man.archlinux.org/man/wg-quick.8),
 [systemd-networkd](https://www.freedesktop.org/software/systemd/man/systemd.netdev.html),
-or `wg set`). Each peer's host address (`/32` or `/128`) must come first in its
-`AllowedIPs`; the daemon reads it to find the peer's gossip address. (`AllowedIPs`
-is WireGuard cryptokey routing, not a kernel route.)
+or `wg set`). With `--prefix`, a peer needs only its endpoint — the daemon
+derives its overlay `/128` from its key and installs it:
+
+```sh
+wg set wg0 peer <base64-pubkey> endpoint 203.0.113.2:51820
+```
+
+Without `--prefix`, put the peer's host address (`/32` or `/128`) first in its
+`AllowedIPs` so the daemon can find its gossip address (this is WireGuard
+cryptokey routing, not a kernel route):
 
 ```sh
 wg set wg0 peer <base64-pubkey> \

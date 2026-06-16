@@ -331,19 +331,46 @@ func (m *Mesh) setRejected(rejected map[string]string) {
 	m.rejected = rejected
 }
 
+func hasHostRoute(ips []net.IPNet) bool {
+	for _, ipn := range ips {
+		ones, bits := ipn.Mask.Size()
+		if ones == bits {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *Mesh) seedPeersFromKernel() error {
 	peers, err := m.cfg.WG.Peers(m.cfg.Iface)
 	if err != nil {
 		return err
 	}
 	seeded := make(map[string]Peer, len(peers))
+	var routes []wgtypes.PeerConfig
 	m.mu.Lock()
 	for _, p := range peers {
 		name := p.PublicKey.String()
-		seeded[name] = Peer{PublicKey: name}
+		sp := Peer{PublicKey: name}
+		if m.cfg.Prefix.IsValid() && !hasHostRoute(p.AllowedIPs) {
+			if addr, derr := DeriveAddr(name, m.cfg.Prefix); derr == nil {
+				sp.AllowedIPs = []string{HostRoute(addr).String()}
+				routes = append(routes, wgtypes.PeerConfig{
+					PublicKey:  p.PublicKey,
+					UpdateOnly: true,
+					AllowedIPs: []net.IPNet{{IP: addr.AsSlice(), Mask: net.CIDRMask(addr.BitLen(), addr.BitLen())}},
+				})
+			}
+		}
+		seeded[name] = sp
 		m.bootstrap[name] = true
 	}
 	m.mu.Unlock()
+	if len(routes) > 0 {
+		if err := m.cfg.WG.Apply(m.cfg.Iface, routes); err != nil {
+			slog.Warn("seed bootstrap overlay addresses", "err", err)
+		}
+	}
 	m.peers = seeded
 	return nil
 }
