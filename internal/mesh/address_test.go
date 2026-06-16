@@ -162,6 +162,9 @@ func TestValidateOverlayAddr(t *testing.T) {
 		{"fdcc::dead/128"},
 		{"10.0.0.0/24"},
 		{self, "fdcc:1::/64"},
+		{self, "fd00::/8"},
+		{self, "fc00::/7"},
+		{self, "::/0"},
 	} {
 		_, err := validateOverlayAddr(testKey, Peer{AllowedIPs: bad}, prefix)
 		must.Error(t, err, must.Sprintf("AllowedIPs %v", bad))

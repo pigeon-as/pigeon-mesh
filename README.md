@@ -31,8 +31,9 @@ each node's IPv6 overlay address from its WireGuard public key.
 
 Add bootstrap peers to the kernel first ([wg-quick](https://man.archlinux.org/man/wg-quick.8),
 [systemd-networkd](https://www.freedesktop.org/software/systemd/man/systemd.netdev.html),
-or `wg set`). Each peer needs a host route (`/32` or `/128`) first in
-`AllowedIPs`:
+or `wg set`). Each peer's host address (`/32` or `/128`) must come first in its
+`AllowedIPs`; the daemon reads it to find the peer's gossip address. (`AllowedIPs`
+is WireGuard cryptokey routing, not a kernel route.)
 
 ```sh
 wg set wg0 peer <base64-pubkey> \
@@ -46,10 +47,14 @@ Existing kernel peers are used to bootstrap the gossip cluster.
 
 `--prefix fdcc::/16` (optional, off by default) makes each node's overlay `/128`
 the leftmost host bits of `SHA-512(public key)` under the prefix (an RFC 4193
-ULA). pigeon-mesh derives this node's address, assigns it to the interface, and
-rejects any peer whose `/128` isn't its own key-derived address; mismatches show
-in `status` under `rejected`. Without `--prefix`, the daemon uses whatever
-address is already on the interface.
+ULA). pigeon-mesh derives this node's address, assigns it to the interface as a
+`/128`, and installs an on-link route for the prefix so every peer's `/128` is
+reachable over WireGuard (cryptokey routing selects the peer). It rejects any
+peer whose advertised route overlaps the prefix but isn't its own key-derived
+`/128`; mismatches show in `status` under `rejected`. Without `--prefix`, the
+daemon uses whatever address is already on the interface and installs no route —
+provide overlay reachability yourself (an `ip route` to the prefix, or
+networkd).
 
 ## Encrypted gossip
 
