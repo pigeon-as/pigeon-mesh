@@ -41,6 +41,9 @@ func (m *Mesh) serveResolver(ctx context.Context) {
 	if zone == "" {
 		return
 	}
+	if !m.cfg.Prefix.IsValid() {
+		slog.Warn("dns enabled without --prefix: names resolve to peer-advertised addresses; enable --prefix to bind names to key-derived addresses")
+	}
 	addr := net.JoinHostPort(m.cfg.BindAddr, "53")
 	pc, err := net.ListenPacket("udp", addr)
 	if err != nil {

@@ -88,6 +88,9 @@ func main() {
 	if *signatureFile != "" && *signers == "" {
 		slog.Warn("--signature has no effect without --signers; this node verifies no peers")
 	}
+	if *signers != "" && !*requireSignature {
+		slog.Warn("--signers is set without --require-signature; unsigned peers are still admitted (pass --require-signature to reject them)")
+	}
 
 	endpointStr, err := sockaddr.Parse(*endpoint)
 	if err != nil {
