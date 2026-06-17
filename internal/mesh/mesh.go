@@ -66,9 +66,10 @@ type Mesh struct {
 	mu          sync.RWMutex
 	members     map[string]member
 	peers       map[string]Peer
-	conflicts   map[string][]string
-	rejected    map[string]string
-	reconcileCh chan struct{}
+	conflicts    map[string][]string
+	rejected     map[string]string
+	keyConflicts map[string]string
+	reconcileCh  chan struct{}
 	leave       chan struct{}
 	bootstrap   map[string]bool
 	signers     []ed25519.PublicKey
@@ -95,9 +96,10 @@ func New(cfg Config) (*Mesh, error) {
 		meta:        meta,
 		members:     make(map[string]member),
 		peers:       make(map[string]Peer),
-		conflicts:   make(map[string][]string),
-		rejected:    make(map[string]string),
-		reconcileCh: make(chan struct{}, 1),
+		conflicts:    make(map[string][]string),
+		rejected:     make(map[string]string),
+		keyConflicts: make(map[string]string),
+		reconcileCh:  make(chan struct{}, 1),
 		leave:       make(chan struct{}, 1),
 		bootstrap:   make(map[string]bool),
 		signers:     cfg.Signers,
@@ -261,14 +263,20 @@ func evaluate(p Peer, name string, signers []ed25519.PublicKey, requireSig bool,
 	if reason := signatureReject(p, name, signers, requireSig, now); reason != "" {
 		return netip.Addr{}, reason
 	}
+	var addr netip.Addr
 	if prefix.IsValid() {
-		addr, err := validateOverlayAddr(name, p, prefix)
+		a, err := validateOverlayAddr(name, p, prefix)
 		if err != nil {
 			return netip.Addr{}, err.Error()
 		}
-		return addr, ""
+		addr = a
+	} else {
+		addr = advertisedAddr(p)
 	}
-	return advertisedAddr(p), ""
+	if _, err := p.toWG(); err != nil {
+		return netip.Addr{}, "invalid peer config: " + err.Error()
+	}
+	return addr, ""
 }
 
 func advertisedAddr(p Peer) netip.Addr {
@@ -402,12 +410,20 @@ func (m *Mesh) handleNodeConflict(existing, other *memberlist.Node) {
 		slog.Error("another node is advertising our WireGuard key; the same private key is on more than one host. staying up as the key holder, regenerate the key on the other host",
 			"pubkey", existing.Name,
 			"other_addr", other.Addr.String(), "other_port", other.Port)
+		m.recordKeyConflict(existing.Name, fmt.Sprintf("this node's key is also advertised from %s:%d", other.Addr, other.Port))
 		return
 	}
 	slog.Warn("two peers advertise the same WireGuard key; keeping the first-seen endpoint until the duplicate key is regenerated",
 		"pubkey", existing.Name,
 		"kept_addr", existing.Addr.String(), "kept_port", existing.Port,
 		"other_addr", other.Addr.String(), "other_port", other.Port)
+	m.recordKeyConflict(existing.Name, fmt.Sprintf("kept %s:%d, also advertised from %s:%d", existing.Addr, existing.Port, other.Addr, other.Port))
+}
+
+func (m *Mesh) recordKeyConflict(pubkey, detail string) {
+	m.mu.Lock()
+	m.keyConflicts[pubkey] = detail
+	m.mu.Unlock()
 }
 
 func (m *Mesh) triggerReconcile() {
@@ -580,8 +596,6 @@ func (m *Mesh) Run(ctx context.Context) error {
 		slog.Warn("seed peers from kernel; departed peers may persist this run", "err", err)
 	}
 
-	selfNotAfter := signatureNotAfter(m.cfg.Self.Signature)
-
 	go m.serveStatus(runCtx)
 	go m.serveRouteMonitor(runCtx)
 	resolverWG.Go(func() {
@@ -620,9 +634,6 @@ func (m *Mesh) Run(ctx context.Context) error {
 		case <-m.reconcileCh:
 			retry = retryAfter(m.reconcile())
 		case <-ticker.C:
-			if selfNotAfter != 0 && time.Now().Unix() >= selfNotAfter {
-				return errors.New("own operator signature expired; stopping so a fresh --signature is needed to rejoin")
-			}
 			m.sweepExpiry(time.Now())
 			retry = retryAfter(m.reconcile())
 		case <-retry:

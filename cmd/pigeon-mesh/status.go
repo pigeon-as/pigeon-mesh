@@ -98,10 +98,24 @@ func printStatus(st mesh.Status) {
 	}
 	w.Flush()
 
+	if len(st.Rejected) > 0 {
+		fmt.Println("\nrejected peers (not installed):")
+		for _, k := range slices.Sorted(maps.Keys(st.Rejected)) {
+			fmt.Printf("  %s  %s\n", k, st.Rejected[k])
+		}
+	}
+
 	if len(st.Conflicts) > 0 {
 		fmt.Println("\nconflicting routes (installed for no peer):")
 		for _, route := range slices.Sorted(maps.Keys(st.Conflicts)) {
 			fmt.Printf("  %s  claimed by %s\n", route, strings.Join(st.Conflicts[route], ", "))
+		}
+	}
+
+	if len(st.KeyConflicts) > 0 {
+		fmt.Println("\nduplicate WireGuard keys (regenerate on the offending host):")
+		for _, k := range slices.Sorted(maps.Keys(st.KeyConflicts)) {
+			fmt.Printf("  %s  %s\n", k, st.KeyConflicts[k])
 		}
 	}
 }

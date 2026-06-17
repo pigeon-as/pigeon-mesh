@@ -128,6 +128,17 @@ func signatureNotAfter(blob []byte) int64 {
 	return s.Claims.NotAfter
 }
 
+func selfReject(self Peer, signers []ed25519.PublicKey, now time.Time) string {
+	if len(signers) == 0 {
+		return ""
+	}
+	na := signatureNotAfter(self.Signature)
+	if na != 0 && now.Unix() >= na {
+		return "signature expired"
+	}
+	return ""
+}
+
 func ParseSigners(spec string) ([]ed25519.PublicKey, error) {
 	if path, ok := strings.CutPrefix(spec, "@"); ok {
 		return LoadSigners(path)

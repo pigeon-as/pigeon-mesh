@@ -86,3 +86,19 @@ func TestSignature_Rejections(t *testing.T) {
 	ws := signedSig{Claims: wrong, Sig: ed25519.Sign(priv, body)}
 	must.ErrorContains(t, ws.verify([]ed25519.PublicKey{pub}, testKey, time.Now()), "wrong signature domain")
 }
+
+func TestSelfReject(t *testing.T) {
+	priv, pub, sub := mkSig(t)
+	signers := []ed25519.PublicKey{pub}
+	now := time.Unix(1_000_000, 0)
+	mk := func(notAfter int64) []byte {
+		blob, err := signClaims(priv, sigClaims{Sub: sub, NotBefore: now.Add(-time.Hour).Unix(), NotAfter: notAfter})
+		must.NoError(t, err)
+		return blob
+	}
+
+	must.EqOp(t, "signature expired", selfReject(Peer{Signature: mk(now.Add(-time.Minute).Unix())}, signers, now), must.Sprint("an expired self grant is surfaced"))
+	must.EqOp(t, "", selfReject(Peer{Signature: mk(now.Add(time.Hour).Unix())}, signers, now), must.Sprint("a valid self grant is not flagged"))
+	must.EqOp(t, "", selfReject(Peer{Signature: mk(now.Add(-time.Minute).Unix())}, nil, now), must.Sprint("no signers: nothing to enforce"))
+	must.EqOp(t, "", selfReject(Peer{}, signers, now), must.Sprint("no signature: nothing to flag"))
+}

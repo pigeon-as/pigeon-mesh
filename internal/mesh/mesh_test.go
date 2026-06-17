@@ -7,6 +7,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"fmt"
+	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -264,9 +265,9 @@ func TestAdmission(t *testing.T) {
 	otherPub, _, err := ed25519.GenerateKey(nil)
 	must.NoError(t, err)
 
-	advertised := Peer{Endpoint: "203.0.113.1:51820", AllowedIPs: []string{"fd00::1/128"}}
+	advertised := Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{"fd00::1/128"}}
 	prefixPeer := func(sig []byte) Peer {
-		return Peer{Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute}, Signature: sig}
+		return Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute}, Signature: sig}
 	}
 
 	cases := []struct {
@@ -281,7 +282,8 @@ func TestAdmission(t *testing.T) {
 	}{
 		{name: "open tier admits any address", peer: advertised, wantAddr: true},
 		{name: "prefix admits own derived route", prefix: prefix, peer: prefixPeer(nil), wantAddr: true},
-		{name: "prefix rejects a non-derived route", prefix: prefix, peer: Peer{AllowedIPs: []string{"fdcc::dead/128"}}, wantReject: "derives"},
+		{name: "prefix rejects a non-derived route", prefix: prefix, peer: Peer{PublicKey: testKey, AllowedIPs: []string{"fdcc::dead/128"}}, wantReject: "derives"},
+		{name: "valid overlay but malformed endpoint rejected", prefix: prefix, peer: Peer{PublicKey: testKey, AllowedIPs: []string{ownRoute}}, wantReject: "invalid peer config"},
 		{name: "signers without require admits unsigned", signers: signers, prefix: prefix, peer: prefixPeer(nil), wantAddr: true},
 		{name: "require-signature rejects unsigned", signers: signers, requireSig: true, prefix: prefix, peer: prefixPeer(nil), wantReject: "no signature"},
 		{name: "valid signature admitted with expiry", signers: signers, requireSig: true, prefix: prefix, peer: prefixPeer(validSig), wantAddr: true, wantExpiry: true},
@@ -342,4 +344,20 @@ func TestNextJoinBackoff(t *testing.T) {
 	must.EqOp(t, 2*time.Second, nextJoinBackoff(time.Second))
 	must.EqOp(t, retryJoinInterval, nextJoinBackoff(retryJoinInterval))
 	must.EqOp(t, retryJoinInterval, nextJoinBackoff(2*retryJoinInterval), must.Sprint("capped at the join interval"))
+}
+
+func TestHandleNodeConflictRecordsKeyConflict(t *testing.T) {
+	m := &Mesh{cfg: Config{Self: Peer{PublicKey: "selfKey"}}, keyConflicts: map[string]string{}}
+
+	m.handleNodeConflict(
+		&memberlist.Node{Name: "peerKey", Addr: net.ParseIP("10.0.0.1"), Port: 51820},
+		&memberlist.Node{Name: "peerKey", Addr: net.ParseIP("10.0.0.2"), Port: 51820},
+	)
+	must.MapContainsKey(t, m.keyConflicts, "peerKey", must.Sprint("a peer key collision is recorded for status"))
+
+	m.handleNodeConflict(
+		&memberlist.Node{Name: "selfKey", Addr: net.ParseIP("10.0.0.1"), Port: 51820},
+		&memberlist.Node{Name: "selfKey", Addr: net.ParseIP("10.0.0.3"), Port: 51820},
+	)
+	must.MapContainsKey(t, m.keyConflicts, "selfKey", must.Sprint("a collision on our own key is recorded too"))
 }
