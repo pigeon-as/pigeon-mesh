@@ -184,8 +184,10 @@ func diff(prev, cur map[string]Peer) []wgtypes.PeerConfig {
 			continue
 		}
 		if known {
-			pc.Endpoint = nil
 			pc.UpdateOnly = true
+			if prevPeer.Endpoint == p.Endpoint {
+				pc.Endpoint = nil
+			}
 		}
 		changes = append(changes, pc)
 	}
@@ -357,7 +359,7 @@ func (m *Mesh) sweepExpiry(now time.Time) {
 	m.mu.Lock()
 	changed := false
 	for name, e := range m.members {
-		if e.failed || e.reject != "" || e.notAfter == 0 {
+		if e.reject != "" || e.notAfter == 0 {
 			continue
 		}
 		if ts >= e.notAfter {
@@ -578,6 +580,8 @@ func (m *Mesh) Run(ctx context.Context) error {
 		slog.Warn("seed peers from kernel; departed peers may persist this run", "err", err)
 	}
 
+	selfNotAfter := signatureNotAfter(m.cfg.Self.Signature)
+
 	go m.serveStatus(runCtx)
 	go m.serveRouteMonitor(runCtx)
 	resolverWG.Go(func() {
@@ -616,6 +620,9 @@ func (m *Mesh) Run(ctx context.Context) error {
 		case <-m.reconcileCh:
 			retry = retryAfter(m.reconcile())
 		case <-ticker.C:
+			if selfNotAfter != 0 && time.Now().Unix() >= selfNotAfter {
+				return errors.New("own operator signature expired; stopping so a fresh --signature is needed to rejoin")
+			}
 			m.sweepExpiry(time.Now())
 			retry = retryAfter(m.reconcile())
 		case <-retry:
@@ -695,13 +702,13 @@ func (m *Mesh) retryJoin(ctx context.Context) {
 		switch {
 		case err != nil:
 			slog.Warn("retry join", "err", err)
-			backoff = min(2*backoff, retryJoinInterval)
+			backoff = nextJoinBackoff(backoff)
 		case n > 0:
 			slog.Info("joined", "reached", n)
 			backoff = retryJoinInterval
 		default:
 			slog.Info("no bootstrap peers")
-			backoff = min(2*backoff, retryJoinInterval)
+			backoff = nextJoinBackoff(backoff)
 		}
 	}
 }
@@ -718,7 +725,7 @@ func (m *Mesh) reap(ctx context.Context) {
 			var reaped bool
 			m.mu.Lock()
 			for name, e := range m.members {
-				if e.failed && now.Sub(e.leaveTime) > m.cfg.ReconnectTimeout {
+				if shouldReap(e.failed, e.leaveTime, now, m.cfg.ReconnectTimeout) {
 					delete(m.members, name)
 					reaped = true
 				}
@@ -762,10 +769,7 @@ func (m *Mesh) reconnectOnce() {
 	if len(targets) == 0 {
 		return
 	}
-	if alive == 0 {
-		alive = 1
-	}
-	if rand.Float32() > float32(failed)/float32(alive) {
+	if !shouldProbe(failed, alive, rand.Float32()) {
 		return
 	}
 	target := targets[rand.IntN(len(targets))]
@@ -781,6 +785,21 @@ func gossipTarget(p Peer, port int) string {
 		}
 	}
 	return ""
+}
+
+func shouldReap(failed bool, leaveTime, now time.Time, timeout time.Duration) bool {
+	return failed && now.Sub(leaveTime) > timeout
+}
+
+func shouldProbe(failed, alive int, r float32) bool {
+	if alive == 0 {
+		alive = 1
+	}
+	return r <= float32(failed)/float32(alive)
+}
+
+func nextJoinBackoff(cur time.Duration) time.Duration {
+	return min(2*cur, retryJoinInterval)
 }
 
 func (m *Mesh) requestLeave(timeout time.Duration) error {

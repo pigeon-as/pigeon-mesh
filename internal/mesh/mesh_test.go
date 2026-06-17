@@ -4,8 +4,10 @@ package mesh
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"encoding/base64"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -217,7 +219,7 @@ func TestSweepExpiry(t *testing.T) {
 	must.EqOp(t, "", m.members["admitted-valid"].reject)
 	must.EqOp(t, "signature expired", m.members["admitted-expired"].reject)
 	must.EqOp(t, "no signature", m.members["already-rejected"].reject)
-	must.EqOp(t, "", m.members["failed-expired"].reject)
+	must.EqOp(t, "signature expired", m.members["failed-expired"].reject, must.Sprint("expiry is enforced even for offline/failed peers"))
 
 	select {
 	case <-m.reconcileCh:
@@ -240,4 +242,104 @@ func TestResolveConflicts(t *testing.T) {
 	must.MapNotContainsKey(t, effective, "b", must.Sprint("b's only route conflicts, so b is dropped"))
 	must.MapLen(t, 1, conflicts)
 	must.Eq(t, []string{"b", "c"}, conflicts["fd00::b/128"], must.Sprint("conflicting route lists both claimants, sorted"))
+}
+
+func TestAdmission(t *testing.T) {
+	prefix := netip.MustParsePrefix("fdcc::/16")
+	derived, err := DeriveAddr(testKey, prefix)
+	must.NoError(t, err)
+	ownRoute := HostRoute(derived).String()
+
+	priv, pub, sub := mkSig(t)
+	signers := []ed25519.PublicKey{pub}
+	now := time.Unix(1_000_000, 0)
+	sign := func(notBefore, notAfter int64) []byte {
+		blob, err := signClaims(priv, sigClaims{Sub: sub, NotBefore: notBefore, NotAfter: notAfter})
+		must.NoError(t, err)
+		return blob
+	}
+	validSig := sign(now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix())
+	expiredSig := sign(now.Add(-time.Hour).Unix(), now.Add(-time.Minute).Unix())
+
+	otherPub, _, err := ed25519.GenerateKey(nil)
+	must.NoError(t, err)
+
+	advertised := Peer{Endpoint: "203.0.113.1:51820", AllowedIPs: []string{"fd00::1/128"}}
+	prefixPeer := func(sig []byte) Peer {
+		return Peer{Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute}, Signature: sig}
+	}
+
+	cases := []struct {
+		name       string
+		signers    []ed25519.PublicKey
+		requireSig bool
+		prefix     netip.Prefix
+		peer       Peer
+		wantReject string
+		wantAddr   bool
+		wantExpiry bool
+	}{
+		{name: "open tier admits any address", peer: advertised, wantAddr: true},
+		{name: "prefix admits own derived route", prefix: prefix, peer: prefixPeer(nil), wantAddr: true},
+		{name: "prefix rejects a non-derived route", prefix: prefix, peer: Peer{AllowedIPs: []string{"fdcc::dead/128"}}, wantReject: "derives"},
+		{name: "signers without require admits unsigned", signers: signers, prefix: prefix, peer: prefixPeer(nil), wantAddr: true},
+		{name: "require-signature rejects unsigned", signers: signers, requireSig: true, prefix: prefix, peer: prefixPeer(nil), wantReject: "no signature"},
+		{name: "valid signature admitted with expiry", signers: signers, requireSig: true, prefix: prefix, peer: prefixPeer(validSig), wantAddr: true, wantExpiry: true},
+		{name: "expired signature rejected", signers: signers, prefix: prefix, peer: prefixPeer(expiredSig), wantReject: "expired"},
+		{name: "unknown signer rejected", signers: []ed25519.PublicKey{otherPub}, prefix: prefix, peer: prefixPeer(validSig), wantReject: "unknown signer"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			addr, reject, notAfter := assess(tc.peer, testKey, tc.signers, tc.requireSig, tc.prefix, now)
+			if tc.wantReject == "" {
+				must.EqOp(t, "", reject)
+			} else {
+				must.StrContains(t, reject, tc.wantReject)
+			}
+			must.EqOp(t, tc.wantAddr, addr.IsValid())
+			must.EqOp(t, tc.wantExpiry, notAfter != 0)
+		})
+	}
+}
+
+func TestDiff_EndpointChange(t *testing.T) {
+	pk, err := wgtypes.GeneratePrivateKey()
+	must.NoError(t, err)
+	key := pk.PublicKey().String()
+
+	peerAt := func(ep, cidr string) map[string]Peer {
+		return map[string]Peer{key: {PublicKey: key, Endpoint: ep, AllowedIPs: []string{cidr}}}
+	}
+
+	changes := diff(peerAt("203.0.113.1:51820", "fd00::1/128"), peerAt("203.0.113.2:51820", "fd00::1/128"))
+	must.SliceLen(t, 1, changes)
+	must.True(t, changes[0].UpdateOnly, must.Sprint("a known peer is an update, not a re-add"))
+	must.NotNil(t, changes[0].Endpoint, must.Sprint("a changed endpoint is re-applied to the kernel"))
+
+	changes = diff(peerAt("203.0.113.1:51820", "fd00::1/128"), peerAt("203.0.113.1:51820", "fd00::2/128"))
+	must.SliceLen(t, 1, changes)
+	must.True(t, changes[0].UpdateOnly)
+	must.Nil(t, changes[0].Endpoint, must.Sprint("an unchanged endpoint is left to WireGuard's own roaming"))
+}
+
+func TestShouldReap(t *testing.T) {
+	now := time.Unix(1000, 0)
+	timeout := time.Minute
+	must.False(t, shouldReap(false, now.Add(-time.Hour), now, timeout), must.Sprint("a live peer is never reaped"))
+	must.False(t, shouldReap(true, now.Add(-30*time.Second), now, timeout), must.Sprint("within the window, a failed peer is kept"))
+	must.True(t, shouldReap(true, now.Add(-2*time.Minute), now, timeout), must.Sprint("past the window, a failed peer is reaped"))
+}
+
+func TestShouldProbe(t *testing.T) {
+	must.False(t, shouldProbe(0, 10, 0.5), must.Sprint("no failures: do not probe"))
+	must.True(t, shouldProbe(10, 0, 0.5), must.Sprint("total outage (alive 0): always probe"))
+	must.True(t, shouldProbe(5, 10, 0.4), must.Sprint("sample below the failed/alive ratio probes"))
+	must.False(t, shouldProbe(5, 10, 0.6), must.Sprint("sample above the ratio skips"))
+}
+
+func TestNextJoinBackoff(t *testing.T) {
+	must.EqOp(t, 2*time.Second, nextJoinBackoff(time.Second))
+	must.EqOp(t, retryJoinInterval, nextJoinBackoff(retryJoinInterval))
+	must.EqOp(t, retryJoinInterval, nextJoinBackoff(2*retryJoinInterval), must.Sprint("capped at the join interval"))
 }

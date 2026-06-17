@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
@@ -27,7 +28,9 @@ func (m *Mesh) serveStatus(ctx context.Context) {
 		return
 	}
 	_ = os.Remove(m.cfg.SocketPath)
+	old := syscall.Umask(0o177)
 	ln, err := net.Listen("unix", m.cfg.SocketPath)
+	syscall.Umask(old)
 	if err != nil {
 		slog.Warn("status socket", "path", m.cfg.SocketPath, "err", err)
 		return

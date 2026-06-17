@@ -4,6 +4,8 @@ A peer-to-peer WireGuard full-mesh daemon. No central server. Nodes are
 identified by WireGuard public key; the kernel WG peer set follows the
 gossip cluster.
 
+> **Status:** early development; breaking changes between v0.0.1 - v0.0.x versions.
+
 ## Run
 
 ```sh
@@ -122,7 +124,10 @@ bootstrap peer is trusted until its first gossip).
 name. A node's name defaults to its hostname, overridable with `--tag name=alpha`
 (or `--tag name=` to opt out); the
 resolver answers `<name>.<zone>` with that peer's overlay address — its key-derived
-`/128` under `--prefix`, otherwise the address it advertises. It binds the overlay
+`/128` under `--prefix`, otherwise the address it advertises. Pair `--dns` with
+`--prefix` so a name resolves to the peer's key-derived address; without it a name
+resolves to whatever address the peer advertises, trusted only as much as the
+admission tier. It binds the overlay
 address on port 53 (so needs root or `CAP_NET_BIND_SERVICE`) and programs
 systemd-resolved so only the zone routes to it. Without systemd-resolved it still
 answers on the overlay address directly.
