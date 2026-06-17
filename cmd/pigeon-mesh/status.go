@@ -112,6 +112,13 @@ func printStatus(st mesh.Status) {
 		}
 	}
 
+	if len(st.RefusedRoutes) > 0 {
+		fmt.Println("\nrefused routes (outside --accept-routes, not installed):")
+		for _, k := range slices.Sorted(maps.Keys(st.RefusedRoutes)) {
+			fmt.Printf("  %s  %s\n", k, strings.Join(st.RefusedRoutes[k], ", "))
+		}
+	}
+
 	if len(st.KeyConflicts) > 0 {
 		fmt.Println("\nduplicate WireGuard keys (regenerate on the offending host):")
 		for _, k := range slices.Sorted(maps.Keys(st.KeyConflicts)) {

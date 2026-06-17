@@ -147,6 +147,13 @@ answers on the overlay address directly.
   it a member may claim any address. Any other route two members both advertise is
   one the daemon can't adjudicate, so it installs it for neither and shows it in
   `status`.
+- Inside a rung, members are trusted to advertise routes, so a member can offer an
+  exit route (`0.0.0.0/0`) or a subnet and peers honour it. `--accept-routes` is the
+  receive-side counterpart to `--advertise-routes`: set it to the CIDRs this node is
+  willing to install, and any advertised route outside that set is dropped locally
+  and shown in `status` (a member's own address always installs). It restricts only
+  this node and enforces nothing on the mesh; left unset, every advertised route is
+  accepted.
 
 ## Operations
 

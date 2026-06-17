@@ -42,6 +42,7 @@ type Config struct {
 	Self             Peer
 	Keyring          *memberlist.Keyring
 	Prefix           netip.Prefix
+	AcceptRoutes     []netip.Prefix
 	DNSZone          string
 	Signers          []ed25519.PublicKey
 	RequireSignature bool
@@ -60,20 +61,21 @@ type member struct {
 }
 
 type Mesh struct {
-	cfg         Config
-	meta        []byte
-	memberlist  *memberlist.Memberlist
-	mu          sync.RWMutex
-	members     map[string]member
-	peers       map[string]Peer
+	cfg          Config
+	meta         []byte
+	memberlist   *memberlist.Memberlist
+	mu           sync.RWMutex
+	members      map[string]member
+	peers        map[string]Peer
 	conflicts    map[string][]string
 	rejected     map[string]string
+	refused      map[string][]string
 	keyConflicts map[string]string
 	reconcileCh  chan struct{}
-	leave       chan struct{}
-	bootstrap   map[string]bool
-	signers     []ed25519.PublicKey
-	signersGen  uint64
+	leave        chan struct{}
+	bootstrap    map[string]bool
+	signers      []ed25519.PublicKey
+	signersGen   uint64
 }
 
 func New(cfg Config) (*Mesh, error) {
@@ -92,17 +94,18 @@ func New(cfg Config) (*Mesh, error) {
 	}
 
 	m := &Mesh{
-		cfg:         cfg,
-		meta:        meta,
-		members:     make(map[string]member),
-		peers:       make(map[string]Peer),
+		cfg:          cfg,
+		meta:         meta,
+		members:      make(map[string]member),
+		peers:        make(map[string]Peer),
 		conflicts:    make(map[string][]string),
 		rejected:     make(map[string]string),
+		refused:      make(map[string][]string),
 		keyConflicts: make(map[string]string),
 		reconcileCh:  make(chan struct{}, 1),
-		leave:       make(chan struct{}, 1),
-		bootstrap:   make(map[string]bool),
-		signers:     cfg.Signers,
+		leave:        make(chan struct{}, 1),
+		bootstrap:    make(map[string]bool),
+		signers:      cfg.Signers,
 	}
 
 	d := &delegate{mesh: m}
@@ -490,6 +493,17 @@ func (m *Mesh) setRejected(rejected map[string]string) {
 	m.rejected = rejected
 }
 
+func (m *Mesh) setRefused(refused map[string][]string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for pubkey, routes := range refused {
+		if _, seen := m.refused[pubkey]; !seen {
+			slog.Warn("ignoring peer routes outside --accept-routes", "pubkey", pubkey, "routes", routes)
+		}
+	}
+	m.refused = refused
+}
+
 func hasHostRoute(ips []net.IPNet) bool {
 	for _, ipn := range ips {
 		ones, bits := ipn.Mask.Size()
@@ -543,12 +557,20 @@ func (m *Mesh) reconcile() error {
 	m.mu.RLock()
 	cur := make(map[string]Peer, len(m.members))
 	rejected := make(map[string]string)
+	refused := make(map[string][]string)
 	for name, e := range m.members {
 		if e.reject != "" {
 			rejected[name] = e.reject
 			continue
 		}
-		cur[name] = e.peer
+		p := e.peer
+		if len(m.cfg.AcceptRoutes) > 0 {
+			if kept, dropped := clampAcceptedRoutes(p.AllowedIPs, e.addr, m.cfg.AcceptRoutes); len(dropped) > 0 {
+				p.AllowedIPs = kept
+				refused[name] = dropped
+			}
+		}
+		cur[name] = p
 	}
 	bootstrap := make(map[string]struct{}, len(m.bootstrap))
 	for name := range m.bootstrap {
@@ -557,6 +579,7 @@ func (m *Mesh) reconcile() error {
 	m.mu.RUnlock()
 
 	m.setRejected(rejected)
+	m.setRefused(refused)
 	effective, conflicts := resolveConflicts(cur)
 	m.setConflicts(conflicts)
 

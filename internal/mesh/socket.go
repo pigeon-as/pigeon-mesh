@@ -118,6 +118,7 @@ func (m *Mesh) status() Status {
 	}
 	conflicts := maps.Clone(m.conflicts)
 	rejected := maps.Clone(m.rejected)
+	refused := maps.Clone(m.refused)
 	keyConflicts := maps.Clone(m.keyConflicts)
 	signers := m.signers
 	m.mu.RUnlock()
@@ -128,12 +129,13 @@ func (m *Mesh) status() Status {
 		rejected[m.cfg.Self.PublicKey] = r
 	}
 	return Status{
-		Self:         m.cfg.Self.PublicKey,
-		UpdatedAt:    nowStamp(),
-		Health:       m.memberlist.GetHealthScore(),
-		Peers:        peers,
-		Conflicts:    conflicts,
-		Rejected:     rejected,
-		KeyConflicts: keyConflicts,
+		Self:          m.cfg.Self.PublicKey,
+		UpdatedAt:     nowStamp(),
+		Health:        m.memberlist.GetHealthScore(),
+		Peers:         peers,
+		Conflicts:     conflicts,
+		Rejected:      rejected,
+		RefusedRoutes: refused,
+		KeyConflicts:  keyConflicts,
 	}
 }
