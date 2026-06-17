@@ -8,11 +8,18 @@ import (
 
 const DefaultSocketPath = "/run/pigeon-mesh.sock"
 
+const wgHandshakeStale = 3*time.Minute + 30*time.Second
+
 type PeerView struct {
-	Endpoint   string   `json:"endpoint"`
-	AllowedIPs []string `json:"allowed_ips"`
-	Tags       Tags     `json:"tags,omitempty"`
-	Status     string   `json:"status"`
+	Endpoint     string   `json:"endpoint"`
+	AllowedIPs   []string `json:"allowed_ips"`
+	Tags         Tags     `json:"tags,omitempty"`
+	Status       string   `json:"status"`
+	WGEndpoint   string   `json:"wg_endpoint,omitempty"`
+	HandshakeAge *int64   `json:"handshake_age_s,omitempty"`
+	RxBytes      int64    `json:"rx_bytes,omitempty"`
+	TxBytes      int64    `json:"tx_bytes,omitempty"`
+	WGAlive      *bool    `json:"wg_alive,omitempty"`
 }
 
 type Status struct {
@@ -41,4 +48,13 @@ func peerStatus(n *memberlist.Node) string {
 
 func nowStamp() string {
 	return time.Now().UTC().Format(time.RFC3339)
+}
+
+func wgAlive(last, now time.Time) (*int64, *bool) {
+	if last.IsZero() {
+		return nil, nil
+	}
+	age := max(int64(now.Sub(last).Seconds()), 0)
+	alive := !last.After(now) && now.Sub(last) <= wgHandshakeStale
+	return &age, &alive
 }

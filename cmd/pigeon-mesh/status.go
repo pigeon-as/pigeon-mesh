@@ -87,14 +87,14 @@ func printStatus(st mesh.Status) {
 		fmt.Fprintln(w, strings.Join(cols, "\t"))
 	}
 
-	row("PUBKEY", "ENDPOINT", "ALLOWED-IPS", "STATUS", "TAGS")
+	row("PUBKEY", "ENDPOINT", "ALLOWED-IPS", "STATUS", "WG", "HANDSHAKE", "TAGS")
 	for _, k := range slices.Sorted(maps.Keys(st.Peers)) {
 		p := st.Peers[k]
 		name := k
 		if k == st.Self {
 			name += " (self)"
 		}
-		row(name, p.Endpoint, strings.Join(p.AllowedIPs, ","), p.Status, formatTags(p.Tags))
+		row(name, p.Endpoint, strings.Join(p.AllowedIPs, ","), p.Status, formatWGAlive(p.WGAlive), formatAge(p.HandshakeAge), formatTags(p.Tags))
 	}
 	w.Flush()
 
@@ -112,4 +112,21 @@ func formatTags(t mesh.Tags) string {
 		pairs = append(pairs, k+"="+t[k])
 	}
 	return strings.Join(pairs, ",")
+}
+
+func formatWGAlive(b *bool) string {
+	if b == nil {
+		return "-"
+	}
+	if *b {
+		return "yes"
+	}
+	return "no"
+}
+
+func formatAge(s *int64) string {
+	if s == nil {
+		return "-"
+	}
+	return fmt.Sprintf("%ds", *s)
 }
