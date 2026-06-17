@@ -28,6 +28,8 @@ const (
 	reconnectInterval = 30 * time.Second
 	reapInterval      = 15 * time.Second
 	joinSeedCount     = 16
+
+	routeReassertDebounce = 250 * time.Millisecond
 )
 
 type Config struct {
@@ -438,6 +440,7 @@ func (m *Mesh) Run(ctx context.Context) error {
 	}
 
 	go m.serveStatus(runCtx)
+	go m.serveRouteMonitor(runCtx)
 	resolverWG.Go(func() {
 		m.serveResolver(runCtx)
 	})

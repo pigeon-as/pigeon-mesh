@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
 func (m *Mesh) serveStatus(ctx context.Context) {
@@ -80,6 +82,15 @@ func (m *Mesh) handleStatus(conn net.Conn) {
 
 func (m *Mesh) status() Status {
 	nodes := m.memberlist.Members()
+	kpeers := map[string]wgtypes.Peer{}
+	if ps, err := m.cfg.WG.Peers(m.cfg.Iface); err != nil {
+		slog.Debug("status wg peers", "err", err)
+	} else {
+		for _, kp := range ps {
+			kpeers[kp.PublicKey.String()] = kp
+		}
+	}
+	now := time.Now()
 	peers := make(map[string]PeerView, len(nodes))
 	m.mu.RLock()
 	for _, n := range nodes {
@@ -89,12 +100,21 @@ func (m *Mesh) status() Status {
 		} else if e, ok := m.members[n.Name]; ok {
 			p = e.peer
 		}
-		peers[n.Name] = PeerView{
+		pv := PeerView{
 			Endpoint:   p.Endpoint,
 			AllowedIPs: p.AllowedIPs,
 			Tags:       p.Tags,
 			Status:     peerStatus(n),
 		}
+		if kp, ok := kpeers[n.Name]; ok {
+			if kp.Endpoint != nil {
+				pv.WGEndpoint = kp.Endpoint.String()
+			}
+			pv.RxBytes = kp.ReceiveBytes
+			pv.TxBytes = kp.TransmitBytes
+			pv.HandshakeAge, pv.WGAlive = wgAlive(kp.LastHandshakeTime, now)
+		}
+		peers[n.Name] = pv
 	}
 	conflicts := maps.Clone(m.conflicts)
 	rejected := maps.Clone(m.rejected)

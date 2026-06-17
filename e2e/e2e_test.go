@@ -195,6 +195,43 @@ func TestMesh_DNS(t *testing.T) {
 	must.SliceLen(t, 0, resp.Answer)
 }
 
+func TestMesh_RouteSelfHeal(t *testing.T) {
+	const (
+		iface  = "wg-rh"
+		port   = 51896
+		gossip = 7954
+		prefix = "fdcc::/16"
+	)
+	exec.Command("ip", "link", "del", iface).Run()
+	t.Cleanup(func() { exec.Command("ip", "link", "del", iface).Run() })
+
+	priv, _ := genKeypair(t)
+	keyFile := writeFile(t, priv+"\n")
+	run(t, "ip", "link", "add", iface, "type", "wireguard")
+	run(t, "wg", "set", iface, "private-key", keyFile, "listen-port", fmt.Sprint(port))
+	run(t, "ip", "link", "set", iface, "up")
+
+	cmd := exec.Command(meshBin,
+		"--interface", iface,
+		"--endpoint", "203.0.113.1:"+fmt.Sprint(port),
+		"--gossip-port", fmt.Sprint(gossip),
+		"--prefix", prefix,
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	must.NoError(t, cmd.Start())
+	t.Cleanup(func() { stop(cmd) })
+
+	hasRoute := func() bool {
+		out, _ := exec.Command("ip", "-6", "route", "show").CombinedOutput()
+		return strings.Contains(string(out), prefix)
+	}
+	waitFor(t, "daemon installs covering route", 10*time.Second, hasRoute)
+
+	run(t, "ip", "-6", "route", "del", prefix, "dev", iface)
+	waitFor(t, "route self-heals within the monitor window, not the 60s reconcile", 3*time.Second, hasRoute)
+}
+
 func TestMesh_PrefixReachability(t *testing.T) {
 	skipIfNoNetns(t)
 	newBridge(t, "wgmpx-br")
