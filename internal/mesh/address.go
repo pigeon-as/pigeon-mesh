@@ -16,6 +16,9 @@ func DeriveAddr(pubkey string, prefix netip.Prefix) (netip.Addr, error) {
 	if !prefix.Addr().Is6() || prefix.Bits()%8 != 0 {
 		return netip.Addr{}, fmt.Errorf("overlay prefix %s must be a byte-aligned IPv6 prefix", prefix)
 	}
+	if prefix.Bits() > 64 {
+		return netip.Addr{}, fmt.Errorf("overlay prefix %s is too long; use /64 or shorter so the key-derived host portion stays collision-resistant", prefix)
+	}
 	raw, err := base64.StdEncoding.DecodeString(pubkey)
 	if err != nil {
 		return netip.Addr{}, fmt.Errorf("pubkey %q: %w", pubkey, err)

@@ -139,6 +139,7 @@ func TestDeriveAddr_Rejected(t *testing.T) {
 	}{
 		{"10.0.0.0/8", testKey},
 		{"fdcc::/17", testKey},
+		{"fdcc::/96", testKey},
 		{"fdcc::/16", "not base64"},
 	} {
 		_, err := DeriveAddr(bad.key, netip.MustParsePrefix(bad.prefix))

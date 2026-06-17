@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
@@ -28,9 +27,7 @@ func (m *Mesh) serveStatus(ctx context.Context) {
 		return
 	}
 	_ = os.Remove(m.cfg.SocketPath)
-	old := syscall.Umask(0o177)
 	ln, err := net.Listen("unix", m.cfg.SocketPath)
-	syscall.Umask(old)
 	if err != nil {
 		slog.Warn("status socket", "path", m.cfg.SocketPath, "err", err)
 		return
@@ -121,13 +118,22 @@ func (m *Mesh) status() Status {
 	}
 	conflicts := maps.Clone(m.conflicts)
 	rejected := maps.Clone(m.rejected)
+	keyConflicts := maps.Clone(m.keyConflicts)
+	signers := m.signers
 	m.mu.RUnlock()
+	if r := selfReject(m.cfg.Self, signers, now); r != "" {
+		if rejected == nil {
+			rejected = map[string]string{}
+		}
+		rejected[m.cfg.Self.PublicKey] = r
+	}
 	return Status{
-		Self:      m.cfg.Self.PublicKey,
-		UpdatedAt: nowStamp(),
-		Health:    m.memberlist.GetHealthScore(),
-		Peers:     peers,
-		Conflicts: conflicts,
-		Rejected:  rejected,
+		Self:         m.cfg.Self.PublicKey,
+		UpdatedAt:    nowStamp(),
+		Health:       m.memberlist.GetHealthScore(),
+		Peers:        peers,
+		Conflicts:    conflicts,
+		Rejected:     rejected,
+		KeyConflicts: keyConflicts,
 	}
 }
