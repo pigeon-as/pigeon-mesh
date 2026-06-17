@@ -4,6 +4,7 @@ go 1.25
 
 require (
 	github.com/coreos/go-systemd/v22 v22.7.0
+	github.com/fxamacker/cbor/v2 v2.9.2
 	github.com/godbus/dbus/v5 v5.1.0
 	github.com/hashicorp/go-msgpack/v2 v2.1.5
 	github.com/hashicorp/go-sockaddr v1.0.7
@@ -29,6 +30,7 @@ require (
 	github.com/mdlayher/socket v0.5.1 // indirect
 	github.com/sean-/seed v0.0.0-20170313163322-e2103e2c3529 // indirect
 	github.com/vishvananda/netns v0.0.5 // indirect
+	github.com/x448/float16 v0.8.4 // indirect
 	golang.org/x/crypto v0.45.0 // indirect
 	golang.org/x/mod v0.28.0 // indirect
 	golang.org/x/net v0.47.0 // indirect

@@ -5,6 +5,7 @@ package mesh
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -42,6 +43,8 @@ type Config struct {
 	Keyring          *memberlist.Keyring
 	Prefix           netip.Prefix
 	DNSZone          string
+	Signers          []ed25519.PublicKey
+	RequireSignature bool
 	ReconnectTimeout time.Duration
 	WG               *wg.Client
 }
@@ -51,6 +54,7 @@ type member struct {
 	peer      Peer
 	addr      netip.Addr
 	reject    string
+	notAfter  int64
 	failed    bool
 	leaveTime time.Time
 }
@@ -67,6 +71,8 @@ type Mesh struct {
 	reconcileCh chan struct{}
 	leave       chan struct{}
 	bootstrap   map[string]bool
+	signers     []ed25519.PublicKey
+	signersGen  uint64
 }
 
 func New(cfg Config) (*Mesh, error) {
@@ -94,6 +100,7 @@ func New(cfg Config) (*Mesh, error) {
 		reconcileCh: make(chan struct{}, 1),
 		leave:       make(chan struct{}, 1),
 		bootstrap:   make(map[string]bool),
+		signers:     cfg.Signers,
 	}
 
 	d := &delegate{mesh: m}
@@ -210,27 +217,159 @@ func (m *Mesh) setMember(n *memberlist.Node) {
 		slog.Warn("peer meta exceeds limit; ignoring", "node", n.Name, "size", len(n.Meta))
 		return
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
 	if existing, ok := m.members[n.Name]; ok && !existing.failed && bytes.Equal(existing.meta, n.Meta) {
+		m.mu.RUnlock()
 		return
 	}
+	signers := m.signers
+	gen := m.signersGen
+	require := m.cfg.RequireSignature
+	prefix := m.cfg.Prefix
+	m.mu.RUnlock()
+
 	p, err := decodePeer(n.Name, n.Meta)
 	if err != nil {
 		slog.Warn("decode peer", "node", n.Name, "err", err)
 		return
 	}
-	mem := member{meta: bytes.Clone(n.Meta), peer: p}
-	if m.cfg.Prefix.IsValid() {
-		if addr, err := validateOverlayAddr(n.Name, p, m.cfg.Prefix); err != nil {
-			mem.reject = err.Error()
-		} else {
-			mem.addr = addr
+	meta := bytes.Clone(n.Meta)
+	addr, reject, notAfter := assess(p, n.Name, signers, require, prefix, time.Now())
+
+	m.mu.Lock()
+	if m.signersGen != gen {
+		addr, reject, notAfter = assess(p, n.Name, m.signers, require, prefix, time.Now())
+	}
+	m.members[n.Name] = member{meta: meta, peer: p, addr: addr, reject: reject, notAfter: notAfter}
+	delete(m.bootstrap, n.Name)
+	m.mu.Unlock()
+	m.triggerReconcile()
+}
+
+func assess(p Peer, name string, signers []ed25519.PublicKey, requireSig bool, prefix netip.Prefix, now time.Time) (netip.Addr, string, int64) {
+	addr, reject := evaluate(p, name, signers, requireSig, prefix, now)
+	var notAfter int64
+	if reject == "" && len(signers) > 0 {
+		notAfter = signatureNotAfter(p.Signature)
+	}
+	return addr, reject, notAfter
+}
+
+func evaluate(p Peer, name string, signers []ed25519.PublicKey, requireSig bool, prefix netip.Prefix, now time.Time) (netip.Addr, string) {
+	if reason := signatureReject(p, name, signers, requireSig, now); reason != "" {
+		return netip.Addr{}, reason
+	}
+	if prefix.IsValid() {
+		addr, err := validateOverlayAddr(name, p, prefix)
+		if err != nil {
+			return netip.Addr{}, err.Error()
+		}
+		return addr, ""
+	}
+	return advertisedAddr(p), ""
+}
+
+func advertisedAddr(p Peer) netip.Addr {
+	for _, c := range p.AllowedIPs {
+		if pfx, err := netip.ParsePrefix(c); err == nil && pfx.Bits() == pfx.Addr().BitLen() {
+			return pfx.Addr()
 		}
 	}
-	m.members[n.Name] = mem
-	delete(m.bootstrap, n.Name)
+	return netip.Addr{}
+}
+
+func signatureReject(p Peer, name string, signers []ed25519.PublicKey, requireSig bool, now time.Time) string {
+	if len(signers) == 0 {
+		return ""
+	}
+	if len(p.Signature) == 0 {
+		if requireSig {
+			return "no signature"
+		}
+		return ""
+	}
+	if err := VerifySignature(signers, name, p.Signature, now); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+func (m *Mesh) reevaluate(now time.Time) {
+	m.mu.RLock()
+	signers := m.signers
+	if len(signers) == 0 {
+		m.mu.RUnlock()
+		return
+	}
+	require := m.cfg.RequireSignature
+	prefix := m.cfg.Prefix
+	type snapshot struct {
+		name     string
+		meta     []byte
+		peer     Peer
+		addr     netip.Addr
+		reject   string
+		notAfter int64
+	}
+	snaps := make([]snapshot, 0, len(m.members))
+	for name, e := range m.members {
+		if !e.failed {
+			snaps = append(snaps, snapshot{name, e.meta, e.peer, e.addr, e.reject, e.notAfter})
+		}
+	}
+	m.mu.RUnlock()
+
+	type change struct {
+		name     string
+		meta     []byte
+		addr     netip.Addr
+		reject   string
+		notAfter int64
+	}
+	var changes []change
+	for _, s := range snaps {
+		addr, reject, notAfter := assess(s.peer, s.name, signers, require, prefix, now)
+		if reject != s.reject || addr != s.addr || notAfter != s.notAfter {
+			changes = append(changes, change{s.name, s.meta, addr, reject, notAfter})
+		}
+	}
+	if len(changes) == 0 {
+		return
+	}
+
+	m.mu.Lock()
+	for _, c := range changes {
+		e, ok := m.members[c.name]
+		if !ok || e.failed || !bytes.Equal(e.meta, c.meta) {
+			continue
+		}
+		e.addr = c.addr
+		e.reject = c.reject
+		e.notAfter = c.notAfter
+		m.members[c.name] = e
+	}
+	m.mu.Unlock()
 	m.triggerReconcile()
+}
+
+func (m *Mesh) sweepExpiry(now time.Time) {
+	ts := now.Unix()
+	m.mu.Lock()
+	changed := false
+	for name, e := range m.members {
+		if e.failed || e.reject != "" || e.notAfter == 0 {
+			continue
+		}
+		if ts >= e.notAfter {
+			e.reject = "signature expired"
+			m.members[name] = e
+			changed = true
+		}
+	}
+	m.mu.Unlock()
+	if changed {
+		m.triggerReconcile()
+	}
 }
 
 func (m *Mesh) removeMember(n *memberlist.Node) {
@@ -327,7 +466,7 @@ func (m *Mesh) setRejected(rejected map[string]string) {
 	defer m.mu.Unlock()
 	for pubkey, reason := range rejected {
 		if _, seen := m.rejected[pubkey]; !seen {
-			slog.Warn("peer rejected: overlay address is not derived from its key", "pubkey", pubkey, "reason", reason)
+			slog.Warn("peer rejected", "pubkey", pubkey, "reason", reason)
 		}
 	}
 	m.rejected = rejected
@@ -477,6 +616,7 @@ func (m *Mesh) Run(ctx context.Context) error {
 		case <-m.reconcileCh:
 			retry = retryAfter(m.reconcile())
 		case <-ticker.C:
+			m.sweepExpiry(time.Now())
 			retry = retryAfter(m.reconcile())
 		case <-retry:
 			retry = retryAfter(m.reconcile())
@@ -493,6 +633,19 @@ func (m *Mesh) ReloadKeyringFromFile(path string) (int, error) {
 		return 0, fmt.Errorf("apply: %w", err)
 	}
 	return len(kr.GetKeys()), nil
+}
+
+func (m *Mesh) ReloadSignersFromFile(path string) (int, error) {
+	keys, err := LoadSigners(path)
+	if err != nil {
+		return 0, err
+	}
+	m.mu.Lock()
+	m.signers = keys
+	m.signersGen++
+	m.mu.Unlock()
+	m.reevaluate(time.Now())
+	return len(keys), nil
 }
 
 func (m *Mesh) ReloadKeyring(target *memberlist.Keyring) error {

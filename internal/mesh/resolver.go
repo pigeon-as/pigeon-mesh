@@ -41,10 +41,6 @@ func (m *Mesh) serveResolver(ctx context.Context) {
 	if zone == "" {
 		return
 	}
-	if !m.cfg.Prefix.IsValid() {
-		slog.Warn("--dns ignored: requires --prefix")
-		return
-	}
 	addr := net.JoinHostPort(m.cfg.BindAddr, "53")
 	pc, err := net.ListenPacket("udp", addr)
 	if err != nil {

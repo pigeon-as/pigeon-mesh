@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/memberlist"
 	"github.com/pigeon-as/pigeon-mesh/internal/wg"
@@ -196,6 +197,33 @@ func TestDiff(t *testing.T) {
 	must.EqOp(t, 1, removes, must.Sprint("Y is removed"))
 
 	must.SliceEmpty(t, diff(cur, cur))
+}
+
+func TestSweepExpiry(t *testing.T) {
+	m := &Mesh{
+		members:     map[string]member{},
+		reconcileCh: make(chan struct{}, 1),
+	}
+	now := time.Now()
+	m.members["admitted-noexpiry"] = member{notAfter: 0}
+	m.members["admitted-valid"] = member{notAfter: now.Add(time.Hour).Unix()}
+	m.members["admitted-expired"] = member{notAfter: now.Add(-time.Second).Unix()}
+	m.members["already-rejected"] = member{reject: "no signature"}
+	m.members["failed-expired"] = member{failed: true, notAfter: now.Add(-time.Hour).Unix()}
+
+	m.sweepExpiry(now)
+
+	must.EqOp(t, "", m.members["admitted-noexpiry"].reject)
+	must.EqOp(t, "", m.members["admitted-valid"].reject)
+	must.EqOp(t, "signature expired", m.members["admitted-expired"].reject)
+	must.EqOp(t, "no signature", m.members["already-rejected"].reject)
+	must.EqOp(t, "", m.members["failed-expired"].reject)
+
+	select {
+	case <-m.reconcileCh:
+	default:
+		t.Fatal("expected a reconcile trigger after eviction")
+	}
 }
 
 func TestResolveConflicts(t *testing.T) {

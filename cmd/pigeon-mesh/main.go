@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"slices"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,14 +20,21 @@ import (
 	"github.com/pigeon-as/pigeon-mesh/internal/wg"
 )
 
-const defaultDNSZone = "mesh.internal"
-
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "status" {
 		os.Exit(runStatus(os.Args[2:]))
 	}
 	if len(os.Args) > 1 && os.Args[1] == "leave" {
 		os.Exit(runLeave(os.Args[2:]))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "keygen" {
+		os.Exit(runKeygen(os.Args[2:]))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "pubkey" {
+		os.Exit(runPubkey(os.Args[2:]))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "sign" {
+		os.Exit(runSign(os.Args[2:]))
 	}
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
@@ -40,9 +48,11 @@ func main() {
 	persistentKeepalive := flag.Int("persistent-keepalive", 0, "PersistentKeepalive interval in seconds advertised to peers (0 disables)")
 	profile := flag.String("profile", "wan", "memberlist timing profile: lan, wan, or local")
 	socket := flag.String("socket", mesh.DefaultSocketPath, "path to the status query socket served for the status command; empty disables")
-	var dnsZone dnsZoneFlag
-	flag.Var(&dnsZone, "dns", "serve AAAA records for peers' name= tag and program systemd-resolved split-DNS; bare --dns uses the "+defaultDNSZone+" zone, --dns=zone overrides; requires --prefix")
+	dns := flag.String("dns", "", "serve AAAA records for peers' name= tag and program systemd-resolved split-DNS for this zone (e.g. mesh.internal)")
 	prefix := flag.String("prefix", "", "optional byte-aligned IPv6 ULA prefix (e.g. fdcc::/16); when set, the daemon derives this node's overlay address from its key and assigns it to the interface, and requires every peer's address to be the same derivation of its key (self-certifying)")
+	signers := flag.String("signers", "", "trusted signer public key(s): a base64 key, comma-separated keys, or @file (one per line, SIGHUP-reloadable); enables signature verification")
+	signatureFile := flag.String("signature", "", "path to this node's base64 signature; advertised to peers for admission")
+	requireSignature := flag.Bool("require-signature", false, "reject any peer that does not present a valid signature (needs --signers)")
 	reconnectTimeout := flag.Duration("reconnect-timeout", 10*time.Minute, "grace window to keep a failed peer's tunnel before reaping it; survives restarts and brief partitions")
 	var tagFlags []string
 	flag.Func("tag", "tag for this node, repeatable as k=v", func(v string) error {
@@ -52,7 +62,7 @@ func main() {
 	flag.Parse()
 
 	if flag.NArg() > 0 {
-		slog.Error("unexpected arguments; set a custom DNS zone with --dns=zone (note the =)", "args", flag.Args())
+		slog.Error("unexpected arguments", "args", flag.Args())
 		os.Exit(2)
 	}
 	if *iface == "" {
@@ -67,9 +77,16 @@ func main() {
 		slog.Error("persistent-keepalive out of range", "got", *persistentKeepalive, "range", "0-65535")
 		os.Exit(2)
 	}
-	if dnsZone.zone != "" && *prefix == "" {
-		slog.Error("--dns requires --prefix")
+	if *requireSignature && *signers == "" {
+		slog.Error("--require-signature needs --signers")
 		os.Exit(2)
+	}
+	if *requireSignature && *signatureFile == "" {
+		slog.Error("--require-signature needs this node to present its own --signature")
+		os.Exit(2)
+	}
+	if *signatureFile != "" && *signers == "" {
+		slog.Warn("--signature has no effect without --signers; this node verifies no peers")
 	}
 
 	endpointStr, err := sockaddr.Parse(*endpoint)
@@ -168,12 +185,22 @@ func main() {
 		}
 	}
 
+	var signature []byte
+	if *signatureFile != "" {
+		signature, err = mesh.LoadSignature(*signatureFile)
+		if err != nil {
+			slog.Error("signature file", "err", err)
+			os.Exit(1)
+		}
+	}
+
 	self := mesh.Peer{
 		PublicKey:           publicKey.String(),
 		Endpoint:            ep,
 		AllowedIPs:          allowed,
 		PersistentKeepalive: *persistentKeepalive,
 		Tags:                tags,
+		Signature:           signature,
 	}
 
 	cfg := mesh.Config{
@@ -184,7 +211,8 @@ func main() {
 		SocketPath:       *socket,
 		Self:             self,
 		Prefix:           overlayPrefix,
-		DNSZone:          dnsZone.zone,
+		DNSZone:          *dns,
+		RequireSignature: *requireSignature,
 		ReconnectTimeout: *reconnectTimeout,
 		WG:               wgc,
 	}
@@ -192,6 +220,19 @@ func main() {
 		cfg.Keyring, err = mesh.LoadKeyring(*gossipKeyFile)
 		if err != nil {
 			slog.Error("gossip key", "err", err)
+			os.Exit(1)
+		}
+	}
+	if *signers != "" {
+		cfg.Signers, err = mesh.ParseSigners(*signers)
+		if err != nil {
+			slog.Error("signers", "err", err)
+			os.Exit(1)
+		}
+	}
+	if len(signature) > 0 && len(cfg.Signers) > 0 {
+		if err := mesh.VerifySignature(cfg.Signers, self.PublicKey, signature, time.Now()); err != nil {
+			slog.Error("own signature rejected by pinned signer keys", "err", err)
 			os.Exit(1)
 		}
 	}
@@ -205,8 +246,12 @@ func main() {
 	}
 
 	go sdnotify.Run(ctx)
-	if *gossipKeyFile != "" {
-		go reloadKeyringOnSIGHUP(ctx, m, *gossipKeyFile)
+	signersFile := ""
+	if path, ok := strings.CutPrefix(*signers, "@"); ok {
+		signersFile = path
+	}
+	if *gossipKeyFile != "" || signersFile != "" {
+		go reloadOnSIGHUP(ctx, m, *gossipKeyFile, signersFile)
 	}
 
 	slog.Info("pigeon-mesh up", "interface", *iface, "endpoint", ep, "address", ip.String())
@@ -217,7 +262,7 @@ func main() {
 	slog.Info("pigeon-mesh stopped")
 }
 
-func reloadKeyringOnSIGHUP(ctx context.Context, m *mesh.Mesh, path string) {
+func reloadOnSIGHUP(ctx context.Context, m *mesh.Mesh, keyringPath, signersPath string) {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGHUP)
 	defer signal.Stop(sig)
@@ -226,34 +271,20 @@ func reloadKeyringOnSIGHUP(ctx context.Context, m *mesh.Mesh, path string) {
 		case <-ctx.Done():
 			return
 		case <-sig:
-			n, err := m.ReloadKeyringFromFile(path)
-			if err != nil {
-				slog.Error("keyring reload", "err", err)
-				continue
+			if keyringPath != "" {
+				if n, err := m.ReloadKeyringFromFile(keyringPath); err != nil {
+					slog.Error("keyring reload", "err", err)
+				} else {
+					slog.Info("keyring reloaded", "keys", n)
+				}
 			}
-			slog.Info("keyring reloaded", "keys", n)
+			if signersPath != "" {
+				if n, err := m.ReloadSignersFromFile(signersPath); err != nil {
+					slog.Error("signers reload", "err", err)
+				} else {
+					slog.Info("signers reloaded", "keys", n)
+				}
+			}
 		}
 	}
 }
-
-type dnsZoneFlag struct {
-	zone string
-}
-
-func (f *dnsZoneFlag) String() string {
-	if f == nil {
-		return ""
-	}
-	return f.zone
-}
-
-func (f *dnsZoneFlag) Set(v string) error {
-	if v == "" || v == "true" {
-		f.zone = defaultDNSZone
-	} else {
-		f.zone = v
-	}
-	return nil
-}
-
-func (f *dnsZoneFlag) IsBoolFlag() bool { return true }

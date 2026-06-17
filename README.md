@@ -75,28 +75,72 @@ Pass `--gossip-key-file keys.json`:
 Keys are 16/24/32 raw bytes (AES-128/192/256), base64-encoded. The first
 key signs outgoing; all are accepted on receive. `SIGHUP` reloads.
 
+## Operator signatures
+
+Hold an offline signing key and admit a node only if it carries a signature the
+operator made over its WireGuard key. Nodes hold the operator's public key and
+their own signature; the signing key never touches a node, and compromising a node
+can't admit new ones. A signature gates only *who* may join; addressing stays with
+`--prefix`, routing with the conflict resolution above.
+
+Create the signing key once; `keygen` prints the public key to pin:
+
+```sh
+pigeon-mesh keygen > signer.key   # secret, keep offline; prints "signer: <pubkey>"
+```
+
+Sign each node's WireGuard public key and hand it the result:
+
+```sh
+pigeon-mesh sign --key signer.key --ttl 720h <node-wg-pubkey> > node.sig
+```
+
+Run the node, trusting that signer and presenting its own signature:
+
+```sh
+pigeon-mesh --interface wg0 --endpoint ... --prefix fdcc::/16 \
+  --signers <signer-pubkey> \
+  --signature node.sig
+```
+
+`--signers` takes a base64 key, comma-separated keys, or `@file` (one per line,
+`SIGHUP`-reloadable). Rotation is add-new, re-sign, remove-old.
+
+A peer is admitted only if it presents a signature from a pinned signer, bound to
+its own WireGuard key, and unexpired. It is verified against the pinned key, never
+the key named in the signature. Signatures are re-checked continuously, so expiry
+and signer rotation drop already-admitted peers too; `SIGHUP` reloads the pinned
+keys. A node also checks its own signature at startup and won't run on a bad one.
+Without `--require-signature` a peer with no signature still falls back to
+`--prefix`/gossip-key admission while a bad signature is always rejected;
+`--require-signature` demands a valid signature from every peer (a hand-added
+bootstrap peer is trusted until its first gossip).
+
 ## Names
 
-`--dns` (requires `--prefix`) serves AAAA records so peers are reachable by
-name. The zone defaults to `mesh.internal`; `--dns=corp.example` overrides it. A
-node's name defaults to its hostname, overridable with `--tag name=alpha` (or
-`--tag name=` to opt out); the resolver answers `<name>.<zone>` with that peer's
-derived `/128`. It binds the overlay address on port 53 (so needs root or
-`CAP_NET_BIND_SERVICE`) and programs systemd-resolved so only the zone routes to
-it. Without systemd-resolved it still answers on the overlay address directly.
+`--dns mesh.internal` serves AAAA records in that zone so peers are reachable by
+name. A node's name defaults to its hostname, overridable with `--tag name=alpha`
+(or `--tag name=` to opt out); the
+resolver answers `<name>.<zone>` with that peer's overlay address — its key-derived
+`/128` under `--prefix`, otherwise the address it advertises. It binds the overlay
+address on port 53 (so needs root or `CAP_NET_BIND_SERVICE`) and programs
+systemd-resolved so only the zone routes to it. Without systemd-resolved it still
+answers on the overlay address directly.
 
 ## Trust model
 
-- WireGuard's Noise handshake is the only transport security. pigeon-mesh
-  never reads or persists the private key.
-- Gossip is unencrypted unless `--gossip-key-file` is set; the gossip key and
-  the WireGuard peers you add are the trust boundary, and inside it members are
-  trusted.
-- Admission control is the gossip key: who holds it is who may join, and inside
-  that boundary members are trusted. With `--prefix` a member's `/128` is pinned
-  to its key-derived address, so it cannot claim another's; without it, a member
-  may claim any address. Any other route two members both advertise is one the
-  daemon can't adjudicate, so it installs it for neither and shows it in
+- WireGuard's Noise handshake is the only transport security; gossip rides inside
+  the tunnels. pigeon-mesh never reads or persists the WireGuard private key.
+- Admission is a ladder; inside whichever rung you pick, members are trusted:
+  - *Open* — the WireGuard peers you add by hand are the boundary.
+  - *Shared secret* (`--gossip-key-file`) — whoever holds the key may join; it also
+    encrypts the gossip.
+  - *Operator signature* (`--signers`/`--signature`) — only keys an offline operator
+    signed may join, and `--require-signature` makes that the only way in.
+- Addresses and routes are pinned separately from admission. With `--prefix` a
+  member's `/128` is its key-derived address, so it cannot claim another's; without
+  it a member may claim any address. Any other route two members both advertise is
+  one the daemon can't adjudicate, so it installs it for neither and shows it in
   `status`.
 
 ## Operations

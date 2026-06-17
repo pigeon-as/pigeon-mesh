@@ -20,6 +20,7 @@ type Peer struct {
 	AllowedIPs          []string `codec:"ai"`
 	PersistentKeepalive int      `codec:"k,omitempty"`
 	Tags                Tags     `codec:"t,omitempty"`
+	Signature           []byte   `codec:"s,omitempty"`
 }
 
 var msgpackHandle = &codec.MsgpackHandle{}
