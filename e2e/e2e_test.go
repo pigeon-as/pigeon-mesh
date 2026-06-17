@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -164,7 +165,7 @@ func TestMesh_DNS(t *testing.T) {
 		"--endpoint", fmt.Sprintf("[%s]:%d", want, port),
 		"--gossip-port", fmt.Sprint(gossip),
 		"--prefix", prefix,
-		"--dns",
+		"--dns", zone,
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -402,6 +403,142 @@ func TestMesh_StatusSocket(t *testing.T) {
 	must.EqOp(t, a.pub, st.Self)
 	must.MapContainsKey(t, st.Peers, b.pub)
 	must.EqOp(t, "alive", st.Peers[b.pub]["status"])
+}
+
+func signNode(t *testing.T, signer ed25519.PrivateKey, n *node, ttl time.Duration) string {
+	t.Helper()
+	sub, err := base64.StdEncoding.DecodeString(n.pub)
+	must.NoError(t, err)
+	var notAfter int64
+	if ttl > 0 {
+		notAfter = time.Now().Add(ttl).Unix()
+	}
+	blob, err := mesh.Sign(signer, sub, time.Now().Add(-time.Minute).Unix(), notAfter)
+	must.NoError(t, err)
+	return writeFile(t, base64.StdEncoding.EncodeToString(blob))
+}
+
+func TestMesh_Signature(t *testing.T) {
+	skipIfNoNetns(t)
+	newBridge(t, "wgmag-br")
+	const prefix = "fdcc::/16"
+
+	a := newPrefixNode(t, "wgmag-a", "10.155.0.1", 51820, "wgmag-br", prefix)
+	b := newPrefixNode(t, "wgmag-b", "10.155.0.2", 51820, "wgmag-br", prefix)
+	c := newPrefixNode(t, "wgmag-c", "10.155.0.3", 51820, "wgmag-br", prefix)
+
+	signerPub, signerPriv, err := ed25519.GenerateKey(nil)
+	must.NoError(t, err)
+	signers := base64.StdEncoding.EncodeToString(signerPub)
+	sigA := signNode(t, signerPriv, a, time.Hour)
+	sigB := signNode(t, signerPriv, b, time.Hour)
+
+	startMesh(t, a, []*node{b, c}, 51820, "--prefix", prefix,
+		"--signers", signers, "--signature", sigA, "--require-signature")
+	startMesh(t, b, []*node{a, c}, 51820, "--prefix", prefix,
+		"--signers", signers, "--signature", sigB, "--require-signature")
+	startMesh(t, c, []*node{a, b}, 51820, "--prefix", prefix, "--signers", signers)
+
+	waitFor(t, "a and b admit each other on a valid signature", 30*time.Second, func() bool {
+		return strings.Contains(wgPeers(a), b.pub) && strings.Contains(wgPeers(b), a.pub)
+	})
+	waitPing(t, a, b.overlay)
+
+	waitFor(t, "a and b evict the unsigned bootstrap peer c", 30*time.Second, func() bool {
+		return !strings.Contains(wgPeers(a), c.pub) && !strings.Contains(wgPeers(b), c.pub)
+	})
+	time.Sleep(2 * time.Second)
+	must.StrNotContains(t, wgPeers(a), c.pub, must.Sprint("a re-admitted unsigned c"))
+	must.StrNotContains(t, wgPeers(b), c.pub, must.Sprint("b re-admitted unsigned c"))
+}
+
+func TestMesh_SignatureRevocation(t *testing.T) {
+	skipIfNoNetns(t)
+	newBridge(t, "wgmrev-br")
+	const prefix = "fdcc::/16"
+
+	a := newPrefixNode(t, "wgmrev-a", "10.156.0.1", 51820, "wgmrev-br", prefix)
+	b := newPrefixNode(t, "wgmrev-b", "10.156.0.2", 51820, "wgmrev-br", prefix)
+
+	signer1pub, signer1priv, err := ed25519.GenerateKey(nil)
+	must.NoError(t, err)
+	signer2pub, _, err := ed25519.GenerateKey(nil)
+	must.NoError(t, err)
+
+	signersA := filepath.Join(t.TempDir(), "signersA")
+	signersB := filepath.Join(t.TempDir(), "signersB")
+	must.NoError(t, os.WriteFile(signersA, []byte(base64.StdEncoding.EncodeToString(signer1pub)+"\n"), 0o600))
+	must.NoError(t, os.WriteFile(signersB, []byte(base64.StdEncoding.EncodeToString(signer1pub)+"\n"), 0o600))
+	sigA := signNode(t, signer1priv, a, time.Hour)
+	sigB := signNode(t, signer1priv, b, time.Hour)
+
+	sock := filepath.Join(t.TempDir(), "a.sock")
+	cmdA := startMesh(t, a, []*node{b}, 51820, "--prefix", prefix, "--socket", sock,
+		"--signers", "@"+signersA, "--signature", sigA, "--require-signature")
+	startMesh(t, b, []*node{a}, 51820, "--prefix", prefix,
+		"--signers", "@"+signersB, "--signature", sigB, "--require-signature")
+
+	waitFor(t, "a admits b under signer 1", 30*time.Second, func() bool {
+		out, err := exec.Command(meshBin, "status", "--socket", sock, "--json").Output()
+		return err == nil && strings.Contains(string(out), b.pub) && strings.Contains(wgPeers(a), b.pub)
+	})
+
+	must.NoError(t, os.WriteFile(signersA, []byte(base64.StdEncoding.EncodeToString(signer2pub)+"\n"), 0o600))
+	must.NoError(t, cmdA.Process.Signal(syscall.SIGHUP))
+
+	waitFor(t, "a evicts b once b's signer is rotated out", 15*time.Second, func() bool {
+		return !strings.Contains(wgPeers(a), b.pub)
+	})
+}
+
+func TestMesh_DNS_NoPrefix(t *testing.T) {
+	const (
+		iface  = "wg-dnsnp"
+		addr   = "fd00:42::1"
+		port   = 51893
+		gossip = 7955
+		zone   = "mesh.internal"
+	)
+	exec.Command("ip", "link", "del", iface).Run()
+	t.Cleanup(func() { exec.Command("ip", "link", "del", iface).Run() })
+
+	priv, _ := genKeypair(t)
+	keyFile := writeFile(t, priv+"\n")
+	run(t, "ip", "link", "add", iface, "type", "wireguard")
+	run(t, "wg", "set", iface, "private-key", keyFile, "listen-port", fmt.Sprint(port))
+	run(t, "ip", "-6", "addr", "add", addr+"/128", "dev", iface)
+	run(t, "ip", "link", "set", iface, "up")
+
+	cmd := exec.Command(meshBin,
+		"--interface", iface,
+		"--endpoint", fmt.Sprintf("[%s]:%d", addr, port),
+		"--address", addr,
+		"--gossip-port", fmt.Sprint(gossip),
+		"--dns", zone,
+		"--tag", "name=alpha",
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	must.NoError(t, cmd.Start())
+	t.Cleanup(func() { stop(cmd) })
+
+	server := net.JoinHostPort(addr, "53")
+	query := func(qname string) (*dns.Msg, error) {
+		c := &dns.Client{Timeout: 2 * time.Second}
+		msg := new(dns.Msg)
+		msg.SetQuestion(dns.Fqdn(qname), dns.TypeAAAA)
+		resp, _, err := c.Exchange(msg, server)
+		return resp, err
+	}
+
+	waitFor(t, "resolver answers a name without --prefix", 15*time.Second, func() bool {
+		resp, err := query("alpha." + zone)
+		if err != nil || len(resp.Answer) == 0 {
+			return false
+		}
+		aaaa, ok := resp.Answer[0].(*dns.AAAA)
+		return ok && aaaa.AAAA.String() == addr
+	})
 }
 
 func TestMesh_DuplicateRouteDropped(t *testing.T) {
