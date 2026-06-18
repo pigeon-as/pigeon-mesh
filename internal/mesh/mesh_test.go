@@ -183,7 +183,7 @@ func TestDiff(t *testing.T) {
 		w: makePeer(w, "fd00::5/128"),
 	}
 
-	changes := diff(prev, cur)
+	changes := diff(prev, cur, kernelSet(prev))
 	must.SliceLen(t, 3, changes)
 	must.True(t, slices.IsSortedFunc(changes, func(a, b wgtypes.PeerConfig) int {
 		return bytes.Compare(a.PublicKey[:], b.PublicKey[:])
@@ -199,7 +199,17 @@ func TestDiff(t *testing.T) {
 	must.EqOp(t, 2, adds, must.Sprint("new Z and changed W are applied"))
 	must.EqOp(t, 1, removes, must.Sprint("Y is removed"))
 
-	must.SliceEmpty(t, diff(cur, cur))
+	must.SliceEmpty(t, diff(cur, cur, kernelSet(cur)))
+}
+
+func kernelSet(ms ...map[string]Peer) map[string]bool {
+	set := map[string]bool{}
+	for _, mp := range ms {
+		for k := range mp {
+			set[k] = true
+		}
+	}
+	return set
 }
 
 func TestSweepExpiry(t *testing.T) {
@@ -314,15 +324,22 @@ func TestDiff_EndpointChange(t *testing.T) {
 		return map[string]Peer{key: {PublicKey: key, Endpoint: ep, AllowedIPs: []string{cidr}}}
 	}
 
-	changes := diff(peerAt("203.0.113.1:51820", "fd00::1/128"), peerAt("203.0.113.2:51820", "fd00::1/128"))
+	prev := peerAt("203.0.113.1:51820", "fd00::1/128")
+	inKernel := kernelSet(prev)
+	changes := diff(prev, peerAt("203.0.113.2:51820", "fd00::1/128"), inKernel)
 	must.SliceLen(t, 1, changes)
 	must.True(t, changes[0].UpdateOnly, must.Sprint("a known peer is an update, not a re-add"))
 	must.NotNil(t, changes[0].Endpoint, must.Sprint("a changed endpoint is re-applied to the kernel"))
 
-	changes = diff(peerAt("203.0.113.1:51820", "fd00::1/128"), peerAt("203.0.113.1:51820", "fd00::2/128"))
+	changes = diff(prev, peerAt("203.0.113.1:51820", "fd00::2/128"), inKernel)
 	must.SliceLen(t, 1, changes)
 	must.True(t, changes[0].UpdateOnly)
 	must.Nil(t, changes[0].Endpoint, must.Sprint("an unchanged endpoint is left to WireGuard's own roaming"))
+
+	changes = diff(prev, prev, map[string]bool{})
+	must.SliceLen(t, 1, changes)
+	must.False(t, changes[0].UpdateOnly, must.Sprint("a peer missing from the kernel is re-added in full"))
+	must.NotNil(t, changes[0].Endpoint)
 }
 
 func TestShouldReap(t *testing.T) {

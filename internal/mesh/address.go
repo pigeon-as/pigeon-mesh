@@ -134,7 +134,7 @@ func pickEndpointAddr(addrs []netip.Addr) (netip.Addr, bool) {
 	var v4, v6 []netip.Addr
 	for _, a := range addrs {
 		a = a.Unmap()
-		if !a.IsValid() {
+		if !a.IsValid() || !a.IsGlobalUnicast() {
 			continue
 		}
 		if a.Is6() {

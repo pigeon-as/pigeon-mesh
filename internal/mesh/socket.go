@@ -7,12 +7,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"maps"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
@@ -27,7 +29,9 @@ func (m *Mesh) serveStatus(ctx context.Context) {
 		return
 	}
 	_ = os.Remove(m.cfg.SocketPath)
+	old := syscall.Umask(0o177)
 	ln, err := net.Listen("unix", m.cfg.SocketPath)
+	syscall.Umask(old)
 	if err != nil {
 		slog.Warn("status socket", "path", m.cfg.SocketPath, "err", err)
 		return
@@ -59,7 +63,7 @@ func (m *Mesh) handleStatus(conn net.Conn) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 
-	req, _ := bufio.NewReader(conn).ReadString('\n')
+	req, _ := bufio.NewReader(io.LimitReader(conn, 64)).ReadString('\n')
 	switch strings.TrimSpace(req) {
 	case "status", "":
 		data, err := json.Marshal(m.status())

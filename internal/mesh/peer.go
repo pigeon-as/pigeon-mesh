@@ -87,10 +87,8 @@ func (p Peer) toWG() (wgtypes.PeerConfig, error) {
 		ReplaceAllowedIPs: true,
 		AllowedIPs:        nets,
 	}
-	if p.PersistentKeepalive > 0 {
-		d := time.Duration(p.PersistentKeepalive) * time.Second
-		cfg.PersistentKeepaliveInterval = &d
-	}
+	d := time.Duration(p.PersistentKeepalive) * time.Second
+	cfg.PersistentKeepaliveInterval = &d
 	return cfg, nil
 }
 

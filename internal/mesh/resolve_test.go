@@ -105,3 +105,34 @@ func TestBuildReply_ApexNXDOMAIN(t *testing.T) {
 	must.EqOp(t, dns.RcodeNameError, reply.Rcode)
 	must.SliceLen(t, 1, reply.Ns)
 }
+
+func TestBuildReply_KnownA_IPv4(t *testing.T) {
+	table := map[string]netip.Addr{"beta": netip.MustParseAddr("10.0.0.5")}
+	reply := buildReply(aaaaQuery("beta.mesh.internal", dns.TypeA), "mesh.internal", table)
+
+	must.EqOp(t, dns.RcodeSuccess, reply.Rcode)
+	must.SliceLen(t, 1, reply.Answer)
+	a, ok := reply.Answer[0].(*dns.A)
+	must.True(t, ok)
+	must.EqOp(t, "10.0.0.5", a.A.String())
+	must.EqOp(t, uint32(dnsTTL), a.Hdr.Ttl)
+
+	// An AAAA query for an IPv4-only name is NODATA, not a malformed AAAA record.
+	reply = buildReply(aaaaQuery("beta.mesh.internal", dns.TypeAAAA), "mesh.internal", table)
+	must.EqOp(t, dns.RcodeSuccess, reply.Rcode)
+	must.SliceLen(t, 0, reply.Answer)
+	must.SliceLen(t, 1, reply.Ns)
+	_, err := reply.Pack()
+	must.NoError(t, err, must.Sprint("reply must always serialize"))
+}
+
+func TestBuildReply_MultiQuestionFormErr(t *testing.T) {
+	r := new(dns.Msg)
+	r.Question = []dns.Question{
+		{Name: dns.Fqdn("a.mesh.internal"), Qtype: dns.TypeAAAA, Qclass: dns.ClassINET},
+		{Name: dns.Fqdn("b.mesh.internal"), Qtype: dns.TypeAAAA, Qclass: dns.ClassINET},
+	}
+	reply := buildReply(r, "mesh.internal", nil)
+	must.EqOp(t, dns.RcodeFormatError, reply.Rcode)
+	must.SliceLen(t, 0, reply.Answer)
+}

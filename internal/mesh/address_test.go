@@ -3,7 +3,6 @@ package mesh
 import (
 	"bytes"
 	"encoding/base64"
-	"net"
 	"net/netip"
 	"testing"
 
@@ -34,12 +33,27 @@ func TestNormalizeEndpoint_Rejected(t *testing.T) {
 	}
 }
 
-func TestNormalizeEndpoint_ResolvesHostname(t *testing.T) {
-	got, err := NormalizeEndpoint("localhost:51820")
-	must.NoError(t, err)
-	host, _, err := net.SplitHostPort(got)
-	must.NoError(t, err)
-	must.NotNil(t, net.ParseIP(host), must.Sprintf("localhost should resolve to an IP, got %q", got))
+func TestNormalizeEndpoint_RejectsLoopbackOnlyHostname(t *testing.T) {
+	_, err := NormalizeEndpoint("localhost:51820")
+	must.Error(t, err)
+	must.StrContains(t, err.Error(), "no addresses")
+}
+
+func TestPickEndpointAddr_FiltersNonGlobal(t *testing.T) {
+	got, ok := pickEndpointAddr([]netip.Addr{
+		netip.MustParseAddr("127.0.0.1"),
+		netip.MustParseAddr("::1"),
+		netip.MustParseAddr("fe80::1"),
+		netip.MustParseAddr("203.0.113.7"),
+	})
+	must.True(t, ok)
+	must.EqOp(t, "203.0.113.7", got.String(), must.Sprint("loopback and link-local are skipped for a global address"))
+
+	_, ok = pickEndpointAddr([]netip.Addr{
+		netip.MustParseAddr("127.0.0.1"),
+		netip.MustParseAddr("::1"),
+	})
+	must.False(t, ok, must.Sprint("a loopback-only set yields no usable endpoint"))
 }
 
 func TestPickEndpointAddr_PrefersIPv6(t *testing.T) {
