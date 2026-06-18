@@ -42,6 +42,7 @@ type Config struct {
 	Self             Peer
 	Keyring          *memberlist.Keyring
 	Prefix           netip.Prefix
+	AcceptRoutes     []netip.Prefix
 	DNSZone          string
 	Signers          []ed25519.PublicKey
 	RequireSignature bool
@@ -60,20 +61,23 @@ type member struct {
 }
 
 type Mesh struct {
-	cfg         Config
-	meta        []byte
-	memberlist  *memberlist.Memberlist
-	mu          sync.RWMutex
-	members     map[string]member
-	peers       map[string]Peer
+	cfg          Config
+	meta         []byte
+	memberlist   *memberlist.Memberlist
+	mu           sync.RWMutex
+	members      map[string]member
+	peers        map[string]Peer
 	conflicts    map[string][]string
 	rejected     map[string]string
+	refused      map[string][]string
 	keyConflicts map[string]string
 	reconcileCh  chan struct{}
-	leave       chan struct{}
-	bootstrap   map[string]bool
-	signers     []ed25519.PublicKey
-	signersGen  uint64
+	leave        chan struct{}
+	bootstrap    map[string]bool
+	signers      []ed25519.PublicKey
+	signersGen   uint64
+	shutdownMu   sync.Mutex
+	shutdown     bool
 }
 
 func New(cfg Config) (*Mesh, error) {
@@ -92,17 +96,18 @@ func New(cfg Config) (*Mesh, error) {
 	}
 
 	m := &Mesh{
-		cfg:         cfg,
-		meta:        meta,
-		members:     make(map[string]member),
-		peers:       make(map[string]Peer),
+		cfg:          cfg,
+		meta:         meta,
+		members:      make(map[string]member),
+		peers:        make(map[string]Peer),
 		conflicts:    make(map[string][]string),
 		rejected:     make(map[string]string),
+		refused:      make(map[string][]string),
 		keyConflicts: make(map[string]string),
 		reconcileCh:  make(chan struct{}, 1),
-		leave:       make(chan struct{}, 1),
-		bootstrap:   make(map[string]bool),
-		signers:     cfg.Signers,
+		leave:        make(chan struct{}, 1),
+		bootstrap:    make(map[string]bool),
+		signers:      cfg.Signers,
 	}
 
 	d := &delegate{mesh: m}
@@ -173,11 +178,12 @@ func (m *Mesh) join() (int, error) {
 	return m.memberlist.Join(targets)
 }
 
-func diff(prev, cur map[string]Peer) []wgtypes.PeerConfig {
+func diff(prev, cur map[string]Peer, inKernel map[string]bool) []wgtypes.PeerConfig {
 	var changes []wgtypes.PeerConfig
 	for name, p := range cur {
 		prevPeer, known := prev[name]
-		if known && prevPeer.equal(p) {
+		present := inKernel[name]
+		if known && present && prevPeer.equal(p) {
 			continue
 		}
 		pc, err := p.toWG()
@@ -185,7 +191,7 @@ func diff(prev, cur map[string]Peer) []wgtypes.PeerConfig {
 			slog.Warn("peer to wg", "node", name, "err", err)
 			continue
 		}
-		if known {
+		if known && present {
 			pc.UpdateOnly = true
 			if prevPeer.Endpoint == p.Endpoint {
 				pc.Endpoint = nil
@@ -195,6 +201,9 @@ func diff(prev, cur map[string]Peer) []wgtypes.PeerConfig {
 	}
 	for name := range prev {
 		if _, ok := cur[name]; ok {
+			continue
+		}
+		if !inKernel[name] {
 			continue
 		}
 		pk, err := wgtypes.ParseKey(name)
@@ -323,9 +332,7 @@ func (m *Mesh) reevaluate(now time.Time) {
 	}
 	snaps := make([]snapshot, 0, len(m.members))
 	for name, e := range m.members {
-		if !e.failed {
-			snaps = append(snaps, snapshot{name, e.meta, e.peer, e.addr, e.reject, e.notAfter})
-		}
+		snaps = append(snaps, snapshot{name, e.meta, e.peer, e.addr, e.reject, e.notAfter})
 	}
 	m.mu.RUnlock()
 
@@ -350,7 +357,7 @@ func (m *Mesh) reevaluate(now time.Time) {
 	m.mu.Lock()
 	for _, c := range changes {
 		e, ok := m.members[c.name]
-		if !ok || e.failed || !bytes.Equal(e.meta, c.meta) {
+		if !ok || !bytes.Equal(e.meta, c.meta) {
 			continue
 		}
 		e.addr = c.addr
@@ -390,6 +397,7 @@ func (m *Mesh) removeMember(n *memberlist.Node) {
 		m.mu.Lock()
 		_, ok := m.members[n.Name]
 		delete(m.members, n.Name)
+		delete(m.keyConflicts, n.Name)
 		m.mu.Unlock()
 		if ok {
 			m.triggerReconcile()
@@ -490,6 +498,17 @@ func (m *Mesh) setRejected(rejected map[string]string) {
 	m.rejected = rejected
 }
 
+func (m *Mesh) setRefused(refused map[string][]string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for pubkey, routes := range refused {
+		if _, seen := m.refused[pubkey]; !seen {
+			slog.Warn("ignoring peer routes outside --accept-routes", "pubkey", pubkey, "routes", routes)
+		}
+	}
+	m.refused = refused
+}
+
 func hasHostRoute(ips []net.IPNet) bool {
 	for _, ipn := range ips {
 		ones, bits := ipn.Mask.Size()
@@ -534,21 +553,45 @@ func (m *Mesh) seedPeersFromKernel() error {
 	return nil
 }
 
+func (m *Mesh) kernelPubkeys() (map[string]bool, error) {
+	peers, err := m.cfg.WG.Peers(m.cfg.Iface)
+	if err != nil {
+		return nil, err
+	}
+	set := make(map[string]bool, len(peers))
+	for _, p := range peers {
+		set[p.PublicKey.String()] = true
+	}
+	return set, nil
+}
+
 func (m *Mesh) reconcile() error {
 	if m.cfg.Prefix.IsValid() {
 		if err := m.cfg.WG.SetRoute(m.cfg.Iface, m.cfg.Prefix); err != nil {
 			slog.Warn("overlay route", "err", err)
 		}
 	}
+	inKernel, err := m.kernelPubkeys()
+	if err != nil {
+		return err
+	}
 	m.mu.RLock()
 	cur := make(map[string]Peer, len(m.members))
 	rejected := make(map[string]string)
+	refused := make(map[string][]string)
 	for name, e := range m.members {
 		if e.reject != "" {
 			rejected[name] = e.reject
 			continue
 		}
-		cur[name] = e.peer
+		p := e.peer
+		if len(m.cfg.AcceptRoutes) > 0 {
+			if kept, dropped := clampAcceptedRoutes(p.AllowedIPs, e.addr, m.cfg.AcceptRoutes); len(dropped) > 0 {
+				p.AllowedIPs = kept
+				refused[name] = dropped
+			}
+		}
+		cur[name] = p
 	}
 	bootstrap := make(map[string]struct{}, len(m.bootstrap))
 	for name := range m.bootstrap {
@@ -556,10 +599,7 @@ func (m *Mesh) reconcile() error {
 	}
 	m.mu.RUnlock()
 
-	m.setRejected(rejected)
 	effective, conflicts := resolveConflicts(cur)
-	m.setConflicts(conflicts)
-
 	for name := range bootstrap {
 		if _, ok := effective[name]; !ok {
 			if p, ok := m.peers[name]; ok {
@@ -568,19 +608,22 @@ func (m *Mesh) reconcile() error {
 		}
 	}
 
-	changes := diff(m.peers, effective)
+	changes := diff(m.peers, effective, inKernel)
 	if len(changes) > 0 {
 		if err := m.cfg.WG.Apply(m.cfg.Iface, changes); err != nil {
 			return err
 		}
 		m.peers = effective
 	}
+	m.setRejected(rejected)
+	m.setRefused(refused)
+	m.setConflicts(conflicts)
 	return nil
 }
 
 func (m *Mesh) Run(ctx context.Context) error {
 	defer func() {
-		if err := m.memberlist.Shutdown(); err != nil {
+		if err := m.shutdownMemberlist(); err != nil {
 			slog.Warn("memberlist shutdown", "err", err)
 		}
 	}()
@@ -634,7 +677,6 @@ func (m *Mesh) Run(ctx context.Context) error {
 		case <-m.reconcileCh:
 			retry = retryAfter(m.reconcile())
 		case <-ticker.C:
-			m.sweepExpiry(time.Now())
 			retry = retryAfter(m.reconcile())
 		case <-retry:
 			retry = retryAfter(m.reconcile())
@@ -733,11 +775,13 @@ func (m *Mesh) reap(ctx context.Context) {
 			return
 		case <-ticker.C:
 			now := time.Now()
+			m.sweepExpiry(now)
 			var reaped bool
 			m.mu.Lock()
 			for name, e := range m.members {
 				if shouldReap(e.failed, e.leaveTime, now, m.cfg.ReconnectTimeout) {
 					delete(m.members, name)
+					delete(m.keyConflicts, name)
 					reaped = true
 				}
 			}
@@ -814,7 +858,14 @@ func nextJoinBackoff(cur time.Duration) time.Duration {
 }
 
 func (m *Mesh) requestLeave(timeout time.Duration) error {
-	if err := m.memberlist.Leave(timeout); err != nil {
+	m.shutdownMu.Lock()
+	if m.shutdown {
+		m.shutdownMu.Unlock()
+		return errors.New("shutting down")
+	}
+	err := m.memberlist.Leave(timeout)
+	m.shutdownMu.Unlock()
+	if err != nil {
 		return err
 	}
 	select {
@@ -822,4 +873,11 @@ func (m *Mesh) requestLeave(timeout time.Duration) error {
 	default:
 	}
 	return nil
+}
+
+func (m *Mesh) shutdownMemberlist() error {
+	m.shutdownMu.Lock()
+	defer m.shutdownMu.Unlock()
+	m.shutdown = true
+	return m.memberlist.Shutdown()
 }

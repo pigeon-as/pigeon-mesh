@@ -43,6 +43,7 @@ func main() {
 	endpoint := flag.String("endpoint", "", "this node's Endpoint as host:port; hostnames resolved at startup; go-sockaddr templates evaluated (required)")
 	address := flag.String("address", "", "this node's overlay IP; go-sockaddr templates evaluated; auto-detected from --interface if unset")
 	advertiseRoutes := flag.String("advertise-routes", "", "extra routes this node advertises to peers beyond its own /128, comma-separated")
+	acceptRoutes := flag.String("accept-routes", "", "comma-separated CIDRs this node will install from peers' advertisements; a peer's own address always installs; empty accepts every advertised route (default)")
 	gossipPort := flag.Int("gossip-port", 7946, "port to listen on for gossip (TCP and UDP)")
 	gossipKeyFile := flag.String("gossip-key-file", "", "JSON file of base64-encoded gossip encryption keys")
 	persistentKeepalive := flag.Int("persistent-keepalive", 0, "PersistentKeepalive interval in seconds advertised to peers (0 disables)")
@@ -218,6 +219,13 @@ func main() {
 		RequireSignature: *requireSignature,
 		ReconnectTimeout: *reconnectTimeout,
 		WG:               wgc,
+	}
+	if *acceptRoutes != "" {
+		cfg.AcceptRoutes, err = mesh.ParseAcceptRoutes(*acceptRoutes)
+		if err != nil {
+			slog.Error("accept-routes", "err", err)
+			os.Exit(2)
+		}
 	}
 	if *gossipKeyFile != "" {
 		cfg.Keyring, err = mesh.LoadKeyring(*gossipKeyFile)

@@ -134,7 +134,7 @@ func pickEndpointAddr(addrs []netip.Addr) (netip.Addr, bool) {
 	var v4, v6 []netip.Addr
 	for _, a := range addrs {
 		a = a.Unmap()
-		if !a.IsValid() {
+		if !a.IsValid() || !a.IsGlobalUnicast() {
 			continue
 		}
 		if a.Is6() {
@@ -152,4 +152,64 @@ func pickEndpointAddr(addrs []netip.Addr) (netip.Addr, bool) {
 	}
 	slices.SortFunc(pick, func(a, b netip.Addr) int { return a.Compare(b) })
 	return pick[0], true
+}
+
+// ParseAcceptRoutes parses the comma-separated CIDR list for --accept-routes
+// into masked prefixes. It is the receive-side counterpart to --advertise-routes:
+// the set of routes this node is willing to install from peers' advertisements.
+func ParseAcceptRoutes(s string) ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for c := range strings.SplitSeq(s, ",") {
+		c = strings.TrimSpace(c)
+		if c == "" {
+			continue
+		}
+		pfx, err := netip.ParsePrefix(c)
+		if err != nil {
+			return nil, fmt.Errorf("accept-routes %q: %w", c, err)
+		}
+		out = append(out, pfx.Masked())
+	}
+	if len(out) == 0 {
+		return nil, errors.New("at least one CIDR required")
+	}
+	return out, nil
+}
+
+// clampAcceptedRoutes filters a peer's advertised routes down to the ones the
+// local operator accepts via --accept-routes. The peer's own address (identity)
+// always passes, since refusing it is an admission decision rather than a routing
+// one; every other route must be contained in one of the accepted prefixes. An
+// empty accept set accepts everything (the default, unrestricted behaviour). It
+// returns the kept and dropped routes; inputs are assumed canonical (masked) as
+// produced by decodeMeta.
+func clampAcceptedRoutes(allowedIPs []string, identity netip.Addr, accept []netip.Prefix) (kept, dropped []string) {
+	if len(accept) == 0 {
+		return allowedIPs, nil
+	}
+	var id netip.Prefix
+	if identity.IsValid() {
+		id = HostRoute(identity)
+	}
+	for _, s := range allowedIPs {
+		r, err := netip.ParsePrefix(s)
+		if err != nil || (id.IsValid() && r == id) || routeWithinAny(r, accept) {
+			kept = append(kept, s)
+			continue
+		}
+		dropped = append(dropped, s)
+	}
+	return kept, dropped
+}
+
+// routeWithinAny reports whether r is a subset of any prefix in set, matching the
+// semantics of Vault's cidrutil.Subset (the same check the removed peer-policy used):
+// r must be at least as specific as the outer prefix and lie inside it.
+func routeWithinAny(r netip.Prefix, set []netip.Prefix) bool {
+	for _, a := range set {
+		if r.Bits() >= a.Bits() && a.Contains(r.Addr()) {
+			return true
+		}
+	}
+	return false
 }

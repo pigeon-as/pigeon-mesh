@@ -203,6 +203,11 @@ func (m *Mesh) dnsTable() map[string]netip.Addr {
 		if !ok || e.failed || e.reject != "" {
 			continue
 		}
+		if e.addr.IsValid() {
+			if _, contested := m.conflicts[HostRoute(e.addr).String()]; contested {
+				continue
+			}
+		}
 		add(e.addr, e.peer.Tags)
 	}
 	return table
@@ -224,8 +229,14 @@ func (m *Mesh) programResolved(zone string) error {
 	mgr := conn.Object(resolvedDest, resolvedPath)
 	idx := int32(ifi.Index)
 
-	ip := addr.As16()
-	servers := []resolvedLinkDNS{{Family: syscall.AF_INET6, Address: ip[:]}}
+	var servers []resolvedLinkDNS
+	if a := addr.Unmap(); a.Is4() {
+		ip := a.As4()
+		servers = []resolvedLinkDNS{{Family: syscall.AF_INET, Address: ip[:]}}
+	} else {
+		ip := a.As16()
+		servers = []resolvedLinkDNS{{Family: syscall.AF_INET6, Address: ip[:]}}
+	}
 	if err := mgr.Call(resolvedManagerIface+".SetLinkDNS", 0, idx, servers).Store(); err != nil {
 		return fmt.Errorf("SetLinkDNS: %w", err)
 	}

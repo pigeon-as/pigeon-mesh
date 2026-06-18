@@ -3,7 +3,6 @@ package mesh
 import (
 	"bytes"
 	"encoding/base64"
-	"net"
 	"net/netip"
 	"testing"
 
@@ -34,12 +33,27 @@ func TestNormalizeEndpoint_Rejected(t *testing.T) {
 	}
 }
 
-func TestNormalizeEndpoint_ResolvesHostname(t *testing.T) {
-	got, err := NormalizeEndpoint("localhost:51820")
-	must.NoError(t, err)
-	host, _, err := net.SplitHostPort(got)
-	must.NoError(t, err)
-	must.NotNil(t, net.ParseIP(host), must.Sprintf("localhost should resolve to an IP, got %q", got))
+func TestNormalizeEndpoint_RejectsLoopbackOnlyHostname(t *testing.T) {
+	_, err := NormalizeEndpoint("localhost:51820")
+	must.Error(t, err)
+	must.StrContains(t, err.Error(), "no addresses")
+}
+
+func TestPickEndpointAddr_FiltersNonGlobal(t *testing.T) {
+	got, ok := pickEndpointAddr([]netip.Addr{
+		netip.MustParseAddr("127.0.0.1"),
+		netip.MustParseAddr("::1"),
+		netip.MustParseAddr("fe80::1"),
+		netip.MustParseAddr("203.0.113.7"),
+	})
+	must.True(t, ok)
+	must.EqOp(t, "203.0.113.7", got.String(), must.Sprint("loopback and link-local are skipped for a global address"))
+
+	_, ok = pickEndpointAddr([]netip.Addr{
+		netip.MustParseAddr("127.0.0.1"),
+		netip.MustParseAddr("::1"),
+	})
+	must.False(t, ok, must.Sprint("a loopback-only set yields no usable endpoint"))
 }
 
 func TestPickEndpointAddr_PrefersIPv6(t *testing.T) {
@@ -170,4 +184,63 @@ func TestValidateOverlayAddr(t *testing.T) {
 		_, err := validateOverlayAddr(testKey, Peer{AllowedIPs: bad}, prefix)
 		must.Error(t, err, must.Sprintf("AllowedIPs %v", bad))
 	}
+}
+
+func TestParseAcceptRoutes(t *testing.T) {
+	got, err := ParseAcceptRoutes("fdcc::/16, 10.0.0.0/8 ,10.0.0.0/8")
+	must.NoError(t, err)
+	must.Eq(t, []netip.Prefix{
+		netip.MustParsePrefix("fdcc::/16"),
+		netip.MustParsePrefix("10.0.0.0/8"),
+		netip.MustParsePrefix("10.0.0.0/8"),
+	}, got)
+
+	// Non-masked input is canonicalised.
+	got, err = ParseAcceptRoutes("10.1.2.3/8")
+	must.NoError(t, err)
+	must.Eq(t, []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}, got)
+
+	for _, bad := range []string{"", "   ", ",", "not-a-cidr", "10.0.0.0"} {
+		_, err := ParseAcceptRoutes(bad)
+		must.Error(t, err, must.Sprintf("input %q", bad))
+	}
+}
+
+func TestClampAcceptedRoutes(t *testing.T) {
+	id := netip.MustParseAddr("fdcc::1")
+	overlay := []netip.Prefix{netip.MustParsePrefix("fdcc::/16")}
+
+	// Empty accept set is the default: everything passes, nothing dropped.
+	in := []string{"fdcc::1/128", "0.0.0.0/0", "10.0.0.0/8"}
+	kept, dropped := clampAcceptedRoutes(in, id, nil)
+	must.Eq(t, in, kept)
+	must.SliceEmpty(t, dropped)
+
+	// Identity host route always passes; in-set transit passes; the rest drop.
+	kept, dropped = clampAcceptedRoutes(
+		[]string{"fdcc::1/128", "fdcc:dead::/32", "0.0.0.0/0", "10.0.0.0/8"},
+		id,
+		append([]netip.Prefix{}, overlay...),
+	)
+	must.Eq(t, []string{"fdcc::1/128", "fdcc:dead::/32"}, kept)
+	must.Eq(t, []string{"0.0.0.0/0", "10.0.0.0/8"}, dropped)
+
+	// Identity passes even when it falls outside the accept set (refusing it would
+	// be an admission decision, not a routing one).
+	kept, dropped = clampAcceptedRoutes(
+		[]string{"192.168.5.1/32", "0.0.0.0/0"},
+		netip.MustParseAddr("192.168.5.1"),
+		[]netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")},
+	)
+	must.Eq(t, []string{"192.168.5.1/32"}, kept)
+	must.Eq(t, []string{"0.0.0.0/0"}, dropped)
+
+	// A broader prefix than the accepted one is not a subset and is dropped.
+	kept, dropped = clampAcceptedRoutes(
+		[]string{"10.0.0.0/4"},
+		netip.Addr{},
+		[]netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")},
+	)
+	must.SliceEmpty(t, kept)
+	must.Eq(t, []string{"10.0.0.0/4"}, dropped)
 }

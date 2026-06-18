@@ -61,29 +61,37 @@ func buildReply(r *dns.Msg, zone string, table map[string]netip.Addr) *dns.Msg {
 	msg := new(dns.Msg)
 	msg.SetReply(r)
 	msg.Authoritative = true
-	for _, q := range r.Question {
-		qn := strings.ToLower(strings.TrimSuffix(q.Name, "."))
-		if !inZone(qn, zone) {
-			msg.Rcode = dns.RcodeRefused
-			continue
-		}
-		label, ok := queryLabel(qn, zone)
-		if !ok {
-			msg.Rcode = dns.RcodeNameError
-			msg.Ns = append(msg.Ns, soa(zone))
-			continue
-		}
-		addr, known := table[label]
-		if known && q.Qtype == dns.TypeAAAA {
-			msg.Answer = append(msg.Answer, &dns.AAAA{
-				Hdr:  dns.RR_Header{Name: q.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: dnsTTL},
-				AAAA: net.IP(addr.AsSlice()),
-			})
-			continue
-		}
-		if !known {
-			msg.Rcode = dns.RcodeNameError
-		}
+	if len(r.Question) != 1 {
+		msg.Rcode = dns.RcodeFormatError
+		return msg
+	}
+	q := r.Question[0]
+	qn := strings.ToLower(strings.TrimSuffix(q.Name, "."))
+	if !inZone(qn, zone) {
+		msg.Rcode = dns.RcodeRefused
+		return msg
+	}
+	label, ok := queryLabel(qn, zone)
+	if !ok {
+		msg.Rcode = dns.RcodeNameError
+		msg.Ns = append(msg.Ns, soa(zone))
+		return msg
+	}
+	addr, known := table[label]
+	if !known {
+		msg.Rcode = dns.RcodeNameError
+		msg.Ns = append(msg.Ns, soa(zone))
+		return msg
+	}
+	hdr := dns.RR_Header{Name: q.Name, Class: dns.ClassINET, Ttl: dnsTTL}
+	switch addr = addr.Unmap(); {
+	case q.Qtype == dns.TypeAAAA && addr.Is6():
+		hdr.Rrtype = dns.TypeAAAA
+		msg.Answer = append(msg.Answer, &dns.AAAA{Hdr: hdr, AAAA: net.IP(addr.AsSlice())})
+	case q.Qtype == dns.TypeA && addr.Is4():
+		hdr.Rrtype = dns.TypeA
+		msg.Answer = append(msg.Answer, &dns.A{Hdr: hdr, A: net.IP(addr.AsSlice())})
+	default:
 		msg.Ns = append(msg.Ns, soa(zone))
 	}
 	return msg
