@@ -2,8 +2,6 @@ package mesh
 
 import (
 	"time"
-
-	"github.com/hashicorp/memberlist"
 )
 
 const DefaultSocketPath = "/run/pigeon-mesh.sock"
@@ -23,28 +21,27 @@ type PeerView struct {
 }
 
 type Status struct {
-	Self          string              `json:"self"`
-	UpdatedAt     string              `json:"updated_at"`
-	Health        int                 `json:"health"`
-	Peers         map[string]PeerView `json:"peers"`
-	Conflicts     map[string][]string `json:"conflicts,omitempty"`
-	Rejected      map[string]string   `json:"rejected,omitempty"`
-	RefusedRoutes map[string][]string `json:"refused_routes,omitempty"`
-	KeyConflicts  map[string]string   `json:"key_conflicts,omitempty"`
+	Self           string              `json:"self"`
+	UpdatedAt      string              `json:"updated_at"`
+	Health         int                 `json:"health"`
+	Peers          map[string]PeerView `json:"peers"`
+	Conflicts      map[string][]string `json:"conflicts,omitempty"`
+	Rejected       map[string]string   `json:"rejected,omitempty"`
+	RefusedRoutes  map[string][]string `json:"refused_routes,omitempty"`
+	StaleBootstrap []string            `json:"stale_bootstrap,omitempty"`
+	KeyConflicts   map[string]string   `json:"key_conflicts,omitempty"`
 }
 
-func peerStatus(n *memberlist.Node) string {
-	switch n.State {
-	case memberlist.StateAlive:
-		return "alive"
-	case memberlist.StateSuspect:
-		return "suspect"
-	case memberlist.StateDead:
-		return "dead"
-	case memberlist.StateLeft:
-		return "left"
+// memberStatus reports from our own tracking; memberlist.Node.State is always Alive
+// on the node Members() returns, so serf likewise tracks its own member status.
+func memberStatus(reject string, failed bool) string {
+	switch {
+	case reject != "":
+		return "rejected"
+	case failed:
+		return "failed"
 	default:
-		return "unknown"
+		return "alive"
 	}
 }
 

@@ -246,13 +246,30 @@ func TestResolveConflicts(t *testing.T) {
 		"c": {PublicKey: "c", AllowedIPs: []string{"fd00::c/128", "fd00::b/128"}},
 	}
 
-	effective, conflicts := resolveConflicts(peers)
+	effective, conflicts := resolveConflicts(peers, nil)
 
 	must.Eq(t, []string{"fd00::a/128"}, effective["a"].AllowedIPs)
 	must.Eq(t, []string{"fd00::c/128"}, effective["c"].AllowedIPs, must.Sprint("c keeps its unconflicting route"))
 	must.MapNotContainsKey(t, effective, "b", must.Sprint("b's only route conflicts, so b is dropped"))
 	must.MapLen(t, 1, conflicts)
 	must.Eq(t, []string{"b", "c"}, conflicts["fd00::b/128"], must.Sprint("conflicting route lists both claimants, sorted"))
+}
+
+func TestResolveConflicts_SelfClaimWins(t *testing.T) {
+	selfRoutes := []string{"fd00::1/128"}
+	peers := map[string]Peer{
+		"impostor": {PublicKey: "impostor", AllowedIPs: []string{"fd00::1/128"}},
+		"honest":   {PublicKey: "honest", AllowedIPs: []string{"fd00::9/128"}},
+	}
+
+	effective, conflicts := resolveConflicts(peers, selfRoutes)
+
+	must.MapNotContainsKey(t, effective, "impostor", must.Sprint("a peer claiming the self address loses that route"))
+	must.Eq(t, []string{"fd00::9/128"}, effective["honest"].AllowedIPs, must.Sprint("an unrelated peer is unaffected"))
+	must.Eq(t, []string{"(self)", "impostor"}, conflicts["fd00::1/128"], must.Sprint("self is recorded as a claimant"))
+	for _, p := range effective {
+		must.SliceNotContains(t, p.AllowedIPs, "fd00::1/128", must.Sprint("the self route is never installed for a peer"))
+	}
 }
 
 func TestAdmission(t *testing.T) {
@@ -303,7 +320,7 @@ func TestAdmission(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			addr, reject, notAfter := assess(tc.peer, testKey, tc.signers, tc.requireSig, tc.prefix, now)
+			addr, reject, notAfter, _, _ := assess(tc.peer, testKey, tc.signers, tc.requireSig, tc.prefix, nil, now)
 			if tc.wantReject == "" {
 				must.EqOp(t, "", reject)
 			} else {
@@ -313,6 +330,23 @@ func TestAdmission(t *testing.T) {
 			must.EqOp(t, tc.wantExpiry, notAfter != 0)
 		})
 	}
+}
+
+func TestAssess_PolicyFiltersRoutes(t *testing.T) {
+	pol, err := ParsePeerPolicy(`cidrSubset("10.0.0.0/8", allowedip)`)
+	must.NoError(t, err)
+	p := Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{"fd00::1/128", "10.1.0.0/16", "192.168.0.0/16"}}
+
+	addr, reject, _, kept, refused := assess(p, testKey, nil, false, netip.Prefix{}, pol, time.Unix(1_000_000, 0))
+	must.EqOp(t, "", reject)
+	must.True(t, addr.IsValid())
+	must.Eq(t, []string{"fd00::1/128", "10.1.0.0/16"}, kept, must.Sprint("identity exempt; 10/8 subnet accepted"))
+	must.Eq(t, []string{"192.168.0.0/16"}, refused)
+
+	// nil policy keeps everything, refuses nothing
+	_, _, _, kept, refused = assess(p, testKey, nil, false, netip.Prefix{}, nil, time.Unix(1_000_000, 0))
+	must.Eq(t, p.AllowedIPs, kept)
+	must.SliceEmpty(t, refused)
 }
 
 func TestDiff_EndpointChange(t *testing.T) {
@@ -342,6 +376,70 @@ func TestDiff_EndpointChange(t *testing.T) {
 	must.NotNil(t, changes[0].Endpoint)
 }
 
+func TestDiff_TagOnlyChangeNoKernelUpdate(t *testing.T) {
+	pk, err := wgtypes.GeneratePrivateKey()
+	must.NoError(t, err)
+	key := pk.PublicKey().String()
+	tagged := func(name string) map[string]Peer {
+		return map[string]Peer{key: {
+			PublicKey: key, Endpoint: "203.0.113.1:51820",
+			AllowedIPs: []string{"fd00::1/128"}, Tags: Tags{"name": name},
+		}}
+	}
+	prev := tagged("alpha")
+	must.SliceEmpty(t, diff(prev, tagged("beta"), kernelSet(prev)),
+		must.Sprint("a name=tag change is metadata-only and must not reconfigure the kernel"))
+}
+
+func TestSweepExpiry_SelfExpired(t *testing.T) {
+	priv, pub, sub := mkSig(t)
+	now := time.Now()
+	blob, err := signClaims(priv, sigClaims{Sub: sub, NotBefore: now.Add(-time.Hour).Unix(), NotAfter: now.Add(-time.Minute).Unix()})
+	must.NoError(t, err)
+	m := &Mesh{
+		cfg:         Config{Self: Peer{PublicKey: "self", Signature: blob}},
+		members:     map[string]member{},
+		reconcileCh: make(chan struct{}, 1),
+		signers:     []ed25519.PublicKey{pub},
+		meta:        []byte("meta"),
+	}
+	must.False(t, m.selfExpired.Load())
+
+	m.sweepExpiry(now)
+	must.True(t, m.selfExpired.Load(), must.Sprint("an expired own signature halts self participation"))
+
+	valid, err := signClaims(priv, sigClaims{Sub: sub, NotBefore: now.Add(-time.Hour).Unix(), NotAfter: now.Add(time.Hour).Unix()})
+	must.NoError(t, err)
+	ok := &Mesh{cfg: Config{Self: Peer{PublicKey: "self", Signature: valid}}, members: map[string]member{}, reconcileCh: make(chan struct{}, 1), signers: []ed25519.PublicKey{pub}, meta: []byte("meta")}
+	ok.sweepExpiry(now)
+	must.False(t, ok.selfExpired.Load(), must.Sprint("a valid signature keeps the node live"))
+}
+
+func TestSetStaleBootstrap(t *testing.T) {
+	m := &Mesh{
+		members:        map[string]member{},
+		bootstrap:      map[string]bool{"seedA": true, "seedB": true},
+		staleBootstrap: map[string]bool{},
+	}
+
+	m.setStaleBootstrap()
+	must.MapLen(t, 0, m.staleBootstrap, must.Sprint("never flag a seed before the mesh is joined"))
+
+	m.joinedAt.Store(time.Now().UnixNano())
+	m.setStaleBootstrap()
+	must.MapLen(t, 0, m.staleBootstrap, must.Sprint("seeds get a settle window after join to gossip"))
+
+	m.joinedAt.Store(time.Now().Add(-2 * bootstrapSettle).UnixNano())
+	m.setStaleBootstrap()
+	must.MapContainsKey(t, m.staleBootstrap, "seedA")
+	must.MapContainsKey(t, m.staleBootstrap, "seedB")
+
+	delete(m.bootstrap, "seedA")
+	m.setStaleBootstrap()
+	must.MapNotContainsKey(t, m.staleBootstrap, "seedA", must.Sprint("a seed that gossiped is no longer stale"))
+	must.MapContainsKey(t, m.staleBootstrap, "seedB")
+}
+
 func TestShouldReap(t *testing.T) {
 	now := time.Unix(1000, 0)
 	timeout := time.Minute
@@ -364,14 +462,28 @@ func TestNextJoinBackoff(t *testing.T) {
 }
 
 func TestHandleNodeConflictRecordsKeyConflict(t *testing.T) {
-	m := &Mesh{cfg: Config{Self: Peer{PublicKey: "selfKey"}}, keyConflicts: map[string]string{}}
+	m := &Mesh{
+		cfg:          Config{Self: Peer{PublicKey: "selfKey"}},
+		keyConflicts: map[string]string{},
+		members:      map[string]member{"aliveKey": {}, "roamKey": {failed: true}},
+	}
 
+	// A live member advertised from a second address is a genuine duplicate key.
 	m.handleNodeConflict(
-		&memberlist.Node{Name: "peerKey", Addr: net.ParseIP("10.0.0.1"), Port: 51820},
-		&memberlist.Node{Name: "peerKey", Addr: net.ParseIP("10.0.0.2"), Port: 51820},
+		&memberlist.Node{Name: "aliveKey", Addr: net.ParseIP("10.0.0.1"), Port: 51820},
+		&memberlist.Node{Name: "aliveKey", Addr: net.ParseIP("10.0.0.2"), Port: 51820},
 	)
-	must.MapContainsKey(t, m.keyConflicts, "peerKey", must.Sprint("a peer key collision is recorded for status"))
+	must.MapContainsKey(t, m.keyConflicts, "aliveKey", must.Sprint("a live peer's key collision is recorded for status"))
 
+	// A failed/unknown member re-announcing from a new address is a restart/roam,
+	// not a duplicate key, so it is not recorded.
+	m.handleNodeConflict(
+		&memberlist.Node{Name: "roamKey", Addr: net.ParseIP("10.0.0.1"), Port: 51820},
+		&memberlist.Node{Name: "roamKey", Addr: net.ParseIP("10.0.0.2"), Port: 51820},
+	)
+	must.MapNotContainsKey(t, m.keyConflicts, "roamKey", must.Sprint("a restart/roam is not a duplicate-key alarm"))
+
+	// A collision on our own key is always recorded.
 	m.handleNodeConflict(
 		&memberlist.Node{Name: "selfKey", Addr: net.ParseIP("10.0.0.1"), Port: 51820},
 		&memberlist.Node{Name: "selfKey", Addr: net.ParseIP("10.0.0.3"), Port: 51820},

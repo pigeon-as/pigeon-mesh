@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/memberlist"
@@ -31,6 +32,8 @@ const (
 	joinSeedCount     = 16
 
 	routeReassertDebounce = 250 * time.Millisecond
+
+	bootstrapSettle = 30 * time.Second
 )
 
 type Config struct {
@@ -42,7 +45,7 @@ type Config struct {
 	Self             Peer
 	Keyring          *memberlist.Keyring
 	Prefix           netip.Prefix
-	AcceptRoutes     []netip.Prefix
+	Policy           *PeerPolicy
 	DNSZone          string
 	Signers          []ed25519.PublicKey
 	RequireSignature bool
@@ -56,28 +59,35 @@ type member struct {
 	addr      netip.Addr
 	reject    string
 	notAfter  int64
+	kept      []string // AllowedIPs this node installs (identity + policy-accepted)
+	refused   []string // AllowedIPs the policy refused (surfaced in status)
 	failed    bool
 	leaveTime time.Time
 }
 
 type Mesh struct {
-	cfg          Config
-	meta         []byte
-	memberlist   *memberlist.Memberlist
-	mu           sync.RWMutex
-	members      map[string]member
-	peers        map[string]Peer
-	conflicts    map[string][]string
-	rejected     map[string]string
-	refused      map[string][]string
-	keyConflicts map[string]string
-	reconcileCh  chan struct{}
-	leave        chan struct{}
-	bootstrap    map[string]bool
-	signers      []ed25519.PublicKey
-	signersGen   uint64
-	shutdownMu   sync.Mutex
-	shutdown     bool
+	cfg            Config
+	meta           []byte
+	memberlist     *memberlist.Memberlist
+	mu             sync.RWMutex
+	members        map[string]member
+	peers          map[string]Peer
+	conflicts      map[string][]string
+	rejected       map[string]string
+	refused        map[string][]string
+	staleBootstrap map[string]bool
+	keyConflicts   map[string]string
+	reconcileCh    chan struct{}
+	leave          chan struct{}
+	bootstrap      map[string]bool
+	signers        []ed25519.PublicKey
+	signersGen     uint64
+	policy         *PeerPolicy
+	policyGen      uint64
+	joinedAt       atomic.Int64
+	selfExpired    atomic.Bool
+	shutdownMu     sync.Mutex
+	shutdown       bool
 }
 
 func New(cfg Config) (*Mesh, error) {
@@ -96,18 +106,20 @@ func New(cfg Config) (*Mesh, error) {
 	}
 
 	m := &Mesh{
-		cfg:          cfg,
-		meta:         meta,
-		members:      make(map[string]member),
-		peers:        make(map[string]Peer),
-		conflicts:    make(map[string][]string),
-		rejected:     make(map[string]string),
-		refused:      make(map[string][]string),
-		keyConflicts: make(map[string]string),
-		reconcileCh:  make(chan struct{}, 1),
-		leave:        make(chan struct{}, 1),
-		bootstrap:    make(map[string]bool),
-		signers:      cfg.Signers,
+		cfg:            cfg,
+		meta:           meta,
+		members:        make(map[string]member),
+		peers:          make(map[string]Peer),
+		conflicts:      make(map[string][]string),
+		rejected:       make(map[string]string),
+		refused:        make(map[string][]string),
+		staleBootstrap: make(map[string]bool),
+		keyConflicts:   make(map[string]string),
+		reconcileCh:    make(chan struct{}, 1),
+		leave:          make(chan struct{}, 1),
+		bootstrap:      make(map[string]bool),
+		signers:        cfg.Signers,
+		policy:         cfg.Policy,
 	}
 
 	d := &delegate{mesh: m}
@@ -139,6 +151,11 @@ func New(cfg Config) (*Mesh, error) {
 		return nil, fmt.Errorf("transport: %w", err)
 	}
 	mc.Transport = &wgTransport{nt}
+
+	// seed before memberlist.Create so delivered events can't race the kernel baseline
+	if err := m.seedPeersFromKernel(); err != nil {
+		slog.Warn("seed peers from kernel; departed peers may persist this run", "err", err)
+	}
 
 	ml, err := memberlist.Create(mc)
 	if err != nil {
@@ -237,6 +254,8 @@ func (m *Mesh) setMember(n *memberlist.Node) {
 	}
 	signers := m.signers
 	gen := m.signersGen
+	policy := m.policy
+	pgen := m.policyGen
 	require := m.cfg.RequireSignature
 	prefix := m.cfg.Prefix
 	m.mu.RUnlock()
@@ -247,25 +266,28 @@ func (m *Mesh) setMember(n *memberlist.Node) {
 		return
 	}
 	meta := bytes.Clone(n.Meta)
-	addr, reject, notAfter := assess(p, n.Name, signers, require, prefix, time.Now())
+	addr, reject, notAfter, kept, refused := assess(p, n.Name, signers, require, prefix, policy, time.Now())
 
 	m.mu.Lock()
-	if m.signersGen != gen {
-		addr, reject, notAfter = assess(p, n.Name, m.signers, require, prefix, time.Now())
+	if m.signersGen != gen || m.policyGen != pgen {
+		addr, reject, notAfter, kept, refused = assess(p, n.Name, m.signers, require, prefix, m.policy, time.Now())
 	}
-	m.members[n.Name] = member{meta: meta, peer: p, addr: addr, reject: reject, notAfter: notAfter}
+	m.members[n.Name] = member{meta: meta, peer: p, addr: addr, reject: reject, notAfter: notAfter, kept: kept, refused: refused}
 	delete(m.bootstrap, n.Name)
 	m.mu.Unlock()
 	m.triggerReconcile()
 }
 
-func assess(p Peer, name string, signers []ed25519.PublicKey, requireSig bool, prefix netip.Prefix, now time.Time) (netip.Addr, string, int64) {
-	addr, reject := evaluate(p, name, signers, requireSig, prefix, now)
-	var notAfter int64
-	if reject == "" && len(signers) > 0 {
+func assess(p Peer, name string, signers []ed25519.PublicKey, requireSig bool, prefix netip.Prefix, policy *PeerPolicy, now time.Time) (addr netip.Addr, reject string, notAfter int64, kept, refused []string) {
+	addr, reject = evaluate(p, name, signers, requireSig, prefix, now)
+	if reject != "" {
+		return addr, reject, 0, nil, nil
+	}
+	if len(signers) > 0 {
 		notAfter = signatureNotAfter(p.Signature)
 	}
-	return addr, reject, notAfter
+	kept, refused = policyFilter(p, addr, policy)
+	return addr, reject, notAfter, kept, refused
 }
 
 func evaluate(p Peer, name string, signers []ed25519.PublicKey, requireSig bool, prefix netip.Prefix, now time.Time) (netip.Addr, string) {
@@ -316,7 +338,8 @@ func signatureReject(p Peer, name string, signers []ed25519.PublicKey, requireSi
 func (m *Mesh) reevaluate(now time.Time) {
 	m.mu.RLock()
 	signers := m.signers
-	if len(signers) == 0 {
+	policy := m.policy
+	if len(signers) == 0 && policy == nil {
 		m.mu.RUnlock()
 		return
 	}
@@ -329,10 +352,12 @@ func (m *Mesh) reevaluate(now time.Time) {
 		addr     netip.Addr
 		reject   string
 		notAfter int64
+		kept     []string
+		refused  []string
 	}
 	snaps := make([]snapshot, 0, len(m.members))
 	for name, e := range m.members {
-		snaps = append(snaps, snapshot{name, e.meta, e.peer, e.addr, e.reject, e.notAfter})
+		snaps = append(snaps, snapshot{name, e.meta, e.peer, e.addr, e.reject, e.notAfter, e.kept, e.refused})
 	}
 	m.mu.RUnlock()
 
@@ -342,12 +367,15 @@ func (m *Mesh) reevaluate(now time.Time) {
 		addr     netip.Addr
 		reject   string
 		notAfter int64
+		kept     []string
+		refused  []string
 	}
 	var changes []change
 	for _, s := range snaps {
-		addr, reject, notAfter := assess(s.peer, s.name, signers, require, prefix, now)
-		if reject != s.reject || addr != s.addr || notAfter != s.notAfter {
-			changes = append(changes, change{s.name, s.meta, addr, reject, notAfter})
+		addr, reject, notAfter, kept, refused := assess(s.peer, s.name, signers, require, prefix, policy, now)
+		if reject != s.reject || addr != s.addr || notAfter != s.notAfter ||
+			!slices.Equal(kept, s.kept) || !slices.Equal(refused, s.refused) {
+			changes = append(changes, change{s.name, s.meta, addr, reject, notAfter, kept, refused})
 		}
 	}
 	if len(changes) == 0 {
@@ -363,6 +391,8 @@ func (m *Mesh) reevaluate(now time.Time) {
 		e.addr = c.addr
 		e.reject = c.reject
 		e.notAfter = c.notAfter
+		e.kept = c.kept
+		e.refused = c.refused
 		m.members[c.name] = e
 	}
 	m.mu.Unlock()
@@ -372,6 +402,7 @@ func (m *Mesh) reevaluate(now time.Time) {
 func (m *Mesh) sweepExpiry(now time.Time) {
 	ts := now.Unix()
 	m.mu.Lock()
+	signers := m.signers
 	changed := false
 	for name, e := range m.members {
 		if e.reject != "" || e.notAfter == 0 {
@@ -384,6 +415,15 @@ func (m *Mesh) sweepExpiry(now time.Time) {
 		}
 	}
 	m.mu.Unlock()
+
+	// self is never in m.members; on expiry we stop serving our own DNS (we cannot
+	// withdraw from gossip, and signature-verifying peers drop us via their own sweep).
+	if selfReject(m.cfg.Self, signers, now) != "" {
+		if m.selfExpired.CompareAndSwap(false, true) {
+			slog.Warn("this node's own operator signature has expired; halting self DNS until re-signed and restarted (signature-verifying peers will also drop this node)")
+		}
+	}
+
 	if changed {
 		m.triggerReconcile()
 	}
@@ -421,6 +461,16 @@ func (m *Mesh) handleNodeConflict(existing, other *memberlist.Node) {
 		m.recordKeyConflict(existing.Name, fmt.Sprintf("this node's key is also advertised from %s:%d", other.Addr, other.Port))
 		return
 	}
+	// memberlist also fires NotifyConflict on restart/roam within DeadNodeReclaimTime;
+	// only alarm when our own table still has the peer alive (Node.State is always Alive).
+	m.mu.RLock()
+	e, known := m.members[existing.Name]
+	m.mu.RUnlock()
+	if !known || e.failed {
+		slog.Info("peer re-announced from a new address; treating as restart or roam, not a duplicate key",
+			"pubkey", existing.Name, "old_addr", existing.Addr.String(), "new_addr", other.Addr.String())
+		return
+	}
 	slog.Warn("two peers advertise the same WireGuard key; keeping the first-seen endpoint until the duplicate key is regenerated",
 		"pubkey", existing.Name,
 		"kept_addr", existing.Addr.String(), "kept_port", existing.Port,
@@ -441,8 +491,13 @@ func (m *Mesh) triggerReconcile() {
 	}
 }
 
-func resolveConflicts(peers map[string]Peer) (map[string]Peer, map[string][]string) {
+// resolveConflicts drops any route claimed by more than one party. selfRoutes are
+// seeded as claims so a peer claiming the local node's address loses it, not us.
+func resolveConflicts(peers map[string]Peer, selfRoutes []string) (map[string]Peer, map[string][]string) {
 	claims := make(map[string][]string)
+	for _, ip := range selfRoutes {
+		claims[ip] = append(claims[ip], "(self)")
+	}
 	for name, p := range peers {
 		for _, ip := range p.AllowedIPs {
 			claims[ip] = append(claims[ip], name)
@@ -503,10 +558,35 @@ func (m *Mesh) setRefused(refused map[string][]string) {
 	defer m.mu.Unlock()
 	for pubkey, routes := range refused {
 		if _, seen := m.refused[pubkey]; !seen {
-			slog.Warn("ignoring peer routes outside --accept-routes", "pubkey", pubkey, "routes", routes)
+			slog.Warn("peer routes refused by --peer-policy; not installed", "pubkey", pubkey, "routes", routes)
 		}
 	}
 	m.refused = refused
+}
+
+func (m *Mesh) markJoined() {
+	m.joinedAt.CompareAndSwap(0, time.Now().UnixNano())
+}
+
+// setStaleBootstrap surfaces (never removes) seed peers that never gossiped after
+// we joined; the seed list is operator-owned, like consul's retry_join.
+func (m *Mesh) setStaleBootstrap() {
+	settled := false
+	if t := m.joinedAt.Load(); t != 0 {
+		settled = time.Since(time.Unix(0, t)) > bootstrapSettle
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	stale := make(map[string]bool, len(m.bootstrap))
+	if settled {
+		for name := range m.bootstrap {
+			stale[name] = true
+			if !m.staleBootstrap[name] {
+				slog.Warn("bootstrap peer has not gossiped since this node joined; it may be offline or decommissioned (remove it from the WireGuard config if intentional)", "pubkey", name)
+			}
+		}
+	}
+	m.staleBootstrap = stale
 }
 
 func hasHostRoute(ips []net.IPNet) bool {
@@ -585,11 +665,9 @@ func (m *Mesh) reconcile() error {
 			continue
 		}
 		p := e.peer
-		if len(m.cfg.AcceptRoutes) > 0 {
-			if kept, dropped := clampAcceptedRoutes(p.AllowedIPs, e.addr, m.cfg.AcceptRoutes); len(dropped) > 0 {
-				p.AllowedIPs = kept
-				refused[name] = dropped
-			}
+		p.AllowedIPs = e.kept // policy-accepted set (identity + accepted routes), computed in assess
+		if len(e.refused) > 0 {
+			refused[name] = e.refused
 		}
 		cur[name] = p
 	}
@@ -599,14 +677,16 @@ func (m *Mesh) reconcile() error {
 	}
 	m.mu.RUnlock()
 
-	effective, conflicts := resolveConflicts(cur)
+	// fold seed peers in before conflict resolution so their routes contend too
 	for name := range bootstrap {
-		if _, ok := effective[name]; !ok {
+		if _, ok := cur[name]; !ok {
 			if p, ok := m.peers[name]; ok {
-				effective[name] = p
+				cur[name] = p
 			}
 		}
 	}
+
+	effective, conflicts := resolveConflicts(cur, m.cfg.Self.AllowedIPs)
 
 	changes := diff(m.peers, effective, inKernel)
 	if len(changes) > 0 {
@@ -618,13 +698,28 @@ func (m *Mesh) reconcile() error {
 	m.setRejected(rejected)
 	m.setRefused(refused)
 	m.setConflicts(conflicts)
+	m.setStaleBootstrap()
 	return nil
 }
 
 func (m *Mesh) Run(ctx context.Context) error {
+	leaving := false
 	defer func() {
 		if err := m.shutdownMemberlist(); err != nil {
 			slog.Warn("memberlist shutdown", "err", err)
+		}
+		// On a graceful leave (not a restartable SIGTERM) undo the overlay address+route
+		// we assigned under --prefix (the interface is not ours). After runCtx cancel, so
+		// the route monitor will not re-assert it; like tailscale removing what it added.
+		if leaving && m.cfg.Prefix.IsValid() {
+			if err := m.cfg.WG.DelRoute(m.cfg.Iface, m.cfg.Prefix); err != nil {
+				slog.Warn("remove overlay route on leave", "err", err)
+			}
+			if addr, err := netip.ParseAddr(m.cfg.BindAddr); err == nil {
+				if err := m.cfg.WG.DelAddr(m.cfg.Iface, addr); err != nil {
+					slog.Warn("remove overlay address on leave", "err", err)
+				}
+			}
 		}
 	}()
 
@@ -634,10 +729,6 @@ func (m *Mesh) Run(ctx context.Context) error {
 		cancel()
 		resolverWG.Wait()
 	}()
-
-	if err := m.seedPeersFromKernel(); err != nil {
-		slog.Warn("seed peers from kernel; departed peers may persist this run", "err", err)
-	}
 
 	go m.serveStatus(runCtx)
 	go m.serveRouteMonitor(runCtx)
@@ -651,6 +742,7 @@ func (m *Mesh) Run(ctx context.Context) error {
 	}
 	if n > 0 {
 		slog.Info("joined", "reached", n)
+		m.markJoined()
 	}
 	go m.retryJoin(runCtx)
 	go m.reconnect(runCtx)
@@ -673,6 +765,7 @@ func (m *Mesh) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-m.leave:
+			leaving = true
 			return nil
 		case <-m.reconcileCh:
 			retry = retryAfter(m.reconcile())
@@ -706,6 +799,19 @@ func (m *Mesh) ReloadSignersFromFile(path string) (int, error) {
 	m.mu.Unlock()
 	m.reevaluate(time.Now())
 	return len(keys), nil
+}
+
+func (m *Mesh) ReloadPolicyFromFile(path string) error {
+	policy, err := LoadPeerPolicy(path)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.policy = policy
+	m.policyGen++
+	m.mu.Unlock()
+	m.reevaluate(time.Now())
+	return nil
 }
 
 func (m *Mesh) ReloadKeyring(target *memberlist.Keyring) error {
@@ -758,6 +864,7 @@ func (m *Mesh) retryJoin(ctx context.Context) {
 			backoff = nextJoinBackoff(backoff)
 		case n > 0:
 			slog.Info("joined", "reached", n)
+			m.markJoined()
 			backoff = retryJoinInterval
 		default:
 			slog.Info("no bootstrap peers")
@@ -767,6 +874,13 @@ func (m *Mesh) retryJoin(ctx context.Context) {
 }
 
 func (m *Mesh) reap(ctx context.Context) {
+	// One-time random phase offset so nodes with an identical signed notAfter don't all
+	// sweep+reconcile in the same slice. Expiry stays exact; mirrors memberlist randStagger.
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(time.Duration(rand.Int64N(int64(reapInterval)))):
+	}
 	ticker := time.NewTicker(reapInterval)
 	defer ticker.Stop()
 	for {

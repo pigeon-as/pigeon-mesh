@@ -194,6 +194,11 @@ func wgPeers(n *node) string {
 	return string(out)
 }
 
+func wgAllowedIPs(n *node) string {
+	out, _ := exec.Command("ip", "netns", "exec", n.ns, "wg", "show", "wg0", "allowed-ips").CombinedOutput()
+	return string(out)
+}
+
 func waitPing(t *testing.T, src *node, dst string) {
 	t.Helper()
 	waitFor(t, fmt.Sprintf("ping %s → %s", src.ns, dst), 30*time.Second, func() bool {

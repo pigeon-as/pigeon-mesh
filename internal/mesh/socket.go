@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -85,7 +86,6 @@ func (m *Mesh) handleStatus(conn net.Conn) {
 }
 
 func (m *Mesh) status() Status {
-	nodes := m.memberlist.Members()
 	kpeers := map[string]wgtypes.Peer{}
 	if ps, err := m.cfg.WG.Peers(m.cfg.Iface); err != nil {
 		slog.Debug("status wg peers", "err", err)
@@ -95,22 +95,8 @@ func (m *Mesh) status() Status {
 		}
 	}
 	now := time.Now()
-	peers := make(map[string]PeerView, len(nodes))
-	m.mu.RLock()
-	for _, n := range nodes {
-		var p Peer
-		if n.Name == m.cfg.Self.PublicKey {
-			p = m.cfg.Self
-		} else if e, ok := m.members[n.Name]; ok {
-			p = e.peer
-		}
-		pv := PeerView{
-			Endpoint:   p.Endpoint,
-			AllowedIPs: p.AllowedIPs,
-			Tags:       p.Tags,
-			Status:     peerStatus(n),
-		}
-		if kp, ok := kpeers[n.Name]; ok {
+	fillWG := func(pv *PeerView, name string) {
+		if kp, ok := kpeers[name]; ok {
 			if kp.Endpoint != nil {
 				pv.WGEndpoint = kp.Endpoint.String()
 			}
@@ -118,28 +104,53 @@ func (m *Mesh) status() Status {
 			pv.TxBytes = kp.TransmitBytes
 			pv.HandshakeAge, pv.WGAlive = wgAlive(kp.LastHandshakeTime, now)
 		}
-		peers[n.Name] = pv
+	}
+
+	m.mu.RLock()
+	// Report from our own member map (serf does the same); memberlist.Members() always
+	// shows "alive" and drops failed-but-not-yet-reaped peers.
+	peers := make(map[string]PeerView, len(m.members)+1)
+	for name, e := range m.members {
+		pv := PeerView{
+			Endpoint:   e.peer.Endpoint,
+			AllowedIPs: e.peer.AllowedIPs,
+			Tags:       e.peer.Tags,
+			Status:     memberStatus(e.reject, e.failed),
+		}
+		fillWG(&pv, name)
+		peers[name] = pv
 	}
 	conflicts := maps.Clone(m.conflicts)
 	rejected := maps.Clone(m.rejected)
 	refused := maps.Clone(m.refused)
 	keyConflicts := maps.Clone(m.keyConflicts)
+	staleBootstrap := slices.Sorted(maps.Keys(m.staleBootstrap))
 	signers := m.signers
 	m.mu.RUnlock()
+	// self is never in m.members, so report it from cfg.Self (serf lists itself too).
+	selfPV := PeerView{
+		Endpoint:   m.cfg.Self.Endpoint,
+		AllowedIPs: m.cfg.Self.AllowedIPs,
+		Tags:       m.cfg.Self.Tags,
+		Status:     "alive",
+	}
 	if r := selfReject(m.cfg.Self, signers, now); r != "" {
+		selfPV.Status = "rejected"
 		if rejected == nil {
 			rejected = map[string]string{}
 		}
 		rejected[m.cfg.Self.PublicKey] = r
 	}
+	peers[m.cfg.Self.PublicKey] = selfPV
 	return Status{
-		Self:          m.cfg.Self.PublicKey,
-		UpdatedAt:     nowStamp(),
-		Health:        m.memberlist.GetHealthScore(),
-		Peers:         peers,
-		Conflicts:     conflicts,
-		Rejected:      rejected,
-		RefusedRoutes: refused,
-		KeyConflicts:  keyConflicts,
+		Self:           m.cfg.Self.PublicKey,
+		UpdatedAt:      nowStamp(),
+		Health:         m.memberlist.GetHealthScore(),
+		Peers:          peers,
+		Conflicts:      conflicts,
+		Rejected:       rejected,
+		RefusedRoutes:  refused,
+		StaleBootstrap: staleBootstrap,
+		KeyConflicts:   keyConflicts,
 	}
 }

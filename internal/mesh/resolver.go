@@ -24,6 +24,9 @@ const (
 	dbusBroker       = "org.freedesktop.DBus"
 	dbusBrokerPath   = dbus.ObjectPath("/org/freedesktop/DBus")
 	nameOwnerChanged = "NameOwnerChanged"
+
+	// resolvedCallTimeout bounds every resolved D-Bus call (tailscale 1s, netbird 5s).
+	resolvedCallTimeout = 2 * time.Second
 )
 
 type resolvedLinkDNS struct {
@@ -126,9 +129,11 @@ func (m *Mesh) watchResolvedOnce(ctx context.Context, zone string, match []dbus.
 	}()
 
 	var owned bool
-	if call := conn.BusObject().Call(dbusBroker+".NameHasOwner", 0, resolvedDest); call.Err == nil {
+	nameCtx, nameCancel := context.WithTimeout(ctx, resolvedCallTimeout)
+	if call := conn.BusObject().CallWithContext(nameCtx, dbusBroker+".NameHasOwner", 0, resolvedDest); call.Err == nil {
 		_ = call.Store(&owned)
 	}
+	nameCancel()
 	if owned {
 		m.reprogramResolved(ctx, zone)
 	}
@@ -192,7 +197,7 @@ func (m *Mesh) dnsTable() map[string]netip.Addr {
 		}
 		table[label] = addr
 	}
-	if self, err := netip.ParseAddr(m.cfg.BindAddr); err == nil {
+	if self, err := netip.ParseAddr(m.cfg.BindAddr); err == nil && !m.selfExpired.Load() {
 		add(self, m.cfg.Self.Tags)
 	}
 	for _, n := range nodes {
@@ -229,6 +234,9 @@ func (m *Mesh) programResolved(zone string) error {
 	mgr := conn.Object(resolvedDest, resolvedPath)
 	idx := int32(ifi.Index)
 
+	ctx, cancel := context.WithTimeout(context.Background(), resolvedCallTimeout)
+	defer cancel()
+
 	var servers []resolvedLinkDNS
 	if a := addr.Unmap(); a.Is4() {
 		ip := a.As4()
@@ -237,15 +245,36 @@ func (m *Mesh) programResolved(zone string) error {
 		ip := a.As16()
 		servers = []resolvedLinkDNS{{Family: syscall.AF_INET6, Address: ip[:]}}
 	}
-	if err := mgr.Call(resolvedManagerIface+".SetLinkDNS", 0, idx, servers).Store(); err != nil {
+	if err := mgr.CallWithContext(ctx, resolvedManagerIface+".SetLinkDNS", 0, idx, servers).Store(); err != nil {
 		return fmt.Errorf("SetLinkDNS: %w", err)
 	}
 	domains := []resolvedLinkDomain{{Domain: zone + ".", RoutingOnly: true}}
-	if err := mgr.Call(resolvedManagerIface+".SetLinkDomains", 0, idx, domains).Store(); err != nil {
+	if err := mgr.CallWithContext(ctx, resolvedManagerIface+".SetLinkDomains", 0, idx, domains).Store(); err != nil {
 		return fmt.Errorf("SetLinkDomains: %w", err)
 	}
-	if err := mgr.Call(resolvedManagerIface+".SetLinkDefaultRoute", 0, idx, false).Store(); err != nil {
-		return fmt.Errorf("SetLinkDefaultRoute: %w", err)
+	if call := mgr.CallWithContext(ctx, resolvedManagerIface+".SetLinkDefaultRoute", 0, idx, false); call.Err != nil {
+		// SetLinkDefaultRoute is absent on old systemd-resolved (e.g. v237); tolerate it.
+		if dbusErr, ok := call.Err.(dbus.Error); ok && dbusErr.Name == dbus.ErrMsgUnknownMethod.Name {
+			slog.Debug("resolved SetLinkDefaultRoute unsupported; continuing", "err", call.Err)
+		} else {
+			return fmt.Errorf("SetLinkDefaultRoute: %w", call.Err)
+		}
+	}
+
+	// Best-effort: DNSSEC off so resolved doesn't SERVFAIL our unsigned zone; LLMNR/mDNS/DoT
+	// off + flush mirror tailscale net/dns/resolved.go (older resolved may lack these).
+	for _, h := range []struct{ method, value string }{
+		{"SetLinkLLMNR", "no"},
+		{"SetLinkMulticastDNS", "no"},
+		{"SetLinkDNSSEC", "no"},
+		{"SetLinkDNSOverTLS", "no"},
+	} {
+		if call := mgr.CallWithContext(ctx, resolvedManagerIface+"."+h.method, 0, idx, h.value); call.Err != nil {
+			slog.Debug("resolved hardening call failed; continuing", "method", h.method, "err", call.Err)
+		}
+	}
+	if call := mgr.CallWithContext(ctx, resolvedManagerIface+".FlushCaches", 0); call.Err != nil {
+		slog.Debug("resolved flush caches failed; continuing", "err", call.Err)
 	}
 	return nil
 }
@@ -261,8 +290,11 @@ func (m *Mesh) revertResolved() {
 		slog.Debug("revert resolved", "err", err)
 		return
 	}
+	// Fresh bounded context: the run ctx is already cancelled and this must not wedge teardown.
+	ctx, cancel := context.WithTimeout(context.Background(), resolvedCallTimeout)
+	defer cancel()
 	mgr := conn.Object(resolvedDest, resolvedPath)
-	if err := mgr.Call(resolvedManagerIface+".RevertLink", 0, int32(ifi.Index)).Store(); err != nil {
+	if err := mgr.CallWithContext(ctx, resolvedManagerIface+".RevertLink", 0, int32(ifi.Index)).Store(); err != nil {
 		slog.Debug("revert resolved", "err", err)
 	}
 }

@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hashicorp/memberlist"
 	"github.com/shoenig/test/must"
 )
 
@@ -31,16 +30,11 @@ func TestWGAlive(t *testing.T) {
 	must.EqOp(t, int64(0), *age, must.Sprint("future age clamps to 0"))
 }
 
-func TestPeerStatus(t *testing.T) {
-	cases := map[memberlist.NodeStateType]string{
-		memberlist.StateAlive:   "alive",
-		memberlist.StateSuspect: "suspect",
-		memberlist.StateDead:    "dead",
-		memberlist.StateLeft:    "left",
-	}
-	for state, want := range cases {
-		must.EqOp(t, want, peerStatus(&memberlist.Node{State: state}))
-	}
+func TestMemberStatus(t *testing.T) {
+	must.EqOp(t, "alive", memberStatus("", false))
+	must.EqOp(t, "failed", memberStatus("", true), must.Sprint("a peer in the reconnect window reports failed, not alive"))
+	must.EqOp(t, "rejected", memberStatus("signature expired", false))
+	must.EqOp(t, "rejected", memberStatus("signature expired", true), must.Sprint("rejection takes precedence over failed"))
 }
 
 func TestStatusJSON(t *testing.T) {

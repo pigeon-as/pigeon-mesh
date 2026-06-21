@@ -42,8 +42,8 @@ func main() {
 	iface := flag.String("interface", "", "existing WireGuard interface (required); bootstrap peers need a /128 or /32 first in AllowedIPs")
 	endpoint := flag.String("endpoint", "", "this node's Endpoint as host:port; hostnames resolved at startup; go-sockaddr templates evaluated (required)")
 	address := flag.String("address", "", "this node's overlay IP; go-sockaddr templates evaluated; auto-detected from --interface if unset")
-	advertiseRoutes := flag.String("advertise-routes", "", "extra routes this node advertises to peers beyond its own /128, comma-separated")
-	acceptRoutes := flag.String("accept-routes", "", "comma-separated CIDRs this node will install from peers' advertisements; a peer's own address always installs; empty accepts every advertised route (default)")
+	allowedIPs := flag.String("allowed-ips", "", "additional AllowedIPs this node advertises to peers beyond its auto overlay /128, comma-separated")
+	peerPolicy := flag.String("peer-policy", "", "expr predicate accept(peer, allowedip) bool, evaluated per advertised CIDR; false drops only that route (identity /128 always installs; empty accepts all). In scope: peer (.key/.endpoint/.allowedips), allowedip, cidrSubset(outer,inner). Inline or @file (SIGHUP-reloadable)")
 	gossipPort := flag.Int("gossip-port", 7946, "port to listen on for gossip (TCP and UDP)")
 	gossipKeyFile := flag.String("gossip-key-file", "", "JSON file of base64-encoded gossip encryption keys")
 	persistentKeepalive := flag.Int("persistent-keepalive", 0, "PersistentKeepalive interval in seconds advertised to peers (0 disables)")
@@ -154,10 +154,10 @@ func main() {
 
 	host := mesh.HostRoute(ip)
 	allowed := []string{host.String()}
-	if *advertiseRoutes != "" {
-		extras, err := mesh.ParseAllowedIPs(*advertiseRoutes)
+	if *allowedIPs != "" {
+		extras, err := mesh.ParseAllowedIPs(*allowedIPs)
 		if err != nil {
-			slog.Error("advertise-routes", "err", err)
+			slog.Error("allowed-ips", "err", err)
 			os.Exit(1)
 		}
 		for _, e := range extras {
@@ -220,10 +220,10 @@ func main() {
 		ReconnectTimeout: *reconnectTimeout,
 		WG:               wgc,
 	}
-	if *acceptRoutes != "" {
-		cfg.AcceptRoutes, err = mesh.ParseAcceptRoutes(*acceptRoutes)
+	if *peerPolicy != "" {
+		cfg.Policy, err = mesh.ParsePeerPolicyFlag(*peerPolicy)
 		if err != nil {
-			slog.Error("accept-routes", "err", err)
+			slog.Error("peer-policy", "err", err)
 			os.Exit(2)
 		}
 	}
@@ -261,8 +261,12 @@ func main() {
 	if path, ok := strings.CutPrefix(*signers, "@"); ok {
 		signersFile = path
 	}
-	if *gossipKeyFile != "" || signersFile != "" {
-		go reloadOnSIGHUP(ctx, m, *gossipKeyFile, signersFile)
+	policyFile := ""
+	if path, ok := strings.CutPrefix(*peerPolicy, "@"); ok {
+		policyFile = path
+	}
+	if *gossipKeyFile != "" || signersFile != "" || policyFile != "" {
+		go reloadOnSIGHUP(ctx, m, *gossipKeyFile, signersFile, policyFile)
 	}
 
 	slog.Info("pigeon-mesh up", "interface", *iface, "endpoint", ep, "address", ip.String())
@@ -273,7 +277,7 @@ func main() {
 	slog.Info("pigeon-mesh stopped")
 }
 
-func reloadOnSIGHUP(ctx context.Context, m *mesh.Mesh, keyringPath, signersPath string) {
+func reloadOnSIGHUP(ctx context.Context, m *mesh.Mesh, keyringPath, signersPath, policyPath string) {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGHUP)
 	defer signal.Stop(sig)
@@ -294,6 +298,13 @@ func reloadOnSIGHUP(ctx context.Context, m *mesh.Mesh, keyringPath, signersPath 
 					slog.Error("signers reload", "err", err)
 				} else {
 					slog.Info("signers reloaded", "keys", n)
+				}
+			}
+			if policyPath != "" {
+				if err := m.ReloadPolicyFromFile(policyPath); err != nil {
+					slog.Error("peer-policy reload", "err", err)
+				} else {
+					slog.Info("peer-policy reloaded")
 				}
 			}
 		}

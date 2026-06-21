@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"maps"
 	"net"
 	"net/netip"
 	"slices"
@@ -92,10 +91,11 @@ func (p Peer) toWG() (wgtypes.PeerConfig, error) {
 	return cfg, nil
 }
 
+// equal compares only the fields that reach the kernel; Tags are excluded so a
+// tag-only change does not force a redundant WG.Apply (they drive DNS/status only).
 func (p Peer) equal(o Peer) bool {
 	return p.PublicKey == o.PublicKey &&
 		p.Endpoint == o.Endpoint &&
 		p.PersistentKeepalive == o.PersistentKeepalive &&
-		slices.Equal(p.AllowedIPs, o.AllowedIPs) &&
-		maps.Equal(p.Tags, o.Tags)
+		slices.Equal(p.AllowedIPs, o.AllowedIPs)
 }

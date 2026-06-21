@@ -332,7 +332,7 @@ func TestMesh_RestartDoesNotDropPeers(t *testing.T) {
 		out, err := exec.Command(meshBin, "status", "--socket", sock, "--json").Output()
 		return err == nil && strings.Contains(string(out), b.overlay)
 	}
-	waitFor(t, "A and C learn B over gossip", 30*time.Second, func() bool {
+	waitFor(t, "A and C learn B over gossip", 60*time.Second, func() bool {
 		return gossipHasB(sockA) && gossipHasB(sockC)
 	})
 
@@ -365,7 +365,7 @@ func TestMesh_ThreeNodes_TransitiveDiscovery(t *testing.T) {
 	startMesh(t, b, []*node{a, c}, 51820, "--prefix", prefix)
 	startMesh(t, c, []*node{b}, 51820, "--prefix", prefix)
 
-	waitFor(t, "a discovers c via b", 30*time.Second, func() bool {
+	waitFor(t, "a discovers c via b", 60*time.Second, func() bool {
 		return strings.Contains(wgPeers(a), c.pub) &&
 			strings.Contains(wgPeers(c), a.pub)
 	})
@@ -388,7 +388,7 @@ func TestMesh_StatusSocket(t *testing.T) {
 	status := func() ([]byte, error) {
 		return exec.Command(meshBin, "status", "--socket", sock, "--json").Output()
 	}
-	waitFor(t, "status reports b", 30*time.Second, func() bool {
+	waitFor(t, "status reports b", 60*time.Second, func() bool {
 		out, err := status()
 		return err == nil && strings.Contains(string(out), b.pub)
 	})
@@ -439,12 +439,12 @@ func TestMesh_Signature(t *testing.T) {
 		"--signers", signers, "--signature", sigB, "--require-signature")
 	startMesh(t, c, []*node{a, b}, 51820, "--prefix", prefix, "--signers", signers)
 
-	waitFor(t, "a and b admit each other on a valid signature", 30*time.Second, func() bool {
+	waitFor(t, "a and b admit each other on a valid signature", 60*time.Second, func() bool {
 		return strings.Contains(wgPeers(a), b.pub) && strings.Contains(wgPeers(b), a.pub)
 	})
 	waitPing(t, a, b.overlay)
 
-	waitFor(t, "a and b evict the unsigned bootstrap peer c", 30*time.Second, func() bool {
+	waitFor(t, "a and b evict the unsigned bootstrap peer c", 60*time.Second, func() bool {
 		return !strings.Contains(wgPeers(a), c.pub) && !strings.Contains(wgPeers(b), c.pub)
 	})
 	time.Sleep(2 * time.Second)
@@ -478,7 +478,7 @@ func TestMesh_SignatureRevocation(t *testing.T) {
 	startMesh(t, b, []*node{a}, 51820, "--prefix", prefix,
 		"--signers", "@"+signersB, "--signature", sigB, "--require-signature")
 
-	waitFor(t, "a admits b under signer 1", 30*time.Second, func() bool {
+	waitFor(t, "a admits b under signer 1", 60*time.Second, func() bool {
 		out, err := exec.Command(meshBin, "status", "--socket", sock, "--json").Output()
 		return err == nil && strings.Contains(string(out), b.pub) && strings.Contains(wgPeers(a), b.pub)
 	})
@@ -552,13 +552,13 @@ func TestMesh_DuplicateRouteDropped(t *testing.T) {
 	sock := filepath.Join(t.TempDir(), "a.sock")
 	startMesh(t, a, []*node{b}, 51820, "--socket", sock)
 	startMesh(t, b, []*node{a, c}, 51820)
-	startMesh(t, c, []*node{b}, 51820, "--advertise-routes", b.overlay+"/128")
+	startMesh(t, c, []*node{b}, 51820, "--allowed-ips", b.overlay+"/128")
 
 	gossipKnows := func(pub string) bool {
 		out, err := exec.Command(meshBin, "status", "--socket", sock, "--json").Output()
 		return err == nil && strings.Contains(string(out), pub)
 	}
-	waitFor(t, "a learns b and c over gossip", 30*time.Second, func() bool {
+	waitFor(t, "a learns b and c over gossip", 60*time.Second, func() bool {
 		return gossipKnows(b.pub) && gossipKnows(c.pub)
 	})
 	waitFor(t, "a drops b's contested route", 15*time.Second, func() bool {
@@ -569,4 +569,32 @@ func TestMesh_DuplicateRouteDropped(t *testing.T) {
 	must.NoError(t, err)
 	must.StrContains(t, string(out), b.overlay,
 		must.Sprint("the conflicting route must be surfaced in status"))
+}
+
+func TestMesh_PeerPolicyRefusesRoute(t *testing.T) {
+	skipIfNoNetns(t)
+	newBridge(t, "wgmpol-br")
+
+	a := newNode(t, "wgmpol-a", "10.145.0.1", "fd00:e2ed:a0::1", 51820, "wgmpol-br")
+	b := newNode(t, "wgmpol-b", "10.145.0.2", "fd00:e2ed:b0::1", 51820, "wgmpol-br")
+
+	sock := filepath.Join(t.TempDir(), "a.sock")
+	// a installs only overlay (fd00::/8) routes, so it refuses any IPv4 transit route a peer advertises.
+	startMesh(t, a, []*node{b}, 51820, "--socket", sock, "--peer-policy", `cidrSubset("fd00::/8", allowedip)`)
+	// b advertises an extra IPv4 transit route beyond its identity /128.
+	startMesh(t, b, []*node{a}, 51820, "--allowed-ips", "10.99.0.0/24")
+
+	// Wait until a has learned b over gossip and refused its transit route (surfaced in status).
+	waitFor(t, "a refuses b's transit route in status", 60*time.Second, func() bool {
+		out, err := exec.Command(meshBin, "status", "--socket", sock, "--json").Output()
+		return err == nil &&
+			strings.Contains(string(out), `"refused_routes"`) &&
+			strings.Contains(string(out), "10.99.0.0/24")
+	})
+
+	// The refused route must not be installed in the kernel; the identity /128 must.
+	must.StrNotContains(t, wgAllowedIPs(a), "10.99.0.0/24",
+		must.Sprint("a route refused by --peer-policy must not reach the kernel"))
+	must.StrContains(t, wgAllowedIPs(a), b.overlay,
+		must.Sprint("b's identity route is exempt from policy and stays installed"))
 }

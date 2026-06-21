@@ -112,7 +112,10 @@ A peer is admitted only if it presents a signature from a pinned signer, bound t
 its own WireGuard key, and unexpired. It is verified against the pinned key, never
 the key named in the signature. Signatures are re-checked continuously, so expiry
 and signer rotation drop already-admitted peers too; `SIGHUP` reloads the pinned
-keys. A node also checks its own signature at startup and won't run on a bad one.
+keys. A node also checks its own signature at startup and won't run on a bad one; if a
+running node's own signature later expires it stops serving DNS and gossiping its
+metadata (restart with a fresh signature to resume), rather than relying only on
+peers to evict it.
 Without `--require-signature` a peer with no signature still falls back to
 `--prefix`/gossip-key admission while a bad signature is always rejected;
 `--require-signature` demands a valid signature from every peer (a hand-added
@@ -148,12 +151,16 @@ answers on the overlay address directly.
   one the daemon can't adjudicate, so it installs it for neither and shows it in
   `status`.
 - Inside a rung, members are trusted to advertise routes, so a member can offer an
-  exit route (`0.0.0.0/0`) or a subnet and peers honour it. `--accept-routes` is the
-  receive-side counterpart to `--advertise-routes`: set it to the CIDRs this node is
-  willing to install, and any advertised route outside that set is dropped locally
-  and shown in `status` (a member's own address always installs). It restricts only
-  this node and enforces nothing on the mesh; left unset, every advertised route is
-  accepted.
+  exit route (`0.0.0.0/0`) or a subnet via `--allowed-ips` and peers honour it.
+  `--peer-policy` is the receive-side control: an `expr` predicate
+  `accept(peer, allowedip)` evaluated per advertised CIDR, deciding whether this node
+  installs it. In scope are `peer` (`.key`/`.endpoint`/`.allowedips`), the candidate
+  `allowedip`, and `cidrSubset(outer, inner)`; e.g.
+  `peer.key == "<exit-key>" && allowedip in ["0.0.0.0/0", "::/0"]` lets only that peer
+  be an exit. A refused route is dropped locally and shown in `status`; a member's own
+  address always installs. It restricts only this node and enforces nothing on the
+  mesh; left unset, every advertised route is accepted. Inline or `@file`
+  (`SIGHUP`-reloadable).
 
 ## Operations
 

@@ -64,6 +64,18 @@ func (c *Client) SetAddr(iface string, ip netip.Addr) error {
 	return nil
 }
 
+func (c *Client) DelAddr(iface string, ip netip.Addr) error {
+	link, err := netlink.LinkByName(iface)
+	if err != nil {
+		return fmt.Errorf("link %q: %w", iface, err)
+	}
+	addr := &netlink.Addr{IPNet: &net.IPNet{IP: ip.AsSlice(), Mask: net.CIDRMask(ip.BitLen(), ip.BitLen())}}
+	if err := netlink.AddrDel(link, addr); err != nil {
+		return fmt.Errorf("del %s on %q: %w", ip, iface, err)
+	}
+	return nil
+}
+
 func (c *Client) SetRoute(iface string, prefix netip.Prefix) error {
 	link, err := netlink.LinkByName(iface)
 	if err != nil {
@@ -74,6 +86,20 @@ func (c *Client) SetRoute(iface string, prefix netip.Prefix) error {
 	route := &netlink.Route{LinkIndex: link.Attrs().Index, Dst: dst, Scope: netlink.SCOPE_LINK}
 	if err := netlink.RouteReplace(route); err != nil {
 		return fmt.Errorf("set route %s dev %q: %w", prefix, iface, err)
+	}
+	return nil
+}
+
+func (c *Client) DelRoute(iface string, prefix netip.Prefix) error {
+	link, err := netlink.LinkByName(iface)
+	if err != nil {
+		return fmt.Errorf("link %q: %w", iface, err)
+	}
+	p := prefix.Masked()
+	dst := &net.IPNet{IP: p.Addr().AsSlice(), Mask: net.CIDRMask(p.Bits(), p.Addr().BitLen())}
+	route := &netlink.Route{LinkIndex: link.Attrs().Index, Dst: dst, Scope: netlink.SCOPE_LINK}
+	if err := netlink.RouteDel(route); err != nil {
+		return fmt.Errorf("del route %s dev %q: %w", prefix, iface, err)
 	}
 	return nil
 }
