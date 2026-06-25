@@ -1,186 +1,124 @@
 # pigeon-mesh
 
-A peer-to-peer WireGuard full-mesh daemon. No central server. Nodes are
-identified by WireGuard public key; the kernel WG peer set follows the
-gossip cluster.
+A peer-to-peer WireGuard full-mesh daemon. No central server. Nodes are identified
+by WireGuard public key, and the kernel WG peer set follows the gossip cluster.
 
-> **Status:** early development; breaking changes between v0.0.1 - v0.0.x versions.
+> **Status:** early development, with breaking changes between v0.0.x versions.
 
 ## Run
 
+You need a WireGuard interface and an operator signing key (`pigeon-mesh keygen >
+signer.key`, once per mesh). Sign a node's key, then run it:
+
 ```sh
-pigeon-mesh \
-  --interface wg0 \
-  --endpoint 203.0.113.1:51820
+pigeon-mesh sign --key signer.key "$(wg show wg0 public-key)" > node.sig
+pigeon-mesh --interface wg0 --endpoint 203.0.113.1:51820 --signature node.sig
 ```
 
-`pigeon-mesh --help` lists the full flag set.
+The node derives its overlay address from its key (`--prefix`, default `fdcc::/48`)
+and trusts whoever signed its grant. It runs as systemd `Type=notify`. `pigeon-mesh
+--help` lists every flag.
 
-`--endpoint` and `--address` accept
-[go-sockaddr](https://github.com/hashicorp/go-sockaddr) templates for
-runtime resolution:
+`--endpoint` accepts [go-sockaddr](https://github.com/hashicorp/go-sockaddr)
+templates for runtime resolution:
 
 ```sh
 --endpoint '[{{ GetPublicInterfaces | include "type" "IPv6" | limit 1 | attr "address" }}]:51820'
 ```
 
-Runs as systemd `Type=notify`; honors `WatchdogSec=`.
-
-See [docs/quickstart.md](docs/quickstart.md) for a setup that derives
-each node's IPv6 overlay address from its WireGuard public key.
-
 ## Initial peers
 
-Add bootstrap peers to the kernel first ([wg-quick](https://man.archlinux.org/man/wg-quick.8),
-[systemd-networkd](https://www.freedesktop.org/software/systemd/man/systemd.netdev.html),
-or `wg set`). With `--prefix`, a peer needs only its endpoint — the daemon
-derives its overlay `/128` from its key and installs it:
+Add at least one peer to the kernel so gossip can start. The daemon
+discovers the rest and derives each peer's overlay `/128` from its key:
 
 ```sh
 wg set wg0 peer <base64-pubkey> endpoint 203.0.113.2:51820
 ```
 
-Without `--prefix`, put the peer's host address (`/32` or `/128`) first in its
-`AllowedIPs`; the daemon reads that host route as the peer's overlay address and
-dials it to seed gossip (this is WireGuard cryptokey routing, not a kernel
-route):
-
-```sh
-wg set wg0 peer <base64-pubkey> \
-  endpoint 203.0.113.2:51820 \
-  allowed-ips fd00::2/128
-```
-
-Existing kernel peers are used to bootstrap the gossip cluster.
-
 ## Self-certifying addresses
 
-`--prefix fdcc::/16` (optional, off by default) makes each node's overlay `/128`
-the leftmost host bits of `SHA-512(public key)` under the prefix (an RFC 4193
-ULA). pigeon-mesh derives this node's address, assigns it to the interface as a
-`/128`, and installs an on-link route for the prefix so every peer's `/128` is
-reachable over WireGuard (cryptokey routing selects the peer). It rejects any
-peer whose advertised route overlaps the prefix but isn't its own key-derived
-`/128`; mismatches show in `status` under `rejected`. Without `--prefix`, the
-daemon uses whatever address is already on the interface and installs no route —
-provide overlay reachability yourself (an `ip route` to the prefix, or
-networkd).
-
-## Encrypted gossip
-
-Pass `--gossip-key-file keys.json`:
-
-```json
-["base64-primary-key", "base64-old-key"]
-```
-
-Keys are 16/24/32 raw bytes (AES-128/192/256), base64-encoded. The first
-key signs outgoing; all are accepted on receive. `SIGHUP` reloads.
+Each node's overlay `/128` is `SHA-512(public key)` under `--prefix` (default
+`fdcc::/48`, an RFC 4193 ULA). The daemon assigns it and an on-link prefix route so
+every peer is reachable over WireGuard. A peer advertising an address that isn't its
+own key derivation is rejected (shown in `status`). Addresses are a pure function of
+the key, so no node can claim another's and no coordinator hands them out.
 
 ## Operator signatures
 
-Hold an offline signing key and admit a node only if it carries a signature the
-operator made over its WireGuard key. Nodes hold the operator's public key and
-their own signature; the signing key never touches a node, and compromising a node
-can't admit new ones. A signature gates only *who* may join; addressing stays with
-`--prefix`, routing with the conflict resolution above.
+A node joins only with a grant the operator signed over its WireGuard key. The
+signing key stays offline, so compromising a node can't admit new ones. A node trusts
+whoever signed its own grant, so `--signature` is all it needs. Pass `--signers`
+(base64 key, comma-separated, or `@file`) only to pin multiple operators or to
+rotate: add the new key, re-sign, then remove the old (`SIGHUP` reloads).
 
-Create the signing key once; `keygen` prints the public key to pin:
-
-```sh
-pigeon-mesh keygen > signer.key   # secret, keep offline; prints "signer: <pubkey>"
-```
-
-Sign each node's WireGuard public key and hand it the result:
-
-```sh
-pigeon-mesh sign --key signer.key --ttl 720h <node-wg-pubkey> > node.sig
-```
-
-Run the node, trusting that signer and presenting its own signature:
-
-```sh
-pigeon-mesh --interface wg0 --endpoint ... --prefix fdcc::/16 \
-  --signers <signer-pubkey> \
-  --signature node.sig
-```
-
-`--signers` takes a base64 key, comma-separated keys, or `@file` (one per line,
-`SIGHUP`-reloadable). Rotation is add-new, re-sign, remove-old.
-
-A peer is admitted only if it presents a signature from a pinned signer, bound to
-its own WireGuard key, and unexpired. It is verified against the pinned key, never
-the key named in the signature. Signatures are re-checked continuously, so expiry
-and signer rotation drop already-admitted peers too; `SIGHUP` reloads the pinned
-keys. A node also checks its own signature at startup and won't run on a bad one; if a
-running node's own signature later expires it stops serving DNS and gossiping its
-metadata (restart with a fresh signature to resume), rather than relying only on
-peers to evict it.
-Without `--require-signature` a peer with no signature still falls back to
-`--prefix`/gossip-key admission while a bad signature is always rejected;
-`--require-signature` demands a valid signature from every peer (a hand-added
-bootstrap peer is trusted until its first gossip).
+A peer is admitted only if its grant verifies against the trusted key, is bound to
+its WireGuard key, and is unexpired. Grants are re-checked continuously, so expiry or
+rotation drops admitted peers too. A node checks its own grant at startup and won't
+run on a bad one. If it later expires, the node stops serving DNS and gossiping until
+restarted with a fresh grant.
 
 ## Names
 
-`--dns mesh.internal` serves AAAA records in that zone so peers are reachable by
-name. A node's name defaults to its hostname, overridable with `--tag name=alpha`
-(or `--tag name=` to opt out); the
-resolver answers `<name>.<zone>` with that peer's overlay address — its key-derived
-`/128` under `--prefix`, otherwise the address it advertises. Pair `--dns` with
-`--prefix` so a name resolves to the peer's key-derived address; without it a name
-resolves to whatever address the peer advertises, trusted only as much as the
-admission tier. It binds the overlay
-address on port 53 (so needs root or `CAP_NET_BIND_SERVICE`) and programs
-systemd-resolved so only the zone routes to it. Without systemd-resolved it still
-answers on the overlay address directly.
+`--dns mesh.internal` serves AAAA records so peers resolve by name. A node's name is
+its hostname, or set `--tag name=alpha` (`--tag name=` opts out). `<name>.<zone>`
+resolves to that peer's key-derived `/128`. It binds port 53 on the overlay address
+(needs root or `CAP_NET_BIND_SERVICE`) and programs systemd-resolved to route the
+zone to it.
 
 ## Trust model
 
-- WireGuard's Noise handshake is the only transport security; gossip rides inside
-  the tunnels. pigeon-mesh never reads or persists the WireGuard private key.
-- Admission is a ladder; inside whichever rung you pick, members are trusted:
-  - *Open* — the WireGuard peers you add by hand are the boundary.
-  - *Shared secret* (`--gossip-key-file`) — whoever holds the key may join; it also
-    encrypts the gossip.
-  - *Operator signature* (`--signers`/`--signature`) — only keys an offline operator
-    signed may join, and `--require-signature` makes that the only way in.
-- Addresses and routes are pinned separately from admission. With `--prefix` a
-  member's `/128` is its key-derived address, so it cannot claim another's; without
-  it a member may claim any address. Any other route two members both advertise is
-  one the daemon can't adjudicate, so it installs it for neither and shows it in
+- **Transport:** WireGuard's Noise handshake is the only encryption, and gossip rides
+  inside the tunnels. The private key is never read or persisted.
+- **Membership:** no control plane, so addresses are key-derived (self-certifying)
+  and every node carries an offline operator signature. A node cannot claim another's
+  address. A route two members both claim is installed for neither and shown in
   `status`.
-- Inside a rung, members are trusted to advertise routes, so a member can offer an
-  exit route (`0.0.0.0/0`) or a subnet via `--allowed-ips` and peers honour it.
-  `--peer-policy` is the receive-side control: an `expr` predicate
-  `accept(peer, allowedip)` evaluated per advertised CIDR, deciding whether this node
-  installs it. In scope are `peer` (`.key`/`.endpoint`/`.allowedips`), the candidate
-  `allowedip`, and `cidrSubset(outer, inner)`; e.g.
-  `peer.key == "<exit-key>" && allowedip in ["0.0.0.0/0", "::/0"]` lets only that peer
-  be an exit. A refused route is dropped locally and shown in `status`; a member's own
-  address always installs. It restricts only this node and enforces nothing on the
-  mesh; left unset, every advertised route is accepted. Inline or `@file`
-  (`SIGHUP`-reloadable).
+- **Routes:** members may advertise extra routes (an exit `0.0.0.0/0`, a subnet via
+  `--allowed-ips`), and each node chooses which to install with
+  [`--peer-policy`](#peer-policy).
+
+## Peer policy
+
+`--peer-policy` decides which routes this node installs from what peers advertise: an
+[expr](https://expr-lang.org) predicate run once per advertised route. A node's own
+identity `/128` always installs, so the policy gates only *extra* routes (subnets,
+exits); a refused route drops locally and shows in `status`. It restricts only this
+node, unset accepts everything, and it is inline or `@file` (`SIGHUP`-reloadable).
+
+In scope: `peer.key`, `peer.endpoint`, the candidate `route`, the peer's full
+`peer.allowedips`, and `cidrSubset(outer, inner)`. Match the single `route` for
+per-route rules, or `any`/`all`/`len` over `peer.allowedips` for whole-peer ones.
+
+```sh
+# refuse every extra route, keep only identity /128s
+--peer-policy 'false'
+
+# per-route: accept only routes inside the mesh ULA, refuse the rest individually
+--peer-policy 'cidrSubset("fdcc::/16", route)'
+
+# per-route: only the exit node may advertise a default route, others accepted
+--peer-policy 'route in ["0.0.0.0/0", "::/0"] ? peer.key == "<exit-pubkey>" : true'
+
+# per-route: only the designated router may advertise a 10.0.0.0/8 subnet
+--peer-policy 'cidrSubset("10.0.0.0/8", route) ? peer.key == "<router-pubkey>" : true'
+
+# whole-peer: take a peer's extra routes only if every one is a mesh ULA subnet
+--peer-policy 'all(peer.allowedips, cidrSubset("fdcc::/16", #))'
+```
 
 ## Operations
 
-Live state: `wg show <interface>` for the kernel peers, or `pigeon-mesh status`
-for the gossip view, showing each peer's endpoint, tags, and SWIM state
-(alive/suspect/dead), plus any conflicting routes. `pigeon-mesh status --json`
-for scripting. Served on
-demand over a unix socket (`--socket`, default `/run/pigeon-mesh.sock`; empty
-disables; set it per instance to run several on one host).
-
-`pigeon-mesh leave` gracefully departs the mesh (for decommission); peers drop it
-immediately. A node that fails or restarts is held through `--reconnect-timeout`
-so a brief partition doesn't churn peers, then reaped.
+`pigeon-mesh status` (`--json`) shows the gossip view (endpoints, tags, SWIM state,
+conflicts) over a unix socket (`--socket`, default `/run/pigeon-mesh.sock`). `wg show
+<iface>` shows the kernel peers. `pigeon-mesh leave` departs gracefully and peers drop
+it at once. A node that fails or restarts is held through `--reconnect-timeout`, then
+reaped.
 
 ## Performance
 
-A joining node is visible cluster-wide within seconds, and a failed node is
-detected and dropped in a few seconds on the `lan` profile or ~30 s on the
-`wan` default. Both grow only logarithmically with cluster size, so it should stay
-responsive into the thousands.
+A joining node is visible cluster-wide within seconds. A failure is detected in a few
+seconds (`lan`) or ~30s (`wan` default). Both grow only logarithmically with cluster
+size, so it stays responsive into the thousands.
 
 ## Limitations
 

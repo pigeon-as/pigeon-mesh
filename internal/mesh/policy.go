@@ -1,3 +1,5 @@
+//go:build linux
+
 package mesh
 
 import (
@@ -6,16 +8,15 @@ import (
 	"net/netip"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/expr-lang/expr"
 	"github.com/expr-lang/expr/vm"
 )
 
-// PeerPolicy is a compiled --peer-policy predicate, accept(peer, allowedip) -> bool,
-// evaluated per advertised CIDR to decide whether this node installs that route. It
-// governs route acceptance only: never admission (the signature/gossip-key tier),
-// never cross-peer arbitration (resolveConflicts), and a peer's identity /128 is
-// always kept (handled in policyFilter, not the predicate).
+// PeerPolicy is a compiled --peer-policy predicate, accept(peer, route) -> bool, run
+// per advertised CIDR. Route acceptance only: never the signature/grant tier, never
+// cross-peer arbitration, and the identity /128 is always kept (see policyFilter).
 type PeerPolicy struct{ program *vm.Program }
 
 type policyPeer struct {
@@ -26,12 +27,11 @@ type policyPeer struct {
 
 type policyEnv struct {
 	Peer       policyPeer                     `expr:"peer"`
-	AllowedIP  string                         `expr:"allowedip"`
+	Route  string                         `expr:"route"`
 	CIDRSubset func(outer, inner string) bool `expr:"cidrSubset"`
 }
 
-// ParsePeerPolicyFlag compiles the --peer-policy flag value: an inline predicate,
-// or @file to read the predicate from a file (SIGHUP-reloadable, like --signers).
+// ParsePeerPolicyFlag compiles --peer-policy: inline predicate, or @file (SIGHUP-reloadable).
 func ParsePeerPolicyFlag(spec string) (*PeerPolicy, error) {
 	if path, ok := strings.CutPrefix(spec, "@"); ok {
 		return LoadPeerPolicy(path)
@@ -39,7 +39,6 @@ func ParsePeerPolicyFlag(spec string) (*PeerPolicy, error) {
 	return ParsePeerPolicy(spec)
 }
 
-// LoadPeerPolicy reads and compiles a predicate from a file.
 func LoadPeerPolicy(path string) (*PeerPolicy, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -48,7 +47,7 @@ func LoadPeerPolicy(path string) (*PeerPolicy, error) {
 	return ParsePeerPolicy(strings.TrimSpace(string(data)))
 }
 
-// ParsePeerPolicy compiles the predicate. An empty string returns nil (accept all).
+// ParsePeerPolicy compiles the predicate. Empty string returns nil (accept all).
 func ParsePeerPolicy(s string) (*PeerPolicy, error) {
 	if s == "" {
 		return nil, nil
@@ -60,10 +59,10 @@ func ParsePeerPolicy(s string) (*PeerPolicy, error) {
 	return &PeerPolicy{program: program}, nil
 }
 
-func (p *PeerPolicy) accept(peer Peer, allowedip string) (bool, error) {
+func (p *PeerPolicy) accept(peer Peer, route string) (bool, error) {
 	out, err := expr.Run(p.program, policyEnv{
 		Peer:       policyPeer{Key: peer.PublicKey, Endpoint: peer.Endpoint, AllowedIPs: peer.AllowedIPs},
-		AllowedIP:  allowedip,
+		Route:  route,
 		CIDRSubset: cidrSubset,
 	})
 	if err != nil {
@@ -76,9 +75,8 @@ func (p *PeerPolicy) accept(peer Peer, allowedip string) (bool, error) {
 	return b, nil
 }
 
-// policyFilter splits a peer's advertised AllowedIPs into the routes this node
-// installs (kept) and the routes the policy refuses (refused). The identity /128 is
-// always kept (auto-managed, exempt). A nil policy accepts everything.
+// policyFilter splits advertised AllowedIPs into kept and refused. The identity /128
+// is always kept (exempt). A nil policy accepts everything.
 func policyFilter(peer Peer, identity netip.Addr, policy *PeerPolicy) (kept, refused []string) {
 	if policy == nil {
 		return peer.AllowedIPs, nil
@@ -107,9 +105,8 @@ func policyFilter(peer Peer, identity netip.Addr, policy *PeerPolicy) (kept, ref
 	return kept, refused
 }
 
-// cidrSubset reports whether inner is a subset of outer (Vault cidrutil.Subset
-// semantics): inner must be at least as specific as outer and lie inside it. A bare
-// IP is treated as a /32 or /128.
+// cidrSubset reports whether inner is a subset of outer: at least as specific and
+// inside it. A bare IP is treated as a /32 or /128.
 func cidrSubset(outer, inner string) bool {
 	o, err := netip.ParsePrefix(outer)
 	if err != nil {
@@ -124,4 +121,14 @@ func cidrSubset(outer, inner string) bool {
 		return false
 	}
 	return i.Bits() >= o.Bits() && o.Contains(i.Addr())
+}
+
+func (m *Mesh) ReloadPolicyFromFile(path string) error {
+	policy, err := LoadPeerPolicy(path)
+	if err != nil {
+		return err
+	}
+	m.policy.Store(policy)
+	m.reevaluate(time.Now())
+	return nil
 }

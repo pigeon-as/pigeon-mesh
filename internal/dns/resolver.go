@@ -1,6 +1,6 @@
 //go:build linux
 
-package mesh
+package dns
 
 import (
 	"context"
@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/godbus/dbus/v5"
-	"github.com/hashicorp/memberlist"
 	"github.com/miekg/dns"
 )
 
@@ -25,8 +24,9 @@ const (
 	dbusBrokerPath   = dbus.ObjectPath("/org/freedesktop/DBus")
 	nameOwnerChanged = "NameOwnerChanged"
 
-	// resolvedCallTimeout bounds every resolved D-Bus call (tailscale 1s, netbird 5s).
+	// Bounds every resolved D-Bus call.
 	resolvedCallTimeout = 2 * time.Second
+	watchBackoffMax     = 30 * time.Second
 )
 
 type resolvedLinkDNS struct {
@@ -39,28 +39,34 @@ type resolvedLinkDomain struct {
 	RoutingOnly bool
 }
 
-func (m *Mesh) serveResolver(ctx context.Context) {
-	zone := normalizeZone(m.cfg.DNSZone)
+// Config for the overlay DNS server. Empty Zone disables DNS entirely.
+type Config struct {
+	Iface string
+	Addr  netip.Addr
+	Zone  string
+}
+
+// Serve answers A/AAAA for cfg.Zone and routes the zone there via systemd-resolved,
+// re-asserting if resolved restarts. Blocks until ctx cancel, then reverts. No-op if Zone empty.
+func Serve(ctx context.Context, cfg Config, records func() map[string]netip.Addr) {
+	zone := normalizeZone(cfg.Zone)
 	if zone == "" {
 		return
 	}
-	if !m.cfg.Prefix.IsValid() {
-		slog.Warn("dns enabled without --prefix: names resolve to peer-advertised addresses; enable --prefix to bind names to key-derived addresses")
-	}
-	addr := net.JoinHostPort(m.cfg.BindAddr, "53")
-	pc, err := net.ListenPacket("udp", addr)
+	bind := net.JoinHostPort(cfg.Addr.String(), "53")
+	pc, err := net.ListenPacket("udp", bind)
 	if err != nil {
-		slog.Error("dns bind", "addr", addr, "err", err)
+		slog.Error("dns bind", "addr", bind, "err", err)
 		return
 	}
-	l, err := net.Listen("tcp", addr)
+	l, err := net.Listen("tcp", bind)
 	if err != nil {
 		_ = pc.Close()
-		slog.Error("dns bind", "addr", addr, "err", err)
+		slog.Error("dns bind", "addr", bind, "err", err)
 		return
 	}
 	h := dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
-		_ = w.WriteMsg(buildReply(r, zone, m.dnsTable()))
+		_ = w.WriteMsg(reply(r, zone, records()))
 	})
 	udp := &dns.Server{PacketConn: pc, Handler: h}
 	tcp := &dns.Server{Listener: l, Handler: h}
@@ -75,24 +81,25 @@ func (m *Mesh) serveResolver(ctx context.Context) {
 		}
 	}()
 
-	if err := m.programResolved(zone); err != nil {
+	if err := program(cfg.Iface, cfg.Addr, zone); err != nil {
 		slog.Warn("resolved split-DNS not programmed; query the overlay address directly", "err", err)
 	}
 	watchDone := make(chan struct{})
 	go func() {
 		defer close(watchDone)
-		m.watchResolved(ctx, zone)
+		watch(ctx, cfg.Iface, cfg.Addr, zone)
 	}()
-	slog.Info("overlay dns up", "addr", addr, "zone", zone)
+	slog.Info("overlay dns up", "addr", bind, "zone", zone)
 
 	<-ctx.Done()
 	<-watchDone
-	m.revertResolved()
+	revert(cfg.Iface)
 	_ = udp.Shutdown()
 	_ = tcp.Shutdown()
 }
 
-func (m *Mesh) watchResolved(ctx context.Context, zone string) {
+// watch re-programs resolved on each restart (name owner change); a restart wipes our link config.
+func watch(ctx context.Context, iface string, addr netip.Addr, zone string) {
 	match := []dbus.MatchOption{
 		dbus.WithMatchObjectPath(dbusBrokerPath),
 		dbus.WithMatchInterface(dbusBroker),
@@ -101,7 +108,7 @@ func (m *Mesh) watchResolved(ctx context.Context, zone string) {
 	}
 	backoff := time.Second
 	for {
-		if err := m.watchResolvedOnce(ctx, zone, match); err != nil && ctx.Err() == nil {
+		if err := watchOnce(ctx, iface, addr, zone, match); err != nil && ctx.Err() == nil {
 			slog.Warn("resolved watch reconnect", "err", err)
 		}
 		select {
@@ -109,11 +116,11 @@ func (m *Mesh) watchResolved(ctx context.Context, zone string) {
 			return
 		case <-time.After(backoff):
 		}
-		backoff = min(2*backoff, reconnectInterval)
+		backoff = min(2*backoff, watchBackoffMax)
 	}
 }
 
-func (m *Mesh) watchResolvedOnce(ctx context.Context, zone string, match []dbus.MatchOption) error {
+func watchOnce(ctx context.Context, iface string, addr netip.Addr, zone string, match []dbus.MatchOption) error {
 	conn, err := dbus.SystemBus()
 	if err != nil {
 		return err
@@ -135,7 +142,7 @@ func (m *Mesh) watchResolvedOnce(ctx context.Context, zone string, match []dbus.
 	}
 	nameCancel()
 	if owned {
-		m.reprogramResolved(ctx, zone)
+		resync(ctx, iface, addr, zone)
 	}
 
 	for {
@@ -155,15 +162,15 @@ func (m *Mesh) watchResolvedOnce(ctx context.Context, zone string, match []dbus.
 				continue
 			}
 			slog.Info("systemd-resolved (re)started; reprogramming split-DNS")
-			m.reprogramResolved(ctx, zone)
+			resync(ctx, iface, addr, zone)
 		}
 	}
 }
 
-func (m *Mesh) reprogramResolved(ctx context.Context, zone string) {
+func resync(ctx context.Context, iface string, addr netip.Addr, zone string) {
 	backoff := 200 * time.Millisecond
 	for attempt := 0; ; attempt++ {
-		if err := m.programResolved(zone); err == nil {
+		if err := program(iface, addr, zone); err == nil {
 			return
 		} else if attempt >= 2 {
 			slog.Warn("resolved resync", "err", err)
@@ -178,54 +185,12 @@ func (m *Mesh) reprogramResolved(ctx context.Context, zone string) {
 	}
 }
 
-func (m *Mesh) dnsTable() map[string]netip.Addr {
-	nodes := m.memberlist.Members()
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	table := make(map[string]netip.Addr, len(nodes))
-	collided := make(map[string]bool)
-	add := func(addr netip.Addr, tags Tags) {
-		label := SanitizeLabel(tags["name"])
-		if label == "" || collided[label] || !addr.IsValid() {
-			return
-		}
-		if existing, dup := table[label]; dup && existing != addr {
-			delete(table, label)
-			collided[label] = true
-			slog.Warn("dns name claimed by more than one peer; not resolving it", "name", label)
-			return
-		}
-		table[label] = addr
-	}
-	if self, err := netip.ParseAddr(m.cfg.BindAddr); err == nil && !m.selfExpired.Load() {
-		add(self, m.cfg.Self.Tags)
-	}
-	for _, n := range nodes {
-		if n.Name == m.cfg.Self.PublicKey || n.State != memberlist.StateAlive {
-			continue
-		}
-		e, ok := m.members[n.Name]
-		if !ok || e.failed || e.reject != "" {
-			continue
-		}
-		if e.addr.IsValid() {
-			if _, contested := m.conflicts[HostRoute(e.addr).String()]; contested {
-				continue
-			}
-		}
-		add(e.addr, e.peer.Tags)
-	}
-	return table
-}
-
-func (m *Mesh) programResolved(zone string) error {
-	ifi, err := net.InterfaceByName(m.cfg.Iface)
+// program points resolved at addr for zone on iface: routing-only split-DNS, with
+// DNSSEC/LLMNR/mDNS/DoT disabled on the link. Old resolved versions lack some calls; tolerated.
+func program(iface string, addr netip.Addr, zone string) error {
+	ifi, err := net.InterfaceByName(iface)
 	if err != nil {
-		return fmt.Errorf("interface %q: %w", m.cfg.Iface, err)
-	}
-	addr, err := netip.ParseAddr(m.cfg.BindAddr)
-	if err != nil {
-		return fmt.Errorf("bind addr %q: %w", m.cfg.BindAddr, err)
+		return fmt.Errorf("interface %q: %w", iface, err)
 	}
 	conn, err := dbus.SystemBus()
 	if err != nil {
@@ -260,9 +225,6 @@ func (m *Mesh) programResolved(zone string) error {
 			return fmt.Errorf("SetLinkDefaultRoute: %w", call.Err)
 		}
 	}
-
-	// Best-effort: DNSSEC off so resolved doesn't SERVFAIL our unsigned zone; LLMNR/mDNS/DoT
-	// off + flush mirror tailscale net/dns/resolved.go (older resolved may lack these).
 	for _, h := range []struct{ method, value string }{
 		{"SetLinkLLMNR", "no"},
 		{"SetLinkMulticastDNS", "no"},
@@ -279,18 +241,18 @@ func (m *Mesh) programResolved(zone string) error {
 	return nil
 }
 
-func (m *Mesh) revertResolved() {
+func revert(iface string) {
 	conn, err := dbus.SystemBus()
 	if err != nil {
 		slog.Debug("revert resolved", "err", err)
 		return
 	}
-	ifi, err := net.InterfaceByName(m.cfg.Iface)
+	ifi, err := net.InterfaceByName(iface)
 	if err != nil {
 		slog.Debug("revert resolved", "err", err)
 		return
 	}
-	// Fresh bounded context: the run ctx is already cancelled and this must not wedge teardown.
+	// Fresh bounded context: run ctx is already cancelled, must not wedge teardown.
 	ctx, cancel := context.WithTimeout(context.Background(), resolvedCallTimeout)
 	defer cancel()
 	mgr := conn.Object(resolvedDest, resolvedPath)

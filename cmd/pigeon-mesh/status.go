@@ -119,9 +119,9 @@ func printStatus(st mesh.Status) {
 		}
 	}
 
-	if len(st.StaleBootstrap) > 0 {
-		fmt.Println("\nstale bootstrap peers (never gossiped since join; remove from the WireGuard config if decommissioned):")
-		for _, k := range st.StaleBootstrap {
+	if len(st.StaleKernelPeers) > 0 {
+		fmt.Println("\nstale kernel peers (never gossiped since join; remove from the WireGuard config if decommissioned):")
+		for _, k := range st.StaleKernelPeers {
 			fmt.Printf("  %s\n", k)
 		}
 	}

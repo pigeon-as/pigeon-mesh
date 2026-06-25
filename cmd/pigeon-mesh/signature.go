@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pigeon-as/pigeon-mesh/internal/mesh"
+	"github.com/pigeon-as/pigeon-mesh/internal/signature"
 )
 
 func runKeygen(args []string) int {
@@ -71,7 +71,7 @@ func runSign(args []string) int {
 	if *ttl > 0 {
 		notAfter = now.Add(*ttl).Unix()
 	}
-	blob, err := mesh.Sign(priv, subRaw, now.Add(-*skew).Unix(), notAfter)
+	blob, err := signature.Sign(priv, subRaw, now.Add(-*skew).Unix(), notAfter)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1

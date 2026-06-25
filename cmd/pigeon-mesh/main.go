@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"flag"
 	"log/slog"
 	"net/netip"
@@ -15,8 +16,10 @@ import (
 	"time"
 
 	sockaddr "github.com/hashicorp/go-sockaddr/template"
+	"github.com/pigeon-as/pigeon-mesh/internal/dns"
 	"github.com/pigeon-as/pigeon-mesh/internal/mesh"
 	"github.com/pigeon-as/pigeon-mesh/internal/sdnotify"
+	"github.com/pigeon-as/pigeon-mesh/internal/signature"
 	"github.com/pigeon-as/pigeon-mesh/internal/wg"
 )
 
@@ -39,21 +42,18 @@ func main() {
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
-	iface := flag.String("interface", "", "existing WireGuard interface (required); bootstrap peers need a /128 or /32 first in AllowedIPs")
+	iface := flag.String("interface", "", "existing WireGuard interface (required); kernel peers need a /128 or /32 first in AllowedIPs")
 	endpoint := flag.String("endpoint", "", "this node's Endpoint as host:port; hostnames resolved at startup; go-sockaddr templates evaluated (required)")
-	address := flag.String("address", "", "this node's overlay IP; go-sockaddr templates evaluated; auto-detected from --interface if unset")
 	allowedIPs := flag.String("allowed-ips", "", "additional AllowedIPs this node advertises to peers beyond its auto overlay /128, comma-separated")
 	peerPolicy := flag.String("peer-policy", "", "expr predicate accept(peer, allowedip) bool, evaluated per advertised CIDR; false drops only that route (identity /128 always installs; empty accepts all). In scope: peer (.key/.endpoint/.allowedips), allowedip, cidrSubset(outer,inner). Inline or @file (SIGHUP-reloadable)")
 	gossipPort := flag.Int("gossip-port", 7946, "port to listen on for gossip (TCP and UDP)")
-	gossipKeyFile := flag.String("gossip-key-file", "", "JSON file of base64-encoded gossip encryption keys")
 	persistentKeepalive := flag.Int("persistent-keepalive", 0, "PersistentKeepalive interval in seconds advertised to peers (0 disables)")
 	profile := flag.String("profile", "wan", "memberlist timing profile: lan, wan, or local")
 	socket := flag.String("socket", mesh.DefaultSocketPath, "path to the status query socket served for the status command; empty disables")
-	dns := flag.String("dns", "", "serve AAAA records for peers' name= tag and program systemd-resolved split-DNS for this zone (e.g. mesh.internal)")
-	prefix := flag.String("prefix", "", "optional byte-aligned IPv6 ULA prefix (e.g. fdcc::/16); when set, the daemon derives this node's overlay address from its key and assigns it to the interface, and requires every peer's address to be the same derivation of its key (self-certifying)")
-	signers := flag.String("signers", "", "trusted signer public key(s): a base64 key, comma-separated keys, or @file (one per line, SIGHUP-reloadable); enables signature verification")
-	signatureFile := flag.String("signature", "", "path to this node's base64 signature; advertised to peers for admission")
-	requireSignature := flag.Bool("require-signature", false, "reject any peer that does not present a valid signature (needs --signers)")
+	dnsZone := flag.String("dns", "", "serve AAAA records for peers' name= tag and program systemd-resolved split-DNS for this zone (e.g. mesh.internal)")
+	prefix := flag.String("prefix", "fdcc::/48", "byte-aligned IPv6 ULA prefix; the daemon derives this node's overlay address from its key (sha512) and assigns it to the interface, and requires every peer's address to be the same derivation of its key (self-certifying)")
+	signers := flag.String("signers", "", "trusted operator signer key(s) to verify peers against: a base64 key, comma-separated, or @file (SIGHUP-reloadable). Defaults to the key that signed this node's own --signature; set it explicitly only to pin multiple operators or to rotate signers")
+	signatureFile := flag.String("signature", "", "path to this node's base64 operator-signed grant (required); advertised to peers for admission")
 	reconnectTimeout := flag.Duration("reconnect-timeout", 10*time.Minute, "grace window to keep a failed peer's tunnel before reaping it; survives restarts and brief partitions")
 	var tagFlags []string
 	flag.Func("tag", "tag for this node, repeatable as k=v", func(v string) error {
@@ -78,19 +78,9 @@ func main() {
 		slog.Error("persistent-keepalive out of range", "got", *persistentKeepalive, "range", "0-65535")
 		os.Exit(2)
 	}
-	if *requireSignature && *signers == "" {
-		slog.Error("--require-signature needs --signers")
+	if *signatureFile == "" {
+		slog.Error("missing required flag --signature (every node presents its own operator-signed grant)")
 		os.Exit(2)
-	}
-	if *requireSignature && *signatureFile == "" {
-		slog.Error("--require-signature needs this node to present its own --signature")
-		os.Exit(2)
-	}
-	if *signatureFile != "" && *signers == "" {
-		slog.Warn("--signature has no effect without --signers; this node verifies no peers")
-	}
-	if *signers != "" && !*requireSignature {
-		slog.Warn("--signers is set without --require-signature; unsigned peers are still admitted (pass --require-signature to reject them)")
 	}
 
 	endpointStr, err := sockaddr.Parse(*endpoint)
@@ -111,45 +101,23 @@ func main() {
 		os.Exit(1)
 	}
 
-	var ip netip.Addr
-	var overlayPrefix netip.Prefix
-	switch {
-	case *prefix != "":
-		overlayPrefix, err = netip.ParsePrefix(*prefix)
-		if err != nil {
-			slog.Error("prefix", "err", err)
-			os.Exit(2)
-		}
-		ip, err = mesh.DeriveAddr(publicKey.String(), overlayPrefix)
-		if err != nil {
-			slog.Error("prefix", "err", err)
-			os.Exit(2)
-		}
-		if err = wgc.SetAddr(*iface, ip); err != nil {
-			slog.Error("set address", "err", err)
-			os.Exit(1)
-		}
-		if err = wgc.SetRoute(*iface, overlayPrefix); err != nil {
-			slog.Error("set route", "err", err)
-			os.Exit(1)
-		}
-	case *address != "":
-		addressStr, perr := sockaddr.Parse(*address)
-		if perr != nil {
-			slog.Error("address template", "err", perr)
-			os.Exit(1)
-		}
-		ip, err = netip.ParseAddr(addressStr)
-		if err != nil {
-			slog.Error("address template resolved to non-IP", "address", *address, "resolved", addressStr, "err", err)
-			os.Exit(1)
-		}
-	default:
-		ip, err = mesh.InterfaceAddress(*iface)
-		if err != nil {
-			slog.Error("address", "err", err)
-			os.Exit(1)
-		}
+	overlayPrefix, err := netip.ParsePrefix(*prefix)
+	if err != nil {
+		slog.Error("prefix", "err", err)
+		os.Exit(2)
+	}
+	ip, err := mesh.DeriveAddr(publicKey.String(), overlayPrefix)
+	if err != nil {
+		slog.Error("prefix", "err", err)
+		os.Exit(2)
+	}
+	if err = wgc.SetAddr(*iface, ip); err != nil {
+		slog.Error("set address", "err", err)
+		os.Exit(1)
+	}
+	if err = wgc.SetRoute(*iface, overlayPrefix); err != nil {
+		slog.Error("set route", "err", err)
+		os.Exit(1)
 	}
 
 	host := mesh.HostRoute(ip)
@@ -180,7 +148,7 @@ func main() {
 	}
 	if _, ok := tags["name"]; !ok {
 		if h, herr := os.Hostname(); herr == nil {
-			if label := mesh.SanitizeLabel(h); label != "" {
+			if label := dns.SanitizeLabel(h); label != "" {
 				if tags == nil {
 					tags = mesh.Tags{}
 				}
@@ -189,13 +157,10 @@ func main() {
 		}
 	}
 
-	var signature []byte
-	if *signatureFile != "" {
-		signature, err = mesh.LoadSignature(*signatureFile)
-		if err != nil {
-			slog.Error("signature file", "err", err)
-			os.Exit(1)
-		}
+	sig, err := signature.LoadSignature(*signatureFile)
+	if err != nil {
+		slog.Error("signature file", "err", err)
+		os.Exit(1)
 	}
 
 	self := mesh.Peer{
@@ -204,7 +169,7 @@ func main() {
 		AllowedIPs:          allowed,
 		PersistentKeepalive: *persistentKeepalive,
 		Tags:                tags,
-		Signature:           signature,
+		Signature:           sig,
 	}
 
 	cfg := mesh.Config{
@@ -215,8 +180,7 @@ func main() {
 		SocketPath:       *socket,
 		Self:             self,
 		Prefix:           overlayPrefix,
-		DNSZone:          *dns,
-		RequireSignature: *requireSignature,
+		DNSZone:          *dnsZone,
 		ReconnectTimeout: *reconnectTimeout,
 		WG:               wgc,
 	}
@@ -227,25 +191,24 @@ func main() {
 			os.Exit(2)
 		}
 	}
-	if *gossipKeyFile != "" {
-		cfg.Keyring, err = mesh.LoadKeyring(*gossipKeyFile)
-		if err != nil {
-			slog.Error("gossip key", "err", err)
-			os.Exit(1)
-		}
-	}
+	// Trust anchor for verifying peers. Default: the signer of this node's own grant.
 	if *signers != "" {
-		cfg.Signers, err = mesh.ParseSigners(*signers)
+		cfg.Signers, err = signature.ParseSigners(*signers)
 		if err != nil {
 			slog.Error("signers", "err", err)
 			os.Exit(1)
 		}
-	}
-	if len(signature) > 0 && len(cfg.Signers) > 0 {
-		if err := mesh.VerifySignature(cfg.Signers, self.PublicKey, signature, time.Now()); err != nil {
-			slog.Error("own signature rejected by pinned signer keys", "err", err)
+	} else {
+		signer, derr := signature.SignerKey(sig)
+		if derr != nil {
+			slog.Error("derive trust anchor from --signature", "err", derr)
 			os.Exit(1)
 		}
+		cfg.Signers = []ed25519.PublicKey{signer}
+	}
+	if err := signature.Verify(cfg.Signers, self.PublicKey, sig, time.Now()); err != nil {
+		slog.Error("this node's own grant is not signed by a trusted signer key", "err", err)
+		os.Exit(1)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -265,8 +228,8 @@ func main() {
 	if path, ok := strings.CutPrefix(*peerPolicy, "@"); ok {
 		policyFile = path
 	}
-	if *gossipKeyFile != "" || signersFile != "" || policyFile != "" {
-		go reloadOnSIGHUP(ctx, m, *gossipKeyFile, signersFile, policyFile)
+	if signersFile != "" || policyFile != "" {
+		go reloadOnSIGHUP(ctx, m, signersFile, policyFile)
 	}
 
 	slog.Info("pigeon-mesh up", "interface", *iface, "endpoint", ep, "address", ip.String())
@@ -277,7 +240,7 @@ func main() {
 	slog.Info("pigeon-mesh stopped")
 }
 
-func reloadOnSIGHUP(ctx context.Context, m *mesh.Mesh, keyringPath, signersPath, policyPath string) {
+func reloadOnSIGHUP(ctx context.Context, m *mesh.Mesh, signersPath, policyPath string) {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGHUP)
 	defer signal.Stop(sig)
@@ -286,13 +249,6 @@ func reloadOnSIGHUP(ctx context.Context, m *mesh.Mesh, keyringPath, signersPath,
 		case <-ctx.Done():
 			return
 		case <-sig:
-			if keyringPath != "" {
-				if n, err := m.ReloadKeyringFromFile(keyringPath); err != nil {
-					slog.Error("keyring reload", "err", err)
-				} else {
-					slog.Info("keyring reloaded", "keys", n)
-				}
-			}
 			if signersPath != "" {
 				if n, err := m.ReloadSignersFromFile(signersPath); err != nil {
 					slog.Error("signers reload", "err", err)
