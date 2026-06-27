@@ -1,7 +1,8 @@
 # pigeon-mesh
 
-A peer-to-peer WireGuard full-mesh daemon. No central server. Nodes are identified
-by WireGuard public key, and the kernel WG peer set follows the gossip cluster.
+A peer-to-peer WireGuard full-mesh daemon. It automatically adds and removes
+peers on an existing WireGuard interface as nodes join or leave the gossip
+cluster. Nodes are identified by WireGuard public key. No central server.
 
 > **Status:** early development, with breaking changes between v0.0.x versions.
 
@@ -121,9 +122,10 @@ reaped.
 
 ## Performance
 
-A joining node is visible cluster-wide within seconds. A failure is detected in a few
-seconds (`lan`) or ~30s (`wan` default). Both grow only logarithmically with cluster
-size, so it stays responsive into the thousands.
+A joining node is visible cluster-wide within seconds. A failed node is
+detected and dropped in a few seconds on the `lan` profile or ~30 s on the
+`wan` default. Both grow only logarithmically with cluster size, so it should stay
+responsive into the thousands.
 
 ## Limitations
 
