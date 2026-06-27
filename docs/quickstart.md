@@ -13,7 +13,7 @@ wg genkey | tee wg0.key | wg set wg0 private-key /dev/stdin listen-port 51820
 ip link set wg0 up
 
 pigeon-mesh sign --key signer.key "$(wg show wg0 public-key)" > node.sig
-pigeon-mesh --interface wg0 --endpoint <public-ip>:51820 --signature node.sig
+pigeon-mesh --interface wg0 --endpoint <public-ip>:51820 --prefix fdcc::/48 --signature node.sig
 ```
 
 The node trusts whoever signed its grant, so no `--signers` is needed.
@@ -24,5 +24,5 @@ Add one peer to the kernel so gossip can start; pigeon-mesh derives its overlay
 address from its key and discovers the rest:
 
 ```sh
-wg set wg0 peer <their-pubkey> endpoint <their-public-ip>:51820
+wg set wg0 peer <base64-pubkey> endpoint <public-ip>:51820
 ```
