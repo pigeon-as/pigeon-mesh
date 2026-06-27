@@ -256,9 +256,12 @@ func (m *Mesh) reapDead(now time.Time) (changed bool) {
 	return changed
 }
 
-// checkSelfExpiry halts self DNS once this node's own grant expires (self is never in the member set).
+// checkSelfExpiry tracks whether this node's own grant has expired, halting self DNS while set (self
+// is never in the member set). It both sets and clears the latch from the current grant, so a renewal
+// that raced a tick self-heals on the next one.
 func (m *Mesh) checkSelfExpiry(now time.Time) {
-	if selfSignatureError(*m.selfGrant.Load(), now) != nil && m.selfExpired.CompareAndSwap(false, true) {
+	expired := selfSignatureError(*m.selfGrant.Load(), now) != nil
+	if was := m.selfExpired.Swap(expired); expired && !was {
 		slog.Warn("this node's own operator signature has expired; halting self DNS until re-signed (SIGHUP reloads the grant) or restarted; signature-verifying peers will also drop this node")
 	}
 }

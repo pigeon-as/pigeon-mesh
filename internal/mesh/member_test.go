@@ -229,6 +229,15 @@ func TestCheckSelfExpiry(t *testing.T) {
 	ok.selfGrant.Store(&valid)
 	ok.checkSelfExpiry(now)
 	must.False(t, ok.selfExpired.Load(), must.Sprint("a valid signature keeps the node live"))
+
+	// self-heal: a latch left set by a renewal that raced a tick clears once the tick re-reads the
+	// now-valid grant (the old set-only CAS could not express this).
+	healed := &Mesh{cfg: Config{Self: Peer{PublicKey: "self", Signature: valid}}}
+	storeConfig(healed, []ed25519.PublicKey{pub}, nil)
+	healed.selfGrant.Store(&valid)
+	healed.selfExpired.Store(true)
+	healed.checkSelfExpiry(now)
+	must.False(t, healed.selfExpired.Load(), must.Sprint("a tick re-reading a valid grant clears a stuck latch"))
 }
 
 func TestAdmit(t *testing.T) {
