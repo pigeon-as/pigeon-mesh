@@ -172,7 +172,7 @@ func (m *Mesh) status() Status {
 			Status:     memberStatus(e.admitted(), e.failed),
 		}
 		if !e.admitted() {
-			rejected[name] = errText(e.admitErr)
+			rejected[name] = e.admitErr.Error()
 		}
 		if len(e.refusedRoutes) > 0 {
 			refused[name] = e.refusedRoutes

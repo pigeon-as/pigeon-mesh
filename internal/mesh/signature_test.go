@@ -63,7 +63,7 @@ func TestReloadSignersFromFile(t *testing.T) {
 
 	// under the wrong signer the signed member is rejected
 	m.reevaluate(time.Now())
-	must.StrContains(t, errText(m.members[testKey].admitErr), "unknown signer", must.Sprint("a member signed by an untrusted key is rejected"))
+	must.StrContains(t, m.members[testKey].admitErr.Error(), "unknown signer", must.Sprint("a member signed by an untrusted key is rejected"))
 	must.EqOp(t, "", m.members[testKey].wgPeer.key, must.Sprint("a rejected member installs no kernel config"))
 	must.True(t, reconcileTriggered(m.reconcileCh))
 
