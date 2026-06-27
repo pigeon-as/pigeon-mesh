@@ -17,7 +17,7 @@ pigeon-mesh --interface wg0 --endpoint 203.0.113.1:51820 --signature node.sig
 
 The node derives its overlay address from its key (`--prefix`, default `fdcc::/48`)
 and trusts whoever signed its grant. It runs as systemd `Type=notify`. `pigeon-mesh
---help` lists every flag.
+--help` lists every flag. See the [quickstart](docs/quickstart.md).
 
 `--endpoint` accepts [go-sockaddr](https://github.com/hashicorp/go-sockaddr)
 templates for runtime resolution:
