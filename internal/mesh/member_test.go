@@ -216,6 +216,7 @@ func TestCheckSelfExpiry(t *testing.T) {
 	must.NoError(t, err)
 	m := &Mesh{cfg: Config{Self: Peer{PublicKey: "self", Signature: blob}}}
 	storeConfig(m, []ed25519.PublicKey{pub}, nil)
+	m.selfGrant.Store(&blob)
 	must.False(t, m.selfExpired.Load())
 
 	m.checkSelfExpiry(now)
@@ -225,6 +226,7 @@ func TestCheckSelfExpiry(t *testing.T) {
 	must.NoError(t, err)
 	ok := &Mesh{cfg: Config{Self: Peer{PublicKey: "self", Signature: valid}}}
 	storeConfig(ok, []ed25519.PublicKey{pub}, nil)
+	ok.selfGrant.Store(&valid)
 	ok.checkSelfExpiry(now)
 	must.False(t, ok.selfExpired.Load(), must.Sprint("a valid signature keeps the node live"))
 }

@@ -53,7 +53,7 @@ func main() {
 	dnsZone := flag.String("dns", "", "serve AAAA records for peers' name= tag and program systemd-resolved split-DNS for this zone (e.g. mesh.internal)")
 	prefix := flag.String("prefix", "fdcc::/48", "byte-aligned IPv6 ULA prefix; the daemon derives this node's overlay address from its key (sha512) and assigns it to the interface, and requires every peer's address to be the same derivation of its key (self-certifying)")
 	signers := flag.String("signers", "", "trusted operator signer key(s) to verify peers against: a base64 key, comma-separated, or @file (SIGHUP-reloadable). Defaults to the key that signed this node's own --signature; set it explicitly only to pin multiple operators or to rotate signers")
-	signatureFile := flag.String("signature", "", "path to this node's base64 operator-signed grant (required); advertised to peers for admission")
+	signatureFile := flag.String("signature", "", "path to this node's base64 operator-signed grant (required); advertised to peers for admission (SIGHUP-reloadable for hitless renewal)")
 	reconnectTimeout := flag.Duration("reconnect-timeout", 10*time.Minute, "grace window to keep a failed peer's tunnel before reaping it; survives restarts and brief partitions")
 	var tagFlags []string
 	flag.Func("tag", "tag for this node, repeatable as k=v", func(v string) error {
@@ -228,9 +228,7 @@ func main() {
 	if path, ok := strings.CutPrefix(*peerPolicy, "@"); ok {
 		policyFile = path
 	}
-	if signersFile != "" || policyFile != "" {
-		go reloadOnSIGHUP(ctx, m, signersFile, policyFile)
-	}
+	go reloadOnSIGHUP(ctx, m, *signatureFile, signersFile, policyFile)
 
 	slog.Info("pigeon-mesh up", "interface", *iface, "endpoint", ep, "address", ip.String())
 	if err := m.Run(ctx); err != nil {
@@ -240,7 +238,7 @@ func main() {
 	slog.Info("pigeon-mesh stopped")
 }
 
-func reloadOnSIGHUP(ctx context.Context, m *mesh.Mesh, signersPath, policyPath string) {
+func reloadOnSIGHUP(ctx context.Context, m *mesh.Mesh, signaturePath, signersPath, policyPath string) {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGHUP)
 	defer signal.Stop(sig)
@@ -262,6 +260,11 @@ func reloadOnSIGHUP(ctx context.Context, m *mesh.Mesh, signersPath, policyPath s
 				} else {
 					slog.Info("peer-policy reloaded")
 				}
+			}
+			if err := m.ReloadSignatureFromFile(signaturePath); err != nil {
+				slog.Error("signature reload", "err", err)
+			} else {
+				slog.Info("signature reloaded")
 			}
 		}
 	}

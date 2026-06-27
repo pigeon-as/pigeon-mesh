@@ -187,7 +187,7 @@ func (m *Mesh) status() Status {
 		Tags:       m.cfg.Self.Tags,
 		Status:     "alive",
 	}
-	if err := selfSignatureError(m.cfg.Self, now); err != nil {
+	if err := selfSignatureError(*m.selfGrant.Load(), now); err != nil {
 		selfPV.Status = "rejected"
 		rejected[m.cfg.Self.PublicKey] = err.Error()
 	}
