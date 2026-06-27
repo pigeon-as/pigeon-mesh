@@ -49,7 +49,10 @@ A node joins only with a grant the operator signed over its WireGuard key. The
 signing key stays offline, so compromising a node can't admit new ones. A node trusts
 whoever signed its own grant, so `--signature` is all it needs. Pass `--signers`
 (base64 key, comma-separated, or `@file`) only to pin multiple operators or to
-rotate: add the new key, re-sign, then remove the old (`SIGHUP` reloads).
+rotate: add the new key, re-sign, then remove the old (`SIGHUP` reloads). Without
+`--signers` a node is pinned to its startup grant's signer: it renews against that
+signer fine, but following a signer rotation needs `--signers @file`, reloaded in the
+same `SIGHUP`.
 
 A peer is admitted only if its grant verifies against the trusted key, is bound to
 its WireGuard key, and is unexpired. Grants are re-checked continuously, so expiry or
