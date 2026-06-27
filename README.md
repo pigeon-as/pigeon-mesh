@@ -53,10 +53,11 @@ rotate: add the new key, re-sign, then remove the old (`SIGHUP` reloads).
 
 A peer is admitted only if its grant verifies against the trusted key, is bound to
 its WireGuard key, and is unexpired. Grants are re-checked continuously, so expiry or
-rotation drops admitted peers too. A node checks its own grant at startup and won't
-run on a bad one. If it later expires, it drops its own name from DNS; signature-checking
-peers expire its grant and tear down its tunnels within seconds, so it falls out of the
-mesh until restarted with a fresh grant.
+rotation drops admitted peers too. A node checks its own grant at startup and won't run
+on a bad one. Renew before it expires by overwriting the `--signature` file and sending
+`SIGHUP`: the node re-advertises the new grant over gossip with no restart and no tunnel
+drop (the WireGuard key is unchanged). A grant that does lapse drops the node from DNS,
+and signature-checking peers tear down its tunnels within seconds.
 
 ## Names
 

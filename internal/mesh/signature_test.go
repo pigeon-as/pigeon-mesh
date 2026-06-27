@@ -25,7 +25,7 @@ func mkSig(t *testing.T) (ed25519.PrivateKey, ed25519.PublicKey, []byte) {
 func TestSelfReject_MalformedSignatureNotExpired(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
 	// A non-parseable signature has signature.NotAfter()==0, which must NOT be read as expiry.
-	must.NoError(t, selfSignatureError(Peer{Signature: []byte{0, 1, 2}}, now), must.Sprint("garbage signature is not treated as expired"))
+	must.NoError(t, selfSignatureError([]byte{0, 1, 2}, now), must.Sprint("garbage signature is not treated as expired"))
 }
 
 func TestSelfReject(t *testing.T) {
@@ -37,9 +37,9 @@ func TestSelfReject(t *testing.T) {
 		return blob
 	}
 
-	must.ErrorIs(t, selfSignatureError(Peer{Signature: mk(now.Add(-time.Minute).Unix())}, now), errSignatureExpired, must.Sprint("an expired self grant is surfaced"))
-	must.NoError(t, selfSignatureError(Peer{Signature: mk(now.Add(time.Hour).Unix())}, now), must.Sprint("a valid self grant is not flagged"))
-	must.NoError(t, selfSignatureError(Peer{}, now), must.Sprint("no signature: nothing to flag"))
+	must.ErrorIs(t, selfSignatureError(mk(now.Add(-time.Minute).Unix()), now), errSignatureExpired, must.Sprint("an expired self grant is surfaced"))
+	must.NoError(t, selfSignatureError(mk(now.Add(time.Hour).Unix()), now), must.Sprint("a valid self grant is not flagged"))
+	must.NoError(t, selfSignatureError(nil, now), must.Sprint("no signature: nothing to flag"))
 }
 
 func TestReloadSignersFromFile(t *testing.T) {
@@ -81,4 +81,41 @@ func TestReloadSignersFromFile(t *testing.T) {
 	must.Error(t, err)
 	must.EqOp(t, prev, m.signers.Load(), must.Sprint("a failed signer reload does not swap the signer set"))
 	must.NoError(t, m.members[testKey].admitErr, must.Sprint("the member stays admitted under the retained signer"))
+}
+
+func TestApplySelfGrant(t *testing.T) {
+	now := time.Now()
+	priv, pub, sub := mkSig(t)
+	derived, err := DeriveAddr(testKey, testPrefix)
+	must.NoError(t, err)
+	self := Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{HostRoute(derived).String()}}
+	m := newTestMesh()
+	m.cfg = Config{Self: self}
+	storeConfig(m, []ed25519.PublicKey{pub}, nil)
+	old, err := signature.Sign(priv, sub, now.Add(-time.Hour).Unix(), now.Add(time.Minute).Unix())
+	must.NoError(t, err)
+	m.selfGrant.Store(&old)
+	m.selfExpired.Store(true)
+
+	// a valid renewal swaps in the grant, re-encodes the advertisement, and clears the expiry latch
+	renewed, err := signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix())
+	must.NoError(t, err)
+	must.NoError(t, m.applySelfGrant(renewed))
+	must.Eq(t, renewed, *m.selfGrant.Load(), must.Sprint("the renewed grant is now the live one"))
+	must.False(t, m.selfExpired.Load(), must.Sprint("a valid renewal clears the expiry latch"))
+	var adv Peer
+	must.NoError(t, decodeMeta(*m.meta.Load(), &adv))
+	must.Eq(t, renewed, adv.Signature, must.Sprint("the advertisement carries the renewed grant"))
+
+	// an expired grant is rejected and the running grant is kept
+	expired, err := signature.Sign(priv, sub, now.Add(-time.Hour).Unix(), now.Add(-time.Minute).Unix())
+	must.NoError(t, err)
+	must.Error(t, m.applySelfGrant(expired), must.Sprint("an expired grant is rejected"))
+	must.Eq(t, renewed, *m.selfGrant.Load(), must.Sprint("a rejected grant leaves the running one in place"))
+
+	// a grant from an untrusted signer is rejected (Verify also pins it to our own key)
+	otherPriv, _, _ := mkSig(t)
+	rogue, err := signature.Sign(otherPriv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix())
+	must.NoError(t, err)
+	must.Error(t, m.applySelfGrant(rogue), must.Sprint("a grant from an untrusted signer is rejected"))
 }

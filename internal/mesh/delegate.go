@@ -16,7 +16,7 @@ var (
 	_ memberlist.ConflictDelegate = (*delegate)(nil)
 )
 
-func (d *delegate) NodeMeta(int) []byte { return d.mesh.meta }
+func (d *delegate) NodeMeta(int) []byte { return *d.mesh.meta.Load() }
 
 func (*delegate) NotifyMsg([]byte) {}
 

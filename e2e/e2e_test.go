@@ -753,3 +753,82 @@ func TestMesh_SelfSignatureExpiryHaltsDNS(t *testing.T) {
 		return rejected && silent
 	})
 }
+
+// TestMesh_SelfGrantRenewal is the inverse of the expiry test: a node on a short grant that is
+// re-signed and SIGHUP'd before expiry must stay healthy (admitted + serving its own DNS) past the
+// point a non-renewed node would have halted -- hitless, no restart.
+func TestMesh_SelfGrantRenewal(t *testing.T) {
+	const (
+		iface  = "wg-renew"
+		port   = 51896
+		gossip = 7958
+		zone   = "mesh.internal"
+		prefix = "fdcc::/16"
+	)
+	exec.Command("ip", "link", "del", iface).Run()
+	t.Cleanup(func() { exec.Command("ip", "link", "del", iface).Run() })
+
+	priv, pub := genKeypair(t)
+	overlay, err := mesh.DeriveAddr(pub, netip.MustParsePrefix(prefix))
+	must.NoError(t, err)
+	keyFile := writeFile(t, priv+"\n")
+	run(t, "ip", "link", "add", iface, "type", "wireguard")
+	run(t, "wg", "set", iface, "private-key", keyFile, "listen-port", fmt.Sprint(port))
+	run(t, "ip", "link", "set", iface, "up")
+
+	signerPub, signerPriv, err := ed25519.GenerateKey(nil)
+	must.NoError(t, err)
+	sub, err := base64.StdEncoding.DecodeString(pub)
+	must.NoError(t, err)
+	grant := func(ttl time.Duration) string {
+		blob, err := signature.Sign(signerPriv, sub, time.Now().Add(-time.Minute).Unix(), time.Now().Add(ttl).Unix())
+		must.NoError(t, err)
+		return base64.StdEncoding.EncodeToString(blob)
+	}
+	// short-lived self grant: expires in ~15s; the file is rewritten on renewal.
+	sigFile := writeFile(t, grant(15*time.Second))
+
+	sock := filepath.Join(t.TempDir(), "a.sock")
+	cmd := exec.Command(meshBin,
+		"--interface", iface,
+		"--endpoint", fmt.Sprintf("[%s]:%d", overlay, port),
+		"--prefix", prefix,
+		"--gossip-port", fmt.Sprint(gossip),
+		"--dns", zone,
+		"--tag", "name=alpha",
+		"--signers", base64.StdEncoding.EncodeToString(signerPub),
+		"--signature", sigFile,
+		"--socket", sock,
+	)
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	must.NoError(t, cmd.Start())
+	t.Cleanup(func() { stop(cmd) })
+
+	server := net.JoinHostPort(overlay.String(), "53")
+	servesSelf := func() bool {
+		c := &dns.Client{Timeout: 2 * time.Second}
+		msg := new(dns.Msg)
+		msg.SetQuestion(dns.Fqdn("alpha."+zone), dns.TypeAAAA)
+		resp, _, _ := c.Exchange(msg, server)
+		if resp == nil || len(resp.Answer) == 0 {
+			return false
+		}
+		aaaa, ok := resp.Answer[0].(*dns.AAAA)
+		return ok && aaaa.AAAA.String() == overlay.String()
+	}
+
+	waitFor(t, "self serves its own name on the short grant", 15*time.Second, servesSelf)
+
+	// renew well before expiry: overwrite the grant file with a long-lived one and SIGHUP.
+	must.NoError(t, os.WriteFile(sigFile, []byte(grant(time.Hour)), 0o600))
+	must.NoError(t, cmd.Process.Signal(syscall.SIGHUP))
+
+	// Past the original 15s expiry and at least one maintain sweep, the renewed node never flips to
+	// rejected (this is exactly when the expiry test halts) and still serves its own name.
+	deadline := time.Now().Add(35 * time.Second)
+	for time.Now().Before(deadline) {
+		must.EqOp(t, "", decodeStatus(t, sock).Rejected[pub], must.Sprint("a renewed grant never flips self to expired"))
+		time.Sleep(3 * time.Second)
+	}
+	waitFor(t, "renewed grant keeps self DNS serving past the original expiry", 5*time.Second, servesSelf)
+}

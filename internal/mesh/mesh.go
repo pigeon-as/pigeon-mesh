@@ -30,6 +30,9 @@ const (
 	routeReassertDebounce = 250 * time.Millisecond
 
 	kernelSettle = 30 * time.Second
+
+	// grantUpdateTimeout bounds the wait for a renewed grant to gossip to a peer.
+	grantUpdateTimeout = 5 * time.Second
 )
 
 type Config struct {
@@ -48,10 +51,11 @@ type Config struct {
 }
 
 type Mesh struct {
-	// configuration and the gossip layer (immutable after New)
+	// configuration and the gossip layer (cfg/selfAddr immutable after New)
 	cfg        Config
-	meta       []byte     // our own encoded Peer advertisement
-	selfAddr   netip.Addr // this node's key-derived overlay address, parsed once from cfg.BindAddr
+	meta       atomic.Pointer[[]byte] // encoded self advertisement; re-advertised on grant renewal
+	selfGrant  atomic.Pointer[[]byte] // current operator grant; swapped on hitless renewal
+	selfAddr   netip.Addr             // this node's key-derived overlay address, parsed from cfg.BindAddr
 	memberlist *memberlist.Memberlist
 
 	// membership state, all under mu
@@ -107,7 +111,6 @@ func New(cfg Config) (*Mesh, error) {
 	}
 	m := &Mesh{
 		cfg:               cfg,
-		meta:              meta,
 		selfAddr:          selfAddr,
 		members:           map[string]member{},
 		applied:           map[string]wgPeer{},
@@ -118,6 +121,9 @@ func New(cfg Config) (*Mesh, error) {
 		leave:             make(chan struct{}, 1),
 		warnedKernelPeers: map[string]bool{},
 	}
+	m.meta.Store(&meta)
+	grant := cfg.Self.Signature
+	m.selfGrant.Store(&grant)
 	sigs := cfg.Signers
 	m.signers.Store(&sigs)
 	m.policy.Store(cfg.Policy)
