@@ -1,7 +1,7 @@
 BINARY := pigeon-mesh
 OUTDIR := build
 
-.PHONY: build clean test vet e2e perf
+.PHONY: build clean test vet fmt e2e perf
 
 build:
 	@mkdir -p $(OUTDIR)
@@ -15,6 +15,9 @@ test:
 
 vet:
 	go vet ./...
+
+fmt:
+	gofmt -w cmd internal e2e perf
 
 e2e: build
 	sudo go test -tags=e2e -v -count=1 ./e2e

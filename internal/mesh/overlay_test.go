@@ -60,13 +60,21 @@ func TestValidateOverlayAddr(t *testing.T) {
 	_, err = validateOverlayAddr(testKey, Peer{AllowedIPs: []string{self, "10.0.0.0/24"}}, prefix)
 	must.NoError(t, err, must.Sprint("out-of-prefix extra route is allowed"))
 
-	for _, bad := range [][]string{
-		{"fdcc::dead/128"},
-		{"10.0.0.0/24"},
-		{self, "fdcc:1::/64"},
+	// A route broader than the overlay prefix (a supernet/exit) is deferred to --peer-policy, not
+	// rejected: it claims no specific overlay address, and the on-link /48 route shields the overlay.
+	for _, ok := range [][]string{
+		{self, "::/0"},
 		{self, "fd00::/8"},
 		{self, "fc00::/7"},
-		{self, "::/0"},
+	} {
+		_, err := validateOverlayAddr(testKey, Peer{AllowedIPs: ok}, prefix)
+		must.NoError(t, err, must.Sprintf("supernet route deferred to policy: %v", ok))
+	}
+
+	for _, bad := range [][]string{
+		{"fdcc::dead/128"},    // claims an overlay address that is not ours
+		{"10.0.0.0/24"},       // advertises no identity /128
+		{self, "fdcc:1::/64"}, // claims an overlay subnet
 	} {
 		_, err := validateOverlayAddr(testKey, Peer{AllowedIPs: bad}, prefix)
 		must.Error(t, err, must.Sprintf("AllowedIPs %v", bad))

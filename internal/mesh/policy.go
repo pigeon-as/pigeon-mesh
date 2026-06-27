@@ -27,7 +27,7 @@ type policyPeer struct {
 
 type policyEnv struct {
 	Peer       policyPeer                     `expr:"peer"`
-	Route  string                         `expr:"route"`
+	Route      string                         `expr:"route"`
 	CIDRSubset func(outer, inner string) bool `expr:"cidrSubset"`
 }
 
@@ -62,7 +62,7 @@ func ParsePeerPolicy(s string) (*PeerPolicy, error) {
 func (p *PeerPolicy) accept(peer Peer, route string) (bool, error) {
 	out, err := expr.Run(p.program, policyEnv{
 		Peer:       policyPeer{Key: peer.PublicKey, Endpoint: peer.Endpoint, AllowedIPs: peer.AllowedIPs},
-		Route:  route,
+		Route:      route,
 		CIDRSubset: cidrSubset,
 	})
 	if err != nil {

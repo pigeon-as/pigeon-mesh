@@ -51,6 +51,9 @@ func validateOverlayAddr(pubkey string, p Peer, prefix netip.Prefix) (netip.Addr
 		if !prefix.Overlaps(pfx) {
 			continue
 		}
+		if pfx.Bits() < prefix.Bits() {
+			continue // supernet of the overlay (e.g. ::/0): an aggregate/exit route, not an address claim; defer to --peer-policy
+		}
 		if pfx.Bits() != pfx.Addr().BitLen() || pfx.Addr() != want {
 			return netip.Addr{}, fmt.Errorf("claims overlay route %s but key derives %s", c, want)
 		}
