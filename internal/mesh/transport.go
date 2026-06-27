@@ -11,6 +11,10 @@ import (
 	"github.com/hashicorp/memberlist"
 )
 
+// memberlist Transport wrapping NetTransport. Gossip rides inside the tunnels,
+// so a cold tunnel returns ENOKEY until the first handshake; swallow that error
+// and let memberlist retry rather than mark the peer failed.
+
 type wgTransport struct {
 	*memberlist.NetTransport
 }

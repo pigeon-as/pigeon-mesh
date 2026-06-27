@@ -4,6 +4,7 @@ go 1.25
 
 require (
 	github.com/coreos/go-systemd/v22 v22.7.0
+	github.com/expr-lang/expr v1.17.8
 	github.com/fxamacker/cbor/v2 v2.9.2
 	github.com/godbus/dbus/v5 v5.1.0
 	github.com/hashicorp/go-msgpack/v2 v2.1.5

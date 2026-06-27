@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"maps"
 	"net"
 	"net/netip"
 	"slices"
@@ -14,6 +13,8 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
+// Peer is the gossip wire format: what a node broadcasts about itself, carried as node
+// metadata. PublicKey is identity and is not encoded; it is the node name, filled in on decode.
 type Peer struct {
 	PublicKey           string   `codec:"-"`
 	Endpoint            string   `codec:"ep"`
@@ -58,44 +59,49 @@ func decodePeer(name string, meta []byte) (Peer, error) {
 	return p, nil
 }
 
-func (p Peer) toWG() (wgtypes.PeerConfig, error) {
-	key, err := wgtypes.ParseKey(p.PublicKey)
+// wgPeer is the kernel face of a peer: the WireGuard config we install for it.
+type wgPeer struct {
+	key       string
+	endpoint  string
+	routes    []string // the AllowedIPs we install
+	keepalive int
+}
+
+func (w wgPeer) toWG() (wgtypes.PeerConfig, error) {
+	key, err := wgtypes.ParseKey(w.key)
 	if err != nil {
 		return wgtypes.PeerConfig{}, fmt.Errorf("public_key: %w", err)
 	}
-	ap, err := netip.ParseAddrPort(p.Endpoint)
+	ap, err := netip.ParseAddrPort(w.endpoint)
 	if err != nil {
-		return wgtypes.PeerConfig{}, fmt.Errorf("endpoint %q: %w", p.Endpoint, err)
+		return wgtypes.PeerConfig{}, fmt.Errorf("endpoint %q: %w", w.endpoint, err)
 	}
 	if ap.Port() == 0 {
-		return wgtypes.PeerConfig{}, fmt.Errorf("endpoint %q: port 0 invalid", p.Endpoint)
+		return wgtypes.PeerConfig{}, fmt.Errorf("endpoint %q: port 0 invalid", w.endpoint)
 	}
-	if len(p.AllowedIPs) == 0 {
+	if len(w.routes) == 0 {
 		return wgtypes.PeerConfig{}, errors.New("allowed_ips required")
 	}
-	nets := make([]net.IPNet, 0, len(p.AllowedIPs))
-	for _, c := range p.AllowedIPs {
+	nets := make([]net.IPNet, 0, len(w.routes))
+	for _, c := range w.routes {
 		pfx, err := netip.ParsePrefix(c)
 		if err != nil {
 			return wgtypes.PeerConfig{}, fmt.Errorf("allowed_ip %q: %w", c, err)
 		}
 		nets = append(nets, net.IPNet{IP: pfx.Addr().AsSlice(), Mask: net.CIDRMask(pfx.Bits(), pfx.Addr().BitLen())})
 	}
-	cfg := wgtypes.PeerConfig{
-		PublicKey:         key,
-		Endpoint:          net.UDPAddrFromAddrPort(ap),
-		ReplaceAllowedIPs: true,
-		AllowedIPs:        nets,
-	}
-	d := time.Duration(p.PersistentKeepalive) * time.Second
-	cfg.PersistentKeepaliveInterval = &d
-	return cfg, nil
+	d := time.Duration(w.keepalive) * time.Second
+	return wgtypes.PeerConfig{
+		PublicKey:                   key,
+		Endpoint:                    net.UDPAddrFromAddrPort(ap),
+		ReplaceAllowedIPs:           true,
+		AllowedIPs:                  nets,
+		PersistentKeepaliveInterval: &d,
+	}, nil
 }
 
-func (p Peer) equal(o Peer) bool {
-	return p.PublicKey == o.PublicKey &&
-		p.Endpoint == o.Endpoint &&
-		p.PersistentKeepalive == o.PersistentKeepalive &&
-		slices.Equal(p.AllowedIPs, o.AllowedIPs) &&
-		maps.Equal(p.Tags, o.Tags)
+// equal lets reconcile skip an unchanged peer.
+func (w wgPeer) equal(o wgPeer) bool {
+	return w.key == o.key && w.endpoint == o.endpoint && w.keepalive == o.keepalive &&
+		slices.Equal(w.routes, o.routes)
 }

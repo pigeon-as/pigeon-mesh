@@ -113,9 +113,16 @@ func printStatus(st mesh.Status) {
 	}
 
 	if len(st.RefusedRoutes) > 0 {
-		fmt.Println("\nrefused routes (outside --accept-routes, not installed):")
+		fmt.Println("\nrefused routes (rejected by --peer-policy, not installed):")
 		for _, k := range slices.Sorted(maps.Keys(st.RefusedRoutes)) {
 			fmt.Printf("  %s  %s\n", k, strings.Join(st.RefusedRoutes[k], ", "))
+		}
+	}
+
+	if len(st.StaleKernelPeers) > 0 {
+		fmt.Println("\nstale kernel peers (never gossiped since join; remove from the WireGuard config if decommissioned):")
+		for _, k := range st.StaleKernelPeers {
+			fmt.Printf("  %s\n", k)
 		}
 	}
 

@@ -1,11 +1,15 @@
+//go:build linux
+
 package mesh
 
 import (
 	"crypto/ed25519"
 	"encoding/base64"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/pigeon-as/pigeon-mesh/internal/signature"
 	"github.com/shoenig/test/must"
 )
 
@@ -18,87 +22,63 @@ func mkSig(t *testing.T) (ed25519.PrivateKey, ed25519.PublicKey, []byte) {
 	return priv, pub, sub
 }
 
-func mint(t *testing.T, priv ed25519.PrivateKey, c sigClaims) signedSig {
-	t.Helper()
-	blob, err := signClaims(priv, c)
-	must.NoError(t, err)
-	s, err := parseSignedSig(blob)
-	must.NoError(t, err)
-	return s
-}
-
-func TestSignature_RoundTrip(t *testing.T) {
-	priv, pub, sub := mkSig(t)
-	c := sigClaims{
-		Sub:       sub,
-		NotBefore: time.Now().Add(-time.Minute).Unix(),
-		NotAfter:  time.Now().Add(time.Hour).Unix(),
-	}
-	s := mint(t, priv, c)
-	must.NoError(t, s.verify([]ed25519.PublicKey{pub}, testKey, time.Now()))
-}
-
-func TestSignature_NoExpiry(t *testing.T) {
-	priv, pub, sub := mkSig(t)
-	s := mint(t, priv, sigClaims{Sub: sub, NotBefore: time.Now().Add(-time.Minute).Unix()})
-	must.NoError(t, s.verify([]ed25519.PublicKey{pub}, testKey, time.Now()))
-	must.NoError(t, s.verify([]ed25519.PublicKey{pub}, testKey, time.Now().Add(100*365*24*time.Hour)))
-}
-
-func TestSignature_Rejections(t *testing.T) {
-	priv, pub, sub := mkSig(t)
-	valid := sigClaims{
-		Sub:       sub,
-		NotBefore: time.Now().Add(-time.Minute).Unix(),
-		NotAfter:  time.Now().Add(time.Hour).Unix(),
-	}
-
-	otherPub, _, err := ed25519.GenerateKey(nil)
-	must.NoError(t, err)
-	must.ErrorContains(t,
-		mint(t, priv, valid).verify([]ed25519.PublicKey{otherPub}, testKey, time.Now()),
-		"unknown signer")
-
-	tampered := mint(t, priv, valid)
-	tampered.Sig[0] ^= 0xff
-	must.ErrorContains(t,
-		tampered.verify([]ed25519.PublicKey{pub}, testKey, time.Now()),
-		"bad signature")
-
-	expired := valid
-	expired.NotAfter = time.Now().Add(-time.Second).Unix()
-	must.ErrorContains(t, mint(t, priv, expired).verify([]ed25519.PublicKey{pub}, testKey, time.Now()), "expired")
-
-	future := valid
-	future.NotBefore = time.Now().Add(time.Hour).Unix()
-	must.ErrorContains(t, mint(t, priv, future).verify([]ed25519.PublicKey{pub}, testKey, time.Now()), "not yet valid")
-
-	otherKey := base64.StdEncoding.EncodeToString(otherPub)
-	must.ErrorContains(t,
-		mint(t, priv, valid).verify([]ed25519.PublicKey{pub}, otherKey, time.Now()),
-		"not for this node key")
-
-	wrong := valid
-	wrong.Ctx = "other-context"
-	wrong.KeyID = pub
-	body, err := sigEnc.Marshal(wrong)
-	must.NoError(t, err)
-	ws := signedSig{Claims: wrong, Sig: ed25519.Sign(priv, body)}
-	must.ErrorContains(t, ws.verify([]ed25519.PublicKey{pub}, testKey, time.Now()), "wrong signature domain")
+func TestSelfReject_MalformedSignatureNotExpired(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	// A non-parseable signature has signature.NotAfter()==0, which must NOT be read as expiry.
+	must.NoError(t, selfSignatureError(Peer{Signature: []byte{0, 1, 2}}, now), must.Sprint("garbage signature is not treated as expired"))
 }
 
 func TestSelfReject(t *testing.T) {
-	priv, pub, sub := mkSig(t)
-	signers := []ed25519.PublicKey{pub}
+	priv, _, sub := mkSig(t)
 	now := time.Unix(1_000_000, 0)
 	mk := func(notAfter int64) []byte {
-		blob, err := signClaims(priv, sigClaims{Sub: sub, NotBefore: now.Add(-time.Hour).Unix(), NotAfter: notAfter})
+		blob, err := signature.Sign(priv, sub, now.Add(-time.Hour).Unix(), notAfter)
 		must.NoError(t, err)
 		return blob
 	}
 
-	must.EqOp(t, "signature expired", selfReject(Peer{Signature: mk(now.Add(-time.Minute).Unix())}, signers, now), must.Sprint("an expired self grant is surfaced"))
-	must.EqOp(t, "", selfReject(Peer{Signature: mk(now.Add(time.Hour).Unix())}, signers, now), must.Sprint("a valid self grant is not flagged"))
-	must.EqOp(t, "", selfReject(Peer{Signature: mk(now.Add(-time.Minute).Unix())}, nil, now), must.Sprint("no signers: nothing to enforce"))
-	must.EqOp(t, "", selfReject(Peer{}, signers, now), must.Sprint("no signature: nothing to flag"))
+	must.ErrorIs(t, selfSignatureError(Peer{Signature: mk(now.Add(-time.Minute).Unix())}, now), errSignatureExpired, must.Sprint("an expired self grant is surfaced"))
+	must.NoError(t, selfSignatureError(Peer{Signature: mk(now.Add(time.Hour).Unix())}, now), must.Sprint("a valid self grant is not flagged"))
+	must.NoError(t, selfSignatureError(Peer{}, now), must.Sprint("no signature: nothing to flag"))
+}
+
+func TestReloadSignersFromFile(t *testing.T) {
+	priv, pub, sub := mkSig(t)
+	blob, err := signature.Sign(priv, sub, time.Now().Add(-time.Hour).Unix(), time.Now().Add(time.Hour).Unix())
+	must.NoError(t, err)
+	otherPub, _, err := ed25519.GenerateKey(nil)
+	must.NoError(t, err)
+	derived, err := DeriveAddr(testKey, testPrefix)
+	must.NoError(t, err)
+	ownRoute := HostRoute(derived).String()
+
+	m := newTestMesh()
+	m.cfg = Config{Prefix: testPrefix}
+	storeConfig(m, []ed25519.PublicKey{otherPub}, nil)
+	m.members[testKey] = member{
+		peer:   Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute}, Signature: blob},
+		wgPeer: wgPeer{key: testKey, endpoint: "203.0.113.1:51820", routes: []string{ownRoute}},
+		meta:   []byte("m"),
+	}
+
+	// under the wrong signer the signed member is rejected
+	m.reevaluate(time.Now())
+	must.StrContains(t, errText(m.members[testKey].admitErr), "unknown signer", must.Sprint("a member signed by an untrusted key is rejected"))
+	must.EqOp(t, "", m.members[testKey].wgPeer.key, must.Sprint("a rejected member installs no kernel config"))
+	must.True(t, reconcileTriggered(m.reconcileCh))
+
+	// rotating in the correct signer re-accepts it, and the re-resolution reaches reconcile
+	n, err := m.ReloadSignersFromFile(writeTemp(t, base64.StdEncoding.EncodeToString(pub)))
+	must.NoError(t, err)
+	must.EqOp(t, 1, n)
+	must.NoError(t, m.members[testKey].admitErr, must.Sprint("the member is re-admitted under the rotated-in signer"))
+	must.EqOp(t, testKey, m.members[testKey].wgPeer.key)
+	must.True(t, reconcileTriggered(m.reconcileCh))
+
+	// a failed reload keeps the trusted set (fail-closed)
+	prev := m.signers.Load()
+	_, err = m.ReloadSignersFromFile(filepath.Join(t.TempDir(), "nope"))
+	must.Error(t, err)
+	must.EqOp(t, prev, m.signers.Load(), must.Sprint("a failed signer reload does not swap the signer set"))
+	must.NoError(t, m.members[testKey].admitErr, must.Sprint("the member stays admitted under the retained signer"))
 }

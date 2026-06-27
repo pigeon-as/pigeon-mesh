@@ -7,12 +7,11 @@ import (
 	"encoding/base64"
 	"flag"
 	"fmt"
-	"math/rand/v2"
 	"os"
 	"strings"
 	"time"
 
-	"github.com/pigeon-as/pigeon-mesh/internal/mesh"
+	"github.com/pigeon-as/pigeon-mesh/internal/signature"
 )
 
 func runKeygen(args []string) int {
@@ -70,10 +69,9 @@ func runSign(args []string) int {
 	now := time.Now()
 	var notAfter int64
 	if *ttl > 0 {
-		jitter := time.Duration(rand.Int64N(int64(*ttl/10 + 1)))
-		notAfter = now.Add(*ttl - jitter).Unix()
+		notAfter = now.Add(*ttl).Unix()
 	}
-	blob, err := mesh.Sign(priv, subRaw, now.Add(-*skew).Unix(), notAfter)
+	blob, err := signature.Sign(priv, subRaw, now.Add(-*skew).Unix(), notAfter)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
