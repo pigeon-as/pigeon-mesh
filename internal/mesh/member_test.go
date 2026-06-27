@@ -119,6 +119,29 @@ func TestReevaluate_LooserPolicyRestoresRoute(t *testing.T) {
 	must.True(t, reconcileTriggered(m.reconcileCh))
 }
 
+func TestReevaluate_RejectReasonRefreshes(t *testing.T) {
+	// A peer that stays rejected across a reload but for a DIFFERENT reason must show the fresh
+	// reason (reevaluate re-stores the verdict unconditionally, not only on an admitted<->rejected flip).
+	now := time.Now()
+	priv, pub, sub := mkSig(t)
+	grant, err := signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix())
+	must.NoError(t, err)
+	m := newTestMesh()
+	m.cfg = Config{Prefix: testPrefix}
+	storeConfig(m, []ed25519.PublicKey{pub}, nil)
+	// signed-valid, but advertises a /128 that is not its key derivation, so re-admission rejects it
+	// for the address mismatch -- not the stale "unknown signer" we seed it with.
+	m.members[testKey] = member{
+		peer:     Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{"fdcc::dead/128"}, Signature: grant},
+		admitErr: errors.New("unknown signer"),
+		meta:     []byte("m"),
+	}
+	m.reevaluate(now)
+	got := m.members[testKey]
+	must.False(t, got.admitted(), must.Sprint("still rejected: the advertised address is not its key derivation"))
+	must.StrContains(t, got.admitErr.Error(), "derives", must.Sprint("the reject reason refreshes to the address mismatch"))
+}
+
 func TestReevaluate_NoopWhenConsistent(t *testing.T) {
 	// An already-consistent member must not churn.
 	now := time.Unix(1_000_000, 0)
@@ -204,9 +227,9 @@ func TestExpireGrants(t *testing.T) {
 
 	must.NoError(t, m.members["accepted-noexpiry"].admitErr, must.Sprint("a member with no expiry stays admitted"))
 	must.NoError(t, m.members["accepted-valid"].admitErr, must.Sprint("a member with a future expiry stays admitted"))
-	must.EqOp(t, "signature expired", errText(m.members["accepted-expired"].admitErr))
-	must.EqOp(t, "no signature", errText(m.members["already-rejected"].admitErr))
-	must.EqOp(t, "signature expired", errText(m.members["failed-expired"].admitErr), must.Sprint("expiry is enforced even for offline/failed peers"))
+	must.EqOp(t, "signature expired", m.members["accepted-expired"].admitErr.Error())
+	must.EqOp(t, "no signature", m.members["already-rejected"].admitErr.Error())
+	must.EqOp(t, "signature expired", m.members["failed-expired"].admitErr.Error(), must.Sprint("expiry is enforced even for offline/failed peers"))
 }
 
 func TestCheckSelfExpiry(t *testing.T) {
@@ -289,7 +312,7 @@ func TestAdmit(t *testing.T) {
 			if tc.wantReject == "" {
 				must.NoError(t, r.admitErr)
 			} else {
-				must.StrContains(t, errText(r.admitErr), tc.wantReject)
+				must.StrContains(t, r.admitErr.Error(), tc.wantReject)
 			}
 			must.EqOp(t, tc.wantReject == "", r.wgPeer.key != "", must.Sprint("admitted peers carry a kernel config; rejected ones leave it zero"))
 			must.EqOp(t, tc.wantAddr, r.addr.IsValid())
@@ -354,11 +377,4 @@ func TestStoreDropsKernelPeers(t *testing.T) {
 	m.store("seed", member{})
 	must.MapNotContainsKey(t, m.kernelPeers, "seed", must.Sprint("a peer that gossips leaves the kernel-peers set, so a later reject/leave removes it instead of folding it back"))
 	must.MapContainsKey(t, m.members, "seed", must.Sprint("the gossiped peer is now a member"))
-}
-
-func TestShouldProbe(t *testing.T) {
-	must.False(t, shouldProbe(0, 10, 0.5), must.Sprint("no failures: do not probe"))
-	must.True(t, shouldProbe(10, 0, 0.5), must.Sprint("total outage (alive 0): always probe"))
-	must.True(t, shouldProbe(5, 10, 0.4), must.Sprint("sample below the failed/alive ratio probes"))
-	must.False(t, shouldProbe(5, 10, 0.6), must.Sprint("sample above the ratio skips"))
 }

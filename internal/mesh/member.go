@@ -12,7 +12,6 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/netip"
-	"slices"
 	"strconv"
 	"time"
 
@@ -36,14 +35,6 @@ type member struct {
 }
 
 func (m member) admitted() bool { return m.admitErr == nil }
-
-// errText is err.Error(), or "" for nil.
-func errText(err error) string {
-	if err == nil {
-		return ""
-	}
-	return err.Error()
-}
 
 // admit checks an advertisement's signature, identity, and policy and returns the member to track:
 // admitted with its kernel config, or not admitted with admitErr set. Pure; holds no lock.
@@ -90,7 +81,7 @@ func (m *Mesh) setMember(n *memberlist.Node) {
 	cur.meta, cur.peer = bytes.Clone(n.Meta), p
 	old := m.store(n.Name, cur)
 	if old.admitted() && !cur.admitted() {
-		slog.Warn("peer rejected", "pubkey", n.Name, "reason", errText(cur.admitErr))
+		slog.Warn("peer rejected", "pubkey", n.Name, "reason", cur.admitErr.Error())
 	}
 	if len(old.refusedRoutes) == 0 && len(cur.refusedRoutes) > 0 {
 		slog.Warn("peer routes refused by --peer-policy; not installed", "pubkey", n.Name, "routes", cur.refusedRoutes)
@@ -171,26 +162,29 @@ func (m *Mesh) store(name string, cur member) (old member) {
 	return old
 }
 
-// reevaluate re-resolves every member after a SIGHUP reload and reconciles if anything changed. Must
-// run even when the config is now empty, or removing a policy would never restore refused routes.
+// reevaluate re-resolves every member after a SIGHUP reload, storing the fresh verdict and
+// reconciling when an installed config changed. A rare O(members) pass, so it re-stores
+// unconditionally rather than diffing verdicts. Runs even when the config is now empty, or removing
+// a policy would never restore refused routes.
 func (m *Mesh) reevaluate(now time.Time) {
 	signers, policy := *m.signers.Load(), m.policy.Load()
 	m.mu.Lock()
 	changed := false
 	for name, e := range m.members {
 		nv := admit(e.peer, name, signers, m.cfg.Prefix, policy, now)
-		if errText(e.admitErr) == errText(nv.admitErr) && e.wgPeer.equal(nv.wgPeer) && slices.Equal(e.refusedRoutes, nv.refusedRoutes) {
-			continue
-		}
 		if e.admitted() && !nv.admitted() {
-			slog.Warn("peer rejected", "pubkey", name, "reason", errText(nv.admitErr))
+			slog.Warn("peer rejected", "pubkey", name, "reason", nv.admitErr.Error())
 		}
 		if len(e.refusedRoutes) == 0 && len(nv.refusedRoutes) > 0 {
 			slog.Warn("peer routes refused by --peer-policy; not installed", "pubkey", name, "routes", nv.refusedRoutes)
 		}
+		// A rejected member always has a zero wgPeer, so reject<->admit flips and route changes are
+		// both caught here; reconcile only on an installed-config change.
+		if !e.wgPeer.equal(nv.wgPeer) {
+			changed = true
+		}
 		e.addr, e.wgPeer, e.admitErr, e.refusedRoutes, e.grantExpiry = nv.addr, nv.wgPeer, nv.admitErr, nv.refusedRoutes, nv.grantExpiry
 		m.members[name] = e
-		changed = true
 	}
 	m.mu.Unlock()
 	if changed {
@@ -359,21 +353,18 @@ func (m *Mesh) reconnectOnce() {
 	if len(targets) == 0 {
 		return
 	}
-	if !shouldProbe(failed, alive, rand.Float32()) {
+	// Probe a sampled failed peer with probability ~failed/alive, so a large cluster does not
+	// thundering-herd re-Joins when many peers are down.
+	if alive == 0 {
+		alive = 1
+	}
+	if rand.Float32() > float32(failed)/float32(alive) {
 		return
 	}
 	target := targets[rand.IntN(len(targets))]
 	if _, err := m.memberlist.Join([]string{target}); err != nil {
 		slog.Debug("reconnect", "target", target, "err", err)
 	}
-}
-
-// shouldProbe gates reconnect at ~failed/alive so a large cluster doesn't thundering-herd re-Joins.
-func shouldProbe(failed, alive int, r float32) bool {
-	if alive == 0 {
-		alive = 1
-	}
-	return r <= float32(failed)/float32(alive)
 }
 
 // snapshot copies the member set, contested routes, and key conflicts under one read lock, for status.
