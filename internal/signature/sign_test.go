@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -103,6 +104,68 @@ func TestExpiryBoundary(t *testing.T) {
 	// not-before is exclusive: valid at NotBefore, not-yet-valid strictly before it.
 	must.NoError(t, s.verify(signers, testKey, time.Unix(nb, 0)), must.Sprint("valid exactly at NotBefore"))
 	must.ErrorContains(t, s.verify(signers, testKey, time.Unix(nb-1, 0)), "not yet valid")
+}
+
+func TestSignRoutes(t *testing.T) {
+	priv, pub, sub := newSigner(t)
+	signers := []ed25519.PublicKey{pub}
+	now := time.Now()
+	r1 := netip.MustParsePrefix("10.0.0.0/24")
+	r2 := netip.MustParsePrefix("192.168.0.0/16")
+
+	// unordered + duplicate input; the grant stores them masked, deduped, and bytewise-sorted.
+	blob, err := Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), r2, r1, r1)
+	must.NoError(t, err)
+	g, err := Verify(signers, testKey, blob, now)
+	must.NoError(t, err)
+	must.Eq(t, []netip.Prefix{r1, r2}, g.Routes, must.Sprint("routes are masked, deduped, and sorted"))
+	must.EqOp(t, now.Add(time.Hour).Unix(), g.NotAfter)
+}
+
+func TestSignRoutes_RequireExpiry(t *testing.T) {
+	priv, pub, sub := newSigner(t)
+	signers := []ed25519.PublicKey{pub}
+	nb := time.Now().Add(-time.Minute).Unix()
+
+	_, err := Sign(priv, sub, nb, 0, netip.MustParsePrefix("10.0.0.0/8"))
+	must.ErrorContains(t, err, "expiry", must.Sprint("Sign refuses a no-expiry route grant"))
+
+	// Verify must also reject a hand-minted no-expiry route grant (defense in depth).
+	encRoutes, err := encodeRoutes([]netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")})
+	must.NoError(t, err)
+	blob, err := signClaims(priv, claims{Sub: sub, NotBefore: nb, NotAfter: 0, Routes: encRoutes})
+	must.NoError(t, err)
+	_, err = Verify(signers, testKey, blob, time.Now())
+	must.ErrorContains(t, err, "expiry", must.Sprint("Verify refuses a no-expiry route grant"))
+}
+
+func TestVerifyRoutes_TamperBreaksSignature(t *testing.T) {
+	priv, pub, sub := newSigner(t)
+	signers := []ed25519.PublicKey{pub}
+	now := time.Now()
+	blob, err := Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), netip.MustParsePrefix("10.0.0.0/8"))
+	must.NoError(t, err)
+
+	s, err := parse(blob)
+	must.NoError(t, err)
+	s.Claims.Routes[0][0] ^= 0xff // widen/move the authorized route
+	tampered, err := enc.Marshal(s)
+	must.NoError(t, err)
+	_, err = Verify(signers, testKey, tampered, now)
+	must.ErrorContains(t, err, "bad signature", must.Sprint("tampering with the routes breaks the signature; routes are never returned unverified"))
+}
+
+func TestVerify_RoutelessGrantMigrates(t *testing.T) {
+	// Migration spine: a grant minted with no routes (key 6 omitted, omitempty) keeps verifying under
+	// the new struct and decodes to a Grant with no authorized routes.
+	priv, pub, sub := newSigner(t)
+	signers := []ed25519.PublicKey{pub}
+	now := time.Now()
+	blob, err := Sign(priv, sub, now.Add(-time.Minute).Unix(), 0) // identity-only, no expiry
+	must.NoError(t, err)
+	g, err := Verify(signers, testKey, blob, now)
+	must.NoError(t, err)
+	must.SliceEmpty(t, g.Routes, must.Sprint("a routeless grant verifies with no authorized routes"))
 }
 
 // NotAfter is the exported accessor mesh relies on for expiry; a non-parseable blob must

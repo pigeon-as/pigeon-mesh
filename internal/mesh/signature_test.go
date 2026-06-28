@@ -5,6 +5,7 @@ package mesh
 import (
 	"crypto/ed25519"
 	"encoding/base64"
+	"net/netip"
 	"path/filepath"
 	"testing"
 	"time"
@@ -91,6 +92,7 @@ func TestApplySelfGrant(t *testing.T) {
 	self := Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{HostRoute(derived).String()}}
 	m := newTestMesh()
 	m.cfg = Config{Self: self}
+	m.selfAddr = derived
 	storeConfig(m, []ed25519.PublicKey{pub}, nil)
 	old, err := signature.Sign(priv, sub, now.Add(-time.Hour).Unix(), now.Add(time.Minute).Unix())
 	must.NoError(t, err)
@@ -118,4 +120,25 @@ func TestApplySelfGrant(t *testing.T) {
 	rogue, err := signature.Sign(otherPriv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix())
 	must.NoError(t, err)
 	must.Error(t, m.applySelfGrant(rogue), must.Sprint("a grant from an untrusted signer is rejected"))
+}
+
+func TestApplySelfGrant_RejectsUnauthorizedSelfRoute(t *testing.T) {
+	now := time.Now()
+	priv, pub, sub := mkSig(t)
+	derived, err := DeriveAddr(testKey, testPrefix)
+	must.NoError(t, err)
+	// self advertises a transit route, so its own grant must authorize it.
+	self := Peer{PublicKey: testKey, AllowedIPs: []string{HostRoute(derived).String(), "10.0.0.0/8"}}
+	m := newTestMesh()
+	m.cfg = Config{Self: self}
+	m.selfAddr = derived
+	storeConfig(m, []ed25519.PublicKey{pub}, nil)
+
+	routeless, err := signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix())
+	must.NoError(t, err)
+	must.ErrorContains(t, m.applySelfGrant(routeless), "does not authorize", must.Sprint("a node advertising a route its grant lacks fails fast"))
+
+	scoped, err := signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), netip.MustParsePrefix("10.0.0.0/8"))
+	must.NoError(t, err)
+	must.NoError(t, m.applySelfGrant(scoped), must.Sprint("a correctly-scoped grant boots"))
 }

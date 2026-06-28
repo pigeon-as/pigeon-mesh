@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"io"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,10 +54,12 @@ func TestRunSign_TTLExactNoJitter(t *testing.T) {
 	signers := []ed25519.PublicKey{signerPub}
 	// Valid just before now+ttl and expired just after => notAfter == now+ttl exactly,
 	// with no random jitter added (a jittered grant would push expiry minutes out).
-	must.NoError(t, signature.Verify(signers, node, raw, before.Add(time.Hour-time.Second)))
-	must.Error(t, signature.Verify(signers, node, raw, before.Add(time.Hour+2*time.Second)))
-	// And it is a valid grant for this node right now.
-	must.NoError(t, signature.Verify(signers, node, raw, before.Add(time.Minute)))
+	_, err = signature.Verify(signers, node, raw, before.Add(time.Hour-time.Second))
+	must.NoError(t, err, must.Sprint("valid just before now+ttl"))
+	_, err = signature.Verify(signers, node, raw, before.Add(time.Hour+2*time.Second))
+	must.Error(t, err, must.Sprint("expired just after now+ttl => notAfter is exact, no jitter"))
+	_, err = signature.Verify(signers, node, raw, before.Add(time.Minute))
+	must.NoError(t, err, must.Sprint("valid for this node now"))
 }
 
 func TestRunSign_NoExpiry(t *testing.T) {
@@ -66,7 +69,23 @@ func TestRunSign_NoExpiry(t *testing.T) {
 	})
 	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(out))
 	must.NoError(t, err)
-	must.NoError(t, signature.Verify([]ed25519.PublicKey{signerPub}, node, raw, time.Now().Add(100*365*24*time.Hour)))
+	_, err = signature.Verify([]ed25519.PublicKey{signerPub}, node, raw, time.Now().Add(100*365*24*time.Hour))
+	must.NoError(t, err)
+}
+
+func TestRunSign_Routes(t *testing.T) {
+	keyPath, signerPub, node := writeSignerKey(t)
+	out := captureStdout(t, func() {
+		must.EqOp(t, 0, runSign([]string{"--key", keyPath, "--ttl", "1h", "--route", "10.0.0.0/8", "--route", "192.168.0.0/16", node}))
+	})
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(out))
+	must.NoError(t, err)
+	g, err := signature.Verify([]ed25519.PublicKey{signerPub}, node, raw, time.Now())
+	must.NoError(t, err)
+	must.Eq(t, []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8"), netip.MustParsePrefix("192.168.0.0/16")}, g.Routes, must.Sprint("the grant carries the authorized routes"))
+
+	must.EqOp(t, 2, runSign([]string{"--key", keyPath, "--route", "10.0.0.0/8", node}), must.Sprint("a route grant without --ttl is refused"))
+	must.EqOp(t, 1, runSign([]string{"--key", keyPath, "--ttl", "1h", "--route", "not-a-cidr", node}), must.Sprint("a malformed --route exits 1"))
 }
 
 func TestRunSign_Rejects(t *testing.T) {

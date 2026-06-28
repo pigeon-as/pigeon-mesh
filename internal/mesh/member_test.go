@@ -64,19 +64,19 @@ var testPrefix = netip.MustParsePrefix("fdcc::/48")
 // fresh operator key, testKey's derived overlay /128 under testPrefix, and a grant for testKey
 // valid in a one-hour window around now. The collapse made --signers and --prefix mandatory, so
 // every resolve/setMember test peer must be signed and advertise its key-derived address.
-func signedFixture(t *testing.T, now time.Time) (signers []ed25519.PublicKey, ownRoute string, grant []byte) {
+func signedFixture(t *testing.T, now time.Time, routes ...netip.Prefix) (signers []ed25519.PublicKey, ownRoute string, grant []byte) {
 	t.Helper()
 	priv, pub, sub := mkSig(t)
 	derived, err := DeriveAddr(testKey, testPrefix)
 	must.NoError(t, err)
-	grant, err = signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix())
+	grant, err = signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), routes...)
 	must.NoError(t, err)
 	return []ed25519.PublicKey{pub}, HostRoute(derived).String(), grant
 }
 
 func TestReevaluate_StricterPolicyEvictsRoute(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
-	signers, ownRoute, grant := signedFixture(t, now)
+	signers, ownRoute, grant := signedFixture(t, now, netip.MustParsePrefix("10.0.0.0/8"))
 	pol, err := ParsePeerPolicy(`route == peer.address`) // reachability-only: keep the /128, drop extras
 	must.NoError(t, err)
 	m := newTestMesh()
@@ -98,7 +98,7 @@ func TestReevaluate_BlockPeerEvictsAll(t *testing.T) {
 	// Blocking a whole peer by key refuses every route, including its identity /128, but leaves
 	// membership intact (the peer stays admitted in gossip).
 	now := time.Unix(1_000_000, 0)
-	signers, ownRoute, grant := signedFixture(t, now)
+	signers, ownRoute, grant := signedFixture(t, now, netip.MustParsePrefix("10.0.0.0/8"))
 	pol, err := ParsePeerPolicy(`peer.key != "` + testKey + `"`)
 	must.NoError(t, err)
 	m := newTestMesh()
@@ -119,7 +119,7 @@ func TestReevaluate_BlockPeerEvictsAll(t *testing.T) {
 func TestReevaluate_LooserPolicyRestoresRoute(t *testing.T) {
 	// Removing the policy (reload to empty => nil) must restore a route it had refused.
 	now := time.Unix(1_000_000, 0)
-	signers, ownRoute, grant := signedFixture(t, now)
+	signers, ownRoute, grant := signedFixture(t, now, netip.MustParsePrefix("10.0.0.0/8"))
 	m := newTestMesh()
 	m.cfg = Config{Prefix: testPrefix}
 	storeConfig(m, signers, nil) // policy removed -> nil
@@ -340,7 +340,7 @@ func TestAdmit(t *testing.T) {
 
 func TestAdmit_PolicyFiltersRoutes(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
-	signers, ownRoute, grant := signedFixture(t, now)
+	signers, ownRoute, grant := signedFixture(t, now, netip.MustParsePrefix("10.0.0.0/8"), netip.MustParsePrefix("192.168.0.0/16"))
 	pol, err := ParsePeerPolicy(`route == peer.address || cidrSubset("10.0.0.0/8", route)`)
 	must.NoError(t, err)
 	p := Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute, "10.1.0.0/16", "192.168.0.0/16"}, Signature: grant}
@@ -355,6 +355,28 @@ func TestAdmit_PolicyFiltersRoutes(t *testing.T) {
 	r = admit(p, testKey, signers, testPrefix, nil, now)
 	must.Eq(t, p.AllowedIPs, r.wgPeer.routes)
 	must.SliceEmpty(t, r.refusedRoutes)
+}
+
+func TestAdmit_AuthorizesRoutes(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	// grant authorizes only 10.0.0.0/8; the peer advertises its /128, a 10/8 subnet, and 192.168/16.
+	signers, ownRoute, grant := signedFixture(t, now, netip.MustParsePrefix("10.0.0.0/8"))
+	p := Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute, "10.1.0.0/16", "192.168.0.0/16"}, Signature: grant}
+
+	r := admit(p, testKey, signers, testPrefix, nil, now)
+	must.True(t, r.admitted(), must.Sprint("an unauthorized extra route does not reject the peer"))
+	must.Eq(t, []string{ownRoute, "10.1.0.0/16"}, r.wgPeer.routes, must.Sprint("identity /128 and the 10/8 sub-prefix install"))
+	must.Eq(t, []string{"192.168.0.0/16"}, r.unauthorizedRoutes, must.Sprint("a route outside the grant is dropped as unauthorized"))
+}
+
+func TestAdmit_BroadGrantAuthorizesSubprefixes(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	// a 0.0.0.0/0 grant authorizes the default route and any IPv4 sub-prefix by containment.
+	signers, ownRoute, grant := signedFixture(t, now, netip.MustParsePrefix("0.0.0.0/0"))
+	p := Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute, "0.0.0.0/0", "10.0.0.0/8"}, Signature: grant}
+	r := admit(p, testKey, signers, testPrefix, nil, now)
+	must.Eq(t, []string{ownRoute, "0.0.0.0/0", "10.0.0.0/8"}, r.wgPeer.routes, must.Sprint("a default-route grant authorizes the default and any sub-prefix"))
+	must.SliceEmpty(t, r.unauthorizedRoutes)
 }
 
 // TestStoreDropsKernelPeers guards the load-bearing store() -> delete(m.kernelPeers): once a peer gossips

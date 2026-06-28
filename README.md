@@ -79,9 +79,10 @@ zone to it.
   and every node carries an offline operator signature. A node cannot claim another's
   address. A route two members both claim is installed for neither and shown in
   `status`.
-- **Routes:** members may advertise extra routes (an exit `0.0.0.0/0`, a subnet via
-  `--allowed-ips`), and each node chooses which to install with
-  [`--peer-policy`](#peer-policy).
+- **Routes:** a node may advertise extra routes (an exit `0.0.0.0/0`, a subnet via
+  `--allowed-ips`) only if its grant authorizes them (`sign --route <cidr>`, which
+  needs `--ttl`); an unauthorized route is dropped and shown in `status`. Each node
+  then chooses which authorized routes to install with [`--peer-policy`](#peer-policy).
 
 ## Peer policy
 

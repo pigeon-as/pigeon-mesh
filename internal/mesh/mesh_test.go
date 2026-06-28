@@ -4,6 +4,7 @@ package mesh
 
 import (
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"testing"
@@ -79,7 +80,7 @@ func writeTemp(t *testing.T, content string) string {
 
 func TestReloadPolicyFromFile(t *testing.T) {
 	now := time.Now()
-	signers, ownRoute, grant := signedFixture(t, now)
+	signers, ownRoute, grant := signedFixture(t, now, netip.MustParsePrefix("10.0.0.0/8"))
 	m := newTestMesh()
 	m.cfg = Config{Prefix: testPrefix}
 	storeConfig(m, signers, nil)

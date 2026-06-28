@@ -36,14 +36,15 @@ type PeerView struct {
 }
 
 type Status struct {
-	Self             string              `json:"self"`
-	UpdatedAt        string              `json:"updated_at"`
-	Health           int                 `json:"health"`
-	Peers            map[string]PeerView `json:"peers"`
-	Conflicts        map[string][]string `json:"conflicts,omitempty"`
-	Rejected         map[string]string   `json:"rejected,omitempty"`
-	RefusedRoutes    map[string][]string `json:"refused_routes,omitempty"`
-	StaleKernelPeers []string            `json:"stale_kernel_peers,omitempty"`
+	Self               string              `json:"self"`
+	UpdatedAt          string              `json:"updated_at"`
+	Health             int                 `json:"health"`
+	Peers              map[string]PeerView `json:"peers"`
+	Conflicts          map[string][]string `json:"conflicts,omitempty"`
+	Rejected           map[string]string   `json:"rejected,omitempty"`
+	RefusedRoutes      map[string][]string `json:"refused_routes,omitempty"`
+	UnauthorizedRoutes map[string][]string `json:"unauthorized_routes,omitempty"`
+	StaleKernelPeers   []string            `json:"stale_kernel_peers,omitempty"`
 }
 
 // Status from our own tracking; memberlist.Node.State is always Alive.
@@ -163,6 +164,7 @@ func (m *Mesh) status() Status {
 	// Reject/refuse views derived on read from each member's verdict, not stored.
 	rejected := map[string]string{}
 	refused := map[string][]string{}
+	unauthorized := map[string][]string{}
 	for name, e := range members {
 		pv := PeerView{
 			Endpoint:   e.peer.Endpoint,
@@ -175,6 +177,9 @@ func (m *Mesh) status() Status {
 		}
 		if len(e.refusedRoutes) > 0 {
 			refused[name] = e.refusedRoutes
+		}
+		if len(e.unauthorizedRoutes) > 0 {
+			unauthorized[name] = e.unauthorizedRoutes
 		}
 		fillWG(&pv, name)
 		peers[name] = pv
@@ -192,13 +197,14 @@ func (m *Mesh) status() Status {
 	}
 	peers[m.cfg.Self.PublicKey] = selfPV
 	return Status{
-		Self:             m.cfg.Self.PublicKey,
-		UpdatedAt:        nowStamp(),
-		Health:           m.memberlist.GetHealthScore(),
-		Peers:            peers,
-		Conflicts:        contested,
-		Rejected:         rejected,
-		RefusedRoutes:    refused,
-		StaleKernelPeers: m.staleKernelPeers(),
+		Self:               m.cfg.Self.PublicKey,
+		UpdatedAt:          nowStamp(),
+		Health:             m.memberlist.GetHealthScore(),
+		Peers:              peers,
+		Conflicts:          contested,
+		Rejected:           rejected,
+		RefusedRoutes:      refused,
+		UnauthorizedRoutes: unauthorized,
+		StaleKernelPeers:   m.staleKernelPeers(),
 	}
 }

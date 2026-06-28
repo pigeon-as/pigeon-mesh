@@ -187,7 +187,15 @@ func startMesh(t *testing.T, n *node, peers []*node, port int, extraArgs ...stri
 	// --signature is mandatory; the node derives its trust anchor from it (no --signers needed).
 	// Provision a grant from the package signer unless the test manages signing itself.
 	if !slices.Contains(extraArgs, "--signature") {
-		extraArgs = append([]string{"--signature", grantFile(t, n.pub)}, extraArgs...)
+		// Authorize whatever transit routes the daemon advertises (--allowed-ips) in the grant, so a
+		// route node is not rejected by the self-route fail-fast or dropped as unauthorized by peers.
+		var routes []netip.Prefix
+		if i := slices.Index(extraArgs, "--allowed-ips"); i >= 0 && i+1 < len(extraArgs) {
+			for _, c := range strings.Split(extraArgs[i+1], ",") {
+				routes = append(routes, netip.MustParsePrefix(strings.TrimSpace(c)))
+			}
+		}
+		extraArgs = append([]string{"--signature", grantFile(t, n.pub, routes...)}, extraArgs...)
 	}
 	// Prefix mode is the only addressing model: kernel peers carry just an endpoint, and the
 	// daemon's adoptKernelPeers derives and installs each peer's overlay /128.

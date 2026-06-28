@@ -207,8 +207,13 @@ func main() {
 		}
 		cfg.Signers = []ed25519.PublicKey{signer}
 	}
-	if err := signature.Verify(cfg.Signers, self.PublicKey, sig, time.Now()); err != nil {
+	g, err := signature.Verify(cfg.Signers, self.PublicKey, sig, time.Now())
+	if err != nil {
 		slog.Error("this node's own grant is not signed by a trusted signer key", "err", err)
+		os.Exit(1)
+	}
+	if err := mesh.CheckSelfRoutes(self.AllowedIPs, ip, g.Routes); err != nil {
+		slog.Error("re-sign this node's grant with --route for every route it advertises", "err", err)
 		os.Exit(1)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

@@ -409,11 +409,11 @@ func signNode(t *testing.T, signer ed25519.PrivateKey, n *node, ttl time.Duratio
 
 // grantFile signs pub with the package signer and returns a --signature file path. Tests that build
 // the daemon command directly (not via startMesh) use it together with meshSignerArg for --signers.
-func grantFile(t *testing.T, pub string) string {
+func grantFile(t *testing.T, pub string, routes ...netip.Prefix) string {
 	t.Helper()
 	sub, err := base64.StdEncoding.DecodeString(pub)
 	must.NoError(t, err)
-	blob, err := signature.Sign(meshSigner, sub, time.Now().Add(-time.Minute).Unix(), time.Now().Add(time.Hour).Unix())
+	blob, err := signature.Sign(meshSigner, sub, time.Now().Add(-time.Minute).Unix(), time.Now().Add(time.Hour).Unix(), routes...)
 	must.NoError(t, err)
 	return writeFile(t, base64.StdEncoding.EncodeToString(blob))
 }

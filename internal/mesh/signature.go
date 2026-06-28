@@ -18,10 +18,10 @@ import (
 
 var errSignatureExpired = errors.New("signature expired")
 
-// signatureError returns why a peer's grant is invalid, or nil if admitted.
-func signatureError(p Peer, name string, signers []ed25519.PublicKey, now time.Time) error {
+// verifyGrant returns the verified grant for a peer, or the reason it is not admitted.
+func verifyGrant(p Peer, name string, signers []ed25519.PublicKey, now time.Time) (signature.Grant, error) {
 	if len(p.Signature) == 0 {
-		return errors.New("no signature")
+		return signature.Grant{}, errors.New("no signature")
 	}
 	return signature.Verify(signers, name, p.Signature, now)
 }
@@ -49,8 +49,12 @@ func (m *Mesh) ReloadSignersFromFile(path string) (int, error) {
 // if it is valid and unexpired. It does not re-advertise (the caller does). Identity is pinned:
 // Verify binds the grant to our own public key, from which the overlay address derives.
 func (m *Mesh) applySelfGrant(grant []byte) error {
-	if err := signature.Verify(*m.signers.Load(), m.cfg.Self.PublicKey, grant, time.Now()); err != nil {
+	g, err := signature.Verify(*m.signers.Load(), m.cfg.Self.PublicKey, grant, time.Now())
+	if err != nil {
 		return fmt.Errorf("grant rejected: %w", err)
+	}
+	if err := CheckSelfRoutes(m.cfg.Self.AllowedIPs, m.selfAddr, g.Routes); err != nil {
+		return fmt.Errorf("self grant: %w; re-sign with --route", err)
 	}
 	self := m.cfg.Self
 	self.Signature = grant
