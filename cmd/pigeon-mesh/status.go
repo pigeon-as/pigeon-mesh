@@ -125,13 +125,6 @@ func printStatus(st mesh.Status) {
 			fmt.Printf("  %s\n", k)
 		}
 	}
-
-	if len(st.KeyConflicts) > 0 {
-		fmt.Println("\nduplicate WireGuard keys (regenerate on the offending host):")
-		for _, k := range slices.Sorted(maps.Keys(st.KeyConflicts)) {
-			fmt.Printf("  %s  %s\n", k, st.KeyConflicts[k])
-		}
-	}
 }
 
 func formatTags(t mesh.Tags) string {

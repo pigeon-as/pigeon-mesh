@@ -76,18 +76,18 @@ func (p *PeerPolicy) accept(peer Peer, route, address string) (bool, error) {
 	return b, nil
 }
 
-// policyFilter splits advertised AllowedIPs into kept and refused. The predicate decides every
-// route, including the peer's own identity /128 (no exemption); a nil policy accepts everything.
-// identity is the peer's key-derived overlay address, exposed to the predicate as peer.address.
-func policyFilter(peer Peer, identity netip.Addr, policy *PeerPolicy) (kept, refused []string) {
+// policyFilter splits routes (the grant-authorized advertisements) into kept and refused. The predicate
+// decides every route, including the peer's own identity /128 (no exemption); a nil policy accepts
+// everything. identity is the peer's key-derived overlay address, exposed to the predicate as peer.address.
+func policyFilter(peer Peer, routes []string, identity netip.Addr, policy *PeerPolicy) (kept, refused []string) {
 	if policy == nil {
-		return peer.AllowedIPs, nil
+		return routes, nil
 	}
 	var address string
 	if identity.IsValid() {
 		address = HostRoute(identity).String()
 	}
-	for _, cidr := range peer.AllowedIPs {
+	for _, cidr := range routes {
 		ok, err := policy.accept(peer, cidr, address)
 		if err != nil {
 			slog.Debug("peer-policy eval", "peer", peer.PublicKey, "route", cidr, "err", err)

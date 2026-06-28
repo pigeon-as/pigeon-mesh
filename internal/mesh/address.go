@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/netip"
 	"slices"
-	"strconv"
 	"strings"
 )
 
@@ -32,11 +31,6 @@ func ParseAllowedIPs(s string) ([]string, error) {
 
 func HostRoute(a netip.Addr) netip.Prefix {
 	return netip.PrefixFrom(a, a.BitLen())
-}
-
-// addrPort formats host:port (e.g. a memberlist node's address, for conflict messages).
-func addrPort(ip net.IP, port uint16) string {
-	return net.JoinHostPort(ip.String(), strconv.Itoa(int(port)))
 }
 
 // Single host route (/32 or /128) among cidrs: a peer's identity address.

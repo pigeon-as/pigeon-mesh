@@ -16,22 +16,22 @@ import (
 	"time"
 
 	"github.com/hashicorp/memberlist"
-	"github.com/pigeon-as/pigeon-mesh/internal/signature"
 )
 
 // member.go is the membership engine: the gossip-derived member set and everything that mutates it.
 
 // member is the locally-tracked state for one gossip peer.
 type member struct {
-	meta          []byte
-	peer          Peer       // gossip advertisement (wire format)
-	addr          netip.Addr // key-derived overlay address
-	wgPeer        wgPeer     // kernel config to install when admitted
-	admitErr      error      // nil = admitted; else why not installed
-	refusedRoutes []string   // advertised routes --peer-policy refused
-	grantExpiry   int64      // operator-grant expiry, unix seconds (0 = none)
-	failed        bool       // SWIM liveness
-	leaveTime     time.Time  // set when failed; reaped at +ReconnectTimeout
+	meta               []byte
+	peer               Peer       // gossip advertisement (wire format)
+	addr               netip.Addr // key-derived overlay address
+	wgPeer             wgPeer     // kernel config to install when admitted
+	admitErr           error      // nil = admitted; else why not installed
+	refusedRoutes      []string   // advertised routes --peer-policy refused
+	unauthorizedRoutes []string   // advertised routes the grant does not authorize
+	grantExpiry        int64      // operator-grant expiry, unix seconds (0 = none)
+	failed             bool       // SWIM liveness
+	leaveTime          time.Time  // set when failed; reaped at +ReconnectTimeout
 }
 
 func (m member) admitted() bool { return m.admitErr == nil }
@@ -39,20 +39,71 @@ func (m member) admitted() bool { return m.admitErr == nil }
 // admit checks an advertisement's signature, identity, and policy and returns the member to track:
 // admitted with its kernel config, or not admitted with admitErr set. Pure; holds no lock.
 func admit(p Peer, name string, signers []ed25519.PublicKey, prefix netip.Prefix, policy *PeerPolicy, now time.Time) member {
-	if err := signatureError(p, name, signers, now); err != nil {
+	grant, err := verifyGrant(p, name, signers, now)
+	if err != nil {
 		return member{admitErr: err}
 	}
 	addr, err := validateOverlayAddr(name, p, prefix)
 	if err != nil {
 		return member{admitErr: err}
 	}
-	pc := wgPeer{key: name, endpoint: p.Endpoint, routes: p.AllowedIPs, keepalive: p.PersistentKeepalive}
+	// Authorize advertised transit routes against the grant before policy; unauthorized routes are
+	// dropped, but the peer stays admitted for its identity /128 and its authorized routes.
+	authorized, unauthorized := authorizeRoutes(p.AllowedIPs, addr, grant.Routes)
+	pc := wgPeer{key: name, endpoint: p.Endpoint, routes: authorized, keepalive: p.PersistentKeepalive}
 	if _, err := pc.toWG(); err != nil {
 		return member{admitErr: fmt.Errorf("invalid peer config: %w", err)}
 	}
-	kept, refused := policyFilter(p, addr, policy)
-	pc.routes = kept // policy-accepted routes, not the raw advertisement
-	return member{addr: addr, wgPeer: pc, refusedRoutes: refused, grantExpiry: signature.NotAfter(p.Signature)}
+	kept, refused := policyFilter(p, authorized, addr, policy)
+	pc.routes = kept // grant-authorized and policy-accepted routes, not the raw advertisement
+	return member{addr: addr, wgPeer: pc, refusedRoutes: refused, unauthorizedRoutes: unauthorized, grantExpiry: grant.NotAfter}
+}
+
+// authorizeRoutes splits advertised AllowedIPs into those the grant authorizes and those it does not.
+// A peer's key-derived identity /128 is always authorized (self-certified, exempt from grant routes);
+// every other route must be contained in one of the grant's routes. A malformed CIDR is unauthorized.
+func authorizeRoutes(allowedIPs []string, identity netip.Addr, grantRoutes []netip.Prefix) (authorized, unauthorized []string) {
+	var id netip.Prefix
+	if identity.IsValid() {
+		id = HostRoute(identity)
+	}
+	for _, cidr := range allowedIPs {
+		r, err := netip.ParsePrefix(cidr)
+		if err != nil {
+			unauthorized = append(unauthorized, cidr) // malformed: fail closed
+			continue
+		}
+		if id.IsValid() && r == id {
+			authorized = append(authorized, cidr) // identity /128, self-certified
+			continue
+		}
+		if routeAuthorized(r, grantRoutes) {
+			authorized = append(authorized, cidr)
+		} else {
+			unauthorized = append(unauthorized, cidr)
+		}
+	}
+	return authorized, unauthorized
+}
+
+// routeAuthorized reports whether r is contained in some grant route: at least as specific as it and
+// inside it (Nebula unsafe_networks / a subnet of a Tailscale-approved route).
+func routeAuthorized(r netip.Prefix, grantRoutes []netip.Prefix) bool {
+	for _, g := range grantRoutes {
+		if r.Bits() >= g.Bits() && g.Contains(r.Addr()) {
+			return true
+		}
+	}
+	return false
+}
+
+// CheckSelfRoutes returns an error if this node advertises a transit route its own grant does not
+// authorize. Startup and SIGHUP both fail fast on it: with no control plane, there is no later approval.
+func CheckSelfRoutes(allowedIPs []string, identity netip.Addr, grantRoutes []netip.Prefix) error {
+	if _, unauthorized := authorizeRoutes(allowedIPs, identity, grantRoutes); len(unauthorized) > 0 {
+		return fmt.Errorf("advertises routes its grant does not authorize: %v", unauthorized)
+	}
+	return nil
 }
 
 // setMember resolves a gossiped advertisement and stores it. Re-resolves if a SIGHUP swapped
@@ -86,6 +137,9 @@ func (m *Mesh) setMember(n *memberlist.Node) {
 	if len(old.refusedRoutes) == 0 && len(cur.refusedRoutes) > 0 {
 		slog.Warn("peer routes refused by --peer-policy; not installed", "pubkey", n.Name, "routes", cur.refusedRoutes)
 	}
+	if len(old.unauthorizedRoutes) == 0 && len(cur.unauthorizedRoutes) > 0 {
+		slog.Warn("peer advertises routes its grant does not authorize; not installed", "pubkey", n.Name, "routes", cur.unauthorizedRoutes)
+	}
 	m.triggerReconcile()
 }
 
@@ -99,7 +153,6 @@ func (m *Mesh) removeMember(n *memberlist.Node) {
 		m.mu.Lock()
 		_, existed := m.members[n.Name]
 		delete(m.members, n.Name)
-		delete(m.keyConflicts, n.Name)
 		m.mu.Unlock()
 		if existed {
 			m.triggerReconcile()
@@ -114,15 +167,13 @@ func (m *Mesh) removeMember(n *memberlist.Node) {
 	m.mu.Unlock()
 }
 
-// handleConflict handles NotifyConflict: two hosts advertising the same WireGuard key. pigeon keeps
-// the first-seen endpoint (never picks a winner) and records the clash for status.
+// handleConflict handles NotifyConflict: two hosts advertising the same WireGuard key. pigeon keeps the
+// first-seen endpoint (never picks a winner) and logs it. memberlist gives no "resolved" event, so this
+// is a logged event, not sticky state (serf/consul log name conflicts the same way).
 func (m *Mesh) handleConflict(existing, other *memberlist.Node) {
 	if existing.Name == m.cfg.Self.PublicKey {
 		slog.Error("another node is advertising our WireGuard key; the same private key is on more than one host. staying up as the key holder, regenerate the key on the other host",
 			"pubkey", existing.Name, "other_addr", other.Addr.String(), "other_port", other.Port)
-		m.mu.Lock()
-		m.keyConflicts[existing.Name] = "this node's key is also advertised from " + addrPort(other.Addr, other.Port)
-		m.mu.Unlock()
 		return
 	}
 	// memberlist also fires this on restart/roam; only alarm if our table still has the peer alive.
@@ -138,9 +189,6 @@ func (m *Mesh) handleConflict(existing, other *memberlist.Node) {
 	slog.Warn("two peers advertise the same WireGuard key; keeping the first-seen endpoint until the duplicate key is regenerated",
 		"pubkey", existing.Name, "kept_addr", existing.Addr.String(), "kept_port", existing.Port,
 		"other_addr", other.Addr.String(), "other_port", other.Port)
-	m.mu.Lock()
-	m.keyConflicts[existing.Name] = "kept " + addrPort(existing.Addr, existing.Port) + ", also advertised from " + addrPort(other.Addr, other.Port)
-	m.mu.Unlock()
 }
 
 // unchanged reports that name already holds this exact advertisement and is not failed.
@@ -178,6 +226,9 @@ func (m *Mesh) reevaluate(now time.Time) {
 		}
 		if len(e.refusedRoutes) == 0 && len(nv.refusedRoutes) > 0 {
 			slog.Warn("peer routes refused by --peer-policy; not installed", "pubkey", name, "routes", nv.refusedRoutes)
+		}
+		if len(e.unauthorizedRoutes) == 0 && len(nv.unauthorizedRoutes) > 0 {
+			slog.Warn("peer advertises routes its grant does not authorize; not installed", "pubkey", name, "routes", nv.unauthorizedRoutes)
 		}
 		if nv.admitted() {
 			admitted++
@@ -254,7 +305,6 @@ func (m *Mesh) reapDead(now time.Time) (changed bool) {
 	for name, e := range m.members {
 		if e.failed && now.Sub(e.leaveTime) > m.cfg.ReconnectTimeout {
 			delete(m.members, name)
-			delete(m.keyConflicts, name)
 			changed = true
 		}
 	}
@@ -379,11 +429,11 @@ func (m *Mesh) reconnectOnce() {
 	}
 }
 
-// snapshot copies the member set, contested routes, and key conflicts under one read lock, for status.
-func (m *Mesh) snapshot() (members map[string]member, contested map[string][]string, keyConflicts map[string]string) {
+// snapshot copies the member set and contested routes under one read lock, for status.
+func (m *Mesh) snapshot() (members map[string]member, contested map[string][]string) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return maps.Clone(m.members), maps.Clone(m.contested), maps.Clone(m.keyConflicts)
+	return maps.Clone(m.members), maps.Clone(m.contested)
 }
 
 // liveMembers copies the admitted, non-failed members plus contested routes, for the DNS bridge.

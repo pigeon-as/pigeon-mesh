@@ -9,6 +9,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/netip"
+	"slices"
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
@@ -17,11 +19,20 @@ import (
 const domain = "wg-mesh-signature-v1"
 
 type claims struct {
-	Ctx       string `cbor:"1,keyasint"`
-	Sub       []byte `cbor:"2,keyasint"`
-	KeyID     []byte `cbor:"3,keyasint"`
-	NotBefore int64  `cbor:"4,keyasint"`
-	NotAfter  int64  `cbor:"5,keyasint"`
+	Ctx       string   `cbor:"1,keyasint"`
+	Sub       []byte   `cbor:"2,keyasint"`
+	KeyID     []byte   `cbor:"3,keyasint"`
+	NotBefore int64    `cbor:"4,keyasint"`
+	NotAfter  int64    `cbor:"5,keyasint"`
+	Routes    [][]byte `cbor:"6,keyasint,omitempty"` // transit CIDRs (Prefix.MarshalBinary); omitted = none
+}
+
+// Grant is a verified operator grant: the node key it authorizes, its expiry, and the transit routes the
+// node may advertise. Returned by Verify only after the signature, key-binding, and expiry checks pass.
+type Grant struct {
+	Sub      []byte
+	NotAfter int64
+	Routes   []netip.Prefix
 }
 
 type signedClaims struct {
@@ -55,9 +66,56 @@ func mustDec() cbor.DecMode {
 	return dm
 }
 
-// Sign issues a grant for node key sub, valid in [notBefore, notAfter); notAfter 0 = no expiry.
-func Sign(key ed25519.PrivateKey, sub []byte, notBefore, notAfter int64) ([]byte, error) {
-	return signClaims(key, claims{Sub: sub, NotBefore: notBefore, NotAfter: notAfter})
+// Sign issues a grant for node key sub, valid in [notBefore, notAfter); notAfter 0 = no expiry. routes
+// are the transit CIDRs the node may advertise beyond its key-derived identity; a grant carrying routes
+// must have an expiry, since a route capability can only be narrowed by letting it lapse.
+func Sign(key ed25519.PrivateKey, sub []byte, notBefore, notAfter int64, routes ...netip.Prefix) ([]byte, error) {
+	if len(routes) > 0 && notAfter == 0 {
+		return nil, errors.New("a route grant must carry an expiry")
+	}
+	encRoutes, err := encodeRoutes(routes)
+	if err != nil {
+		return nil, err
+	}
+	return signClaims(key, claims{Sub: sub, NotBefore: notBefore, NotAfter: notAfter, Routes: encRoutes})
+}
+
+// encodeRoutes masks, dedups, and bytewise-sorts the prefixes into canonical wire form (each
+// Prefix.MarshalBinary), so the signed body is stable regardless of input order. nil for no routes.
+func encodeRoutes(routes []netip.Prefix) ([][]byte, error) {
+	if len(routes) == 0 {
+		return nil, nil
+	}
+	seen := make(map[string]bool, len(routes))
+	out := make([][]byte, 0, len(routes))
+	for _, r := range routes {
+		b, err := r.Masked().MarshalBinary()
+		if err != nil {
+			return nil, fmt.Errorf("route %s: %w", r, err)
+		}
+		if seen[string(b)] {
+			continue
+		}
+		seen[string(b)] = true
+		out = append(out, b)
+	}
+	slices.SortFunc(out, bytes.Compare)
+	return out, nil
+}
+
+func decodeRoutes(raw [][]byte) ([]netip.Prefix, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	out := make([]netip.Prefix, 0, len(raw))
+	for _, b := range raw {
+		var p netip.Prefix
+		if err := p.UnmarshalBinary(b); err != nil {
+			return nil, fmt.Errorf("decode route: %w", err)
+		}
+		out = append(out, p.Masked())
+	}
+	return out, nil
 }
 
 func signClaims(key ed25519.PrivateKey, c claims) ([]byte, error) {
@@ -78,13 +136,27 @@ func parse(b []byte) (signedClaims, error) {
 	return s, nil
 }
 
-// Verify checks a grant against the trusted signer keys for node pubkey at time now.
-func Verify(signers []ed25519.PublicKey, pubkey string, blob []byte, now time.Time) error {
+// Verify checks a grant against the trusted signer keys for node pubkey at time now, returning the
+// verified Grant (its key binding, expiry, and authorized routes). Routes are decoded only after the
+// signature passes, so an unauthenticated reader can never obtain them.
+func Verify(signers []ed25519.PublicKey, pubkey string, blob []byte, now time.Time) (Grant, error) {
 	s, err := parse(blob)
 	if err != nil {
-		return err
+		return Grant{}, err
 	}
-	return s.verify(signers, pubkey, now)
+	if err := s.verify(signers, pubkey, now); err != nil {
+		return Grant{}, err
+	}
+	// Below runs only on a verified grant, so its claims are authenticated. A grant carrying routes
+	// must have an expiry: a route capability narrows only by lapsing.
+	if len(s.Claims.Routes) > 0 && s.Claims.NotAfter == 0 {
+		return Grant{}, errors.New("route grant must carry an expiry")
+	}
+	routes, err := decodeRoutes(s.Claims.Routes)
+	if err != nil {
+		return Grant{}, err
+	}
+	return Grant{Sub: s.Claims.Sub, NotAfter: s.Claims.NotAfter, Routes: routes}, nil
 }
 
 func (s signedClaims) verify(signers []ed25519.PublicKey, pubkey string, now time.Time) error {

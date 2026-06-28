@@ -18,7 +18,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Build
-        run: GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} make build
+        run: GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} make build VERSION=${{ github.ref_name }}
 
       - name: Package
         run: tar -C build -czf "pigeon-mesh-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz" pigeon-mesh

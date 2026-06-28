@@ -59,12 +59,11 @@ type Mesh struct {
 	memberlist *memberlist.Memberlist
 
 	// membership state, all under mu
-	mu           sync.RWMutex
-	members      map[string]member   // gossip-derived members, keyed by pubkey
-	applied      map[string]wgPeer   // last config pushed to the kernel; the diff baseline
-	kernelPeers  map[string]bool     // kernel peers present at startup, awaiting first gossip; dropped once they gossip
-	contested    map[string][]string // overlay routes claimed by >1 peer, installed for none
-	keyConflicts map[string]string   // pubkey -> duplicate-key detail, for status
+	mu          sync.RWMutex
+	members     map[string]member   // gossip-derived members, keyed by pubkey
+	applied     map[string]wgPeer   // last config pushed to the kernel; the diff baseline
+	kernelPeers map[string]bool     // kernel peers present at startup, awaiting first gossip; dropped once they gossip
+	contested   map[string][]string // overlay routes claimed by >1 peer, installed for none
 
 	// hot-reloadable trust config, swapped whole on SIGHUP so a reader gets a lock-free snapshot
 	signers atomic.Pointer[[]ed25519.PublicKey]
@@ -109,15 +108,14 @@ func New(cfg Config) (*Mesh, error) {
 		return nil, fmt.Errorf("bind addr %q: %w", cfg.BindAddr, err)
 	}
 	m := &Mesh{
-		cfg:          cfg,
-		selfAddr:     selfAddr,
-		members:      map[string]member{},
-		applied:      map[string]wgPeer{},
-		kernelPeers:  map[string]bool{},
-		contested:    map[string][]string{},
-		keyConflicts: map[string]string{},
-		reconcileCh:  make(chan struct{}, 1),
-		leave:        make(chan struct{}, 1),
+		cfg:         cfg,
+		selfAddr:    selfAddr,
+		members:     map[string]member{},
+		applied:     map[string]wgPeer{},
+		kernelPeers: map[string]bool{},
+		contested:   map[string][]string{},
+		reconcileCh: make(chan struct{}, 1),
+		leave:       make(chan struct{}, 1),
 	}
 	m.meta.Store(&meta)
 	grant := cfg.Self.Signature

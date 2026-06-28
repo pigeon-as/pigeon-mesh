@@ -24,20 +24,21 @@ import (
 )
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "status" {
-		os.Exit(runStatus(os.Args[2:]))
-	}
-	if len(os.Args) > 1 && os.Args[1] == "leave" {
-		os.Exit(runLeave(os.Args[2:]))
-	}
-	if len(os.Args) > 1 && os.Args[1] == "keygen" {
-		os.Exit(runKeygen(os.Args[2:]))
-	}
-	if len(os.Args) > 1 && os.Args[1] == "pubkey" {
-		os.Exit(runPubkey(os.Args[2:]))
-	}
-	if len(os.Args) > 1 && os.Args[1] == "sign" {
-		os.Exit(runSign(os.Args[2:]))
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "version", "--version", "-version":
+			os.Exit(runVersion(os.Args[2:]))
+		case "status":
+			os.Exit(runStatus(os.Args[2:]))
+		case "leave":
+			os.Exit(runLeave(os.Args[2:]))
+		case "keygen":
+			os.Exit(runKeygen(os.Args[2:]))
+		case "pubkey":
+			os.Exit(runPubkey(os.Args[2:]))
+		case "sign":
+			os.Exit(runSign(os.Args[2:]))
+		}
 	}
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
@@ -206,8 +207,13 @@ func main() {
 		}
 		cfg.Signers = []ed25519.PublicKey{signer}
 	}
-	if err := signature.Verify(cfg.Signers, self.PublicKey, sig, time.Now()); err != nil {
+	g, err := signature.Verify(cfg.Signers, self.PublicKey, sig, time.Now())
+	if err != nil {
 		slog.Error("this node's own grant is not signed by a trusted signer key", "err", err)
+		os.Exit(1)
+	}
+	if err := mesh.CheckSelfRoutes(self.AllowedIPs, ip, g.Routes); err != nil {
+		slog.Error("re-sign this node's grant with --route for every route it advertises", "err", err)
 		os.Exit(1)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

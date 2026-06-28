@@ -7,12 +7,19 @@ import (
 	"encoding/base64"
 	"flag"
 	"fmt"
+	"net/netip"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/pigeon-as/pigeon-mesh/internal/signature"
 )
+
+// stringList is a repeatable string flag (one value per occurrence).
+type stringList []string
+
+func (s *stringList) String() string     { return strings.Join(*s, ",") }
+func (s *stringList) Set(v string) error { *s = append(*s, v); return nil }
 
 func runKeygen(args []string) int {
 	fs := flag.NewFlagSet("keygen", flag.ExitOnError)
@@ -45,15 +52,30 @@ func runSign(args []string) int {
 	keyFile := fs.String("key", "", "signing key file from 'keygen'")
 	ttl := fs.Duration("ttl", 0, "validity duration from now (0 = no expiry)")
 	skew := fs.Duration("not-before-skew", time.Minute, "tolerance before now to absorb clock skew")
+	var routeFlags stringList
+	fs.Var(&routeFlags, "route", "a transit CIDR the node may advertise beyond its identity /128; repeatable (requires --ttl)")
 	fs.Parse(args)
 
 	node := fs.Arg(0)
 	if *keyFile == "" || node == "" {
-		fmt.Fprintln(os.Stderr, "usage: pigeon-mesh sign --key <key> [--ttl <dur>] <node-wg-pubkey>")
+		fmt.Fprintln(os.Stderr, "usage: pigeon-mesh sign --key <key> [--ttl <dur>] [--route <cidr> ...] <node-wg-pubkey>")
 		return 2
 	}
 	if *ttl < 0 {
 		fmt.Fprintln(os.Stderr, "sign: --ttl must be >= 0 (0 = no expiry)")
+		return 2
+	}
+	routes := make([]netip.Prefix, 0, len(routeFlags))
+	for _, r := range routeFlags {
+		p, err := netip.ParsePrefix(strings.TrimSpace(r))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "sign: --route %q: %v\n", r, err)
+			return 1
+		}
+		routes = append(routes, p)
+	}
+	if len(routes) > 0 && *ttl == 0 {
+		fmt.Fprintln(os.Stderr, "sign: a --route grant requires --ttl (a route capability is de-authorized only by expiry)")
 		return 2
 	}
 	priv, err := loadSigningKey(*keyFile)
@@ -71,7 +93,7 @@ func runSign(args []string) int {
 	if *ttl > 0 {
 		notAfter = now.Add(*ttl).Unix()
 	}
-	blob, err := signature.Sign(priv, subRaw, now.Add(-*skew).Unix(), notAfter)
+	blob, err := signature.Sign(priv, subRaw, now.Add(-*skew).Unix(), notAfter, routes...)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
