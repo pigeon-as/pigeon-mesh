@@ -71,13 +71,12 @@ type Mesh struct {
 	policy  atomic.Pointer[PeerPolicy]
 
 	// lifecycle: reconcile signalling, join tracking, shutdown
-	reconcileCh       chan struct{}
-	leave             chan struct{}
-	joinedAt          atomic.Int64
-	selfExpired       atomic.Bool
-	warnedKernelPeers map[string]bool // kernel peers already warned stale; reconcile goroutine only
-	shutdownMu        sync.Mutex
-	shutdown          bool
+	reconcileCh chan struct{}
+	leave       chan struct{}
+	joinedAt    atomic.Int64
+	selfExpired atomic.Bool
+	shutdownMu  sync.Mutex
+	shutdown    bool
 }
 
 func New(cfg Config) (*Mesh, error) {
@@ -110,16 +109,15 @@ func New(cfg Config) (*Mesh, error) {
 		return nil, fmt.Errorf("bind addr %q: %w", cfg.BindAddr, err)
 	}
 	m := &Mesh{
-		cfg:               cfg,
-		selfAddr:          selfAddr,
-		members:           map[string]member{},
-		applied:           map[string]wgPeer{},
-		kernelPeers:       map[string]bool{},
-		contested:         map[string][]string{},
-		keyConflicts:      map[string]string{},
-		reconcileCh:       make(chan struct{}, 1),
-		leave:             make(chan struct{}, 1),
-		warnedKernelPeers: map[string]bool{},
+		cfg:          cfg,
+		selfAddr:     selfAddr,
+		members:      map[string]member{},
+		applied:      map[string]wgPeer{},
+		kernelPeers:  map[string]bool{},
+		contested:    map[string][]string{},
+		keyConflicts: map[string]string{},
+		reconcileCh:  make(chan struct{}, 1),
+		leave:        make(chan struct{}, 1),
 	}
 	m.meta.Store(&meta)
 	grant := cfg.Self.Signature
@@ -145,6 +143,8 @@ func New(cfg Config) (*Mesh, error) {
 	mc.Events = d
 	mc.Conflict = d
 	mc.Logger = newMemberlistLogger()
+	// Name and gossip address are both key-derived, so a same-key restart reclaims its name for free;
+	// this only bites a restart on a different --gossip-port, reclaiming in 30s vs --reconnect-timeout.
 	mc.DeadNodeReclaimTime = 30 * time.Second
 
 	// Must seed kernelPeers BEFORE Create starts the gossip listener: a remote join landing first
