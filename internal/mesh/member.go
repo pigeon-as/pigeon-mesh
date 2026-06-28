@@ -99,7 +99,6 @@ func (m *Mesh) removeMember(n *memberlist.Node) {
 		m.mu.Lock()
 		_, existed := m.members[n.Name]
 		delete(m.members, n.Name)
-		delete(m.keyConflicts, n.Name)
 		m.mu.Unlock()
 		if existed {
 			m.triggerReconcile()
@@ -114,15 +113,13 @@ func (m *Mesh) removeMember(n *memberlist.Node) {
 	m.mu.Unlock()
 }
 
-// handleConflict handles NotifyConflict: two hosts advertising the same WireGuard key. pigeon keeps
-// the first-seen endpoint (never picks a winner) and records the clash for status.
+// handleConflict handles NotifyConflict: two hosts advertising the same WireGuard key. pigeon keeps the
+// first-seen endpoint (never picks a winner) and logs it. memberlist gives no "resolved" event, so this
+// is a logged event, not sticky state (serf/consul log name conflicts the same way).
 func (m *Mesh) handleConflict(existing, other *memberlist.Node) {
 	if existing.Name == m.cfg.Self.PublicKey {
 		slog.Error("another node is advertising our WireGuard key; the same private key is on more than one host. staying up as the key holder, regenerate the key on the other host",
 			"pubkey", existing.Name, "other_addr", other.Addr.String(), "other_port", other.Port)
-		m.mu.Lock()
-		m.keyConflicts[existing.Name] = "this node's key is also advertised from " + addrPort(other.Addr, other.Port)
-		m.mu.Unlock()
 		return
 	}
 	// memberlist also fires this on restart/roam; only alarm if our table still has the peer alive.
@@ -138,9 +135,6 @@ func (m *Mesh) handleConflict(existing, other *memberlist.Node) {
 	slog.Warn("two peers advertise the same WireGuard key; keeping the first-seen endpoint until the duplicate key is regenerated",
 		"pubkey", existing.Name, "kept_addr", existing.Addr.String(), "kept_port", existing.Port,
 		"other_addr", other.Addr.String(), "other_port", other.Port)
-	m.mu.Lock()
-	m.keyConflicts[existing.Name] = "kept " + addrPort(existing.Addr, existing.Port) + ", also advertised from " + addrPort(other.Addr, other.Port)
-	m.mu.Unlock()
 }
 
 // unchanged reports that name already holds this exact advertisement and is not failed.
@@ -254,7 +248,6 @@ func (m *Mesh) reapDead(now time.Time) (changed bool) {
 	for name, e := range m.members {
 		if e.failed && now.Sub(e.leaveTime) > m.cfg.ReconnectTimeout {
 			delete(m.members, name)
-			delete(m.keyConflicts, name)
 			changed = true
 		}
 	}
@@ -379,11 +372,11 @@ func (m *Mesh) reconnectOnce() {
 	}
 }
 
-// snapshot copies the member set, contested routes, and key conflicts under one read lock, for status.
-func (m *Mesh) snapshot() (members map[string]member, contested map[string][]string, keyConflicts map[string]string) {
+// snapshot copies the member set and contested routes under one read lock, for status.
+func (m *Mesh) snapshot() (members map[string]member, contested map[string][]string) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return maps.Clone(m.members), maps.Clone(m.contested), maps.Clone(m.keyConflicts)
+	return maps.Clone(m.members), maps.Clone(m.contested)
 }
 
 // liveMembers copies the admitted, non-failed members plus contested routes, for the DNS bridge.

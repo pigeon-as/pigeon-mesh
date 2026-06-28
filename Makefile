@@ -1,11 +1,12 @@
 BINARY := pigeon-mesh
 OUTDIR := build
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
 .PHONY: build clean test vet fmt e2e perf
 
 build:
 	@mkdir -p $(OUTDIR)
-	go build -o $(OUTDIR)/$(BINARY) ./cmd/pigeon-mesh
+	go build -ldflags "-X main.version=$(VERSION)" -o $(OUTDIR)/$(BINARY) ./cmd/pigeon-mesh
 
 clean:
 	rm -rf $(OUTDIR)

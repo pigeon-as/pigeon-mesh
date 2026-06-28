@@ -44,7 +44,6 @@ type Status struct {
 	Rejected         map[string]string   `json:"rejected,omitempty"`
 	RefusedRoutes    map[string][]string `json:"refused_routes,omitempty"`
 	StaleKernelPeers []string            `json:"stale_kernel_peers,omitempty"`
-	KeyConflicts     map[string]string   `json:"key_conflicts,omitempty"`
 }
 
 // Status from our own tracking; memberlist.Node.State is always Alive.
@@ -159,7 +158,7 @@ func (m *Mesh) status() Status {
 
 	// Use our own member map: memberlist.Members() always shows "alive" and
 	// drops failed-but-not-yet-reaped peers.
-	members, contested, keyConflicts := m.snapshot()
+	members, contested := m.snapshot()
 	peers := make(map[string]PeerView, len(members)+1)
 	// Reject/refuse views derived on read from each member's verdict, not stored.
 	rejected := map[string]string{}
@@ -201,6 +200,5 @@ func (m *Mesh) status() Status {
 		Rejected:         rejected,
 		RefusedRoutes:    refused,
 		StaleKernelPeers: m.staleKernelPeers(),
-		KeyConflicts:     keyConflicts,
 	}
 }

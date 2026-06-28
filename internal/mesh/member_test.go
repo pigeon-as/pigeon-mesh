@@ -5,7 +5,6 @@ package mesh
 import (
 	"crypto/ed25519"
 	"errors"
-	"net"
 	"net/netip"
 	"testing"
 	"time"
@@ -19,12 +18,11 @@ import (
 // without New (which needs a real wgctrl client).
 func newTestMesh() *Mesh {
 	return &Mesh{
-		members:      map[string]member{},
-		applied:      map[string]wgPeer{},
-		kernelPeers:  map[string]bool{},
-		contested:    map[string][]string{},
-		keyConflicts: map[string]string{},
-		reconcileCh:  make(chan struct{}, 1),
+		members:     map[string]member{},
+		applied:     map[string]wgPeer{},
+		kernelPeers: map[string]bool{},
+		contested:   map[string][]string{},
+		reconcileCh: make(chan struct{}, 1),
 	}
 }
 
@@ -35,13 +33,11 @@ func TestReapDead(t *testing.T) {
 	m.members["live"] = member{failed: false}
 	m.members["recent"] = member{failed: true, leaveTime: now.Add(-30 * time.Second)}
 	m.members["old"] = member{failed: true, leaveTime: now.Add(-2 * time.Minute)}
-	m.keyConflicts["old"] = "dup"
 
 	must.True(t, m.reapDead(now), must.Sprint("a member failed past --reconnect-timeout is reaped"))
 	must.MapContainsKey(t, m.members, "live", must.Sprint("a live member is never reaped"))
 	must.MapContainsKey(t, m.members, "recent", must.Sprint("within the window, a failed member is kept"))
 	must.MapNotContainsKey(t, m.members, "old", must.Sprint("past the window, a failed member is reaped"))
-	must.MapNotContainsKey(t, m.keyConflicts, "old", must.Sprint("a reaped member's key-conflict alert is dropped too"))
 
 	must.False(t, m.reapDead(now), must.Sprint("a steady state reaps nothing"))
 }
@@ -359,34 +355,6 @@ func TestAdmit_PolicyFiltersRoutes(t *testing.T) {
 	r = admit(p, testKey, signers, testPrefix, nil, now)
 	must.Eq(t, p.AllowedIPs, r.wgPeer.routes)
 	must.SliceEmpty(t, r.refusedRoutes)
-}
-
-func TestHandleConflictRecordsKeyConflict(t *testing.T) {
-	m := newTestMesh()
-	m.cfg = Config{Self: Peer{PublicKey: "selfKey"}}
-	m.members["aliveKey"] = member{}
-	m.members["roamKey"] = member{failed: true}
-
-	// A live member advertised from a second address is a genuine duplicate key.
-	m.handleConflict(
-		&memberlist.Node{Name: "aliveKey", Addr: net.ParseIP("10.0.0.1"), Port: 51820},
-		&memberlist.Node{Name: "aliveKey", Addr: net.ParseIP("10.0.0.2"), Port: 51820},
-	)
-	must.MapContainsKey(t, m.keyConflicts, "aliveKey", must.Sprint("a live peer's key collision is recorded for status"))
-
-	// A failed/unknown member re-announcing from a new address is a restart/roam, not a duplicate key.
-	m.handleConflict(
-		&memberlist.Node{Name: "roamKey", Addr: net.ParseIP("10.0.0.1"), Port: 51820},
-		&memberlist.Node{Name: "roamKey", Addr: net.ParseIP("10.0.0.2"), Port: 51820},
-	)
-	must.MapNotContainsKey(t, m.keyConflicts, "roamKey", must.Sprint("a restart/roam is not a duplicate-key alarm"))
-
-	// A collision on our own key is always recorded.
-	m.handleConflict(
-		&memberlist.Node{Name: "selfKey", Addr: net.ParseIP("10.0.0.1"), Port: 51820},
-		&memberlist.Node{Name: "selfKey", Addr: net.ParseIP("10.0.0.3"), Port: 51820},
-	)
-	must.MapContainsKey(t, m.keyConflicts, "selfKey", must.Sprint("a collision on our own key is recorded too"))
 }
 
 // TestStoreDropsKernelPeers guards the load-bearing store() -> delete(m.kernelPeers): once a peer gossips

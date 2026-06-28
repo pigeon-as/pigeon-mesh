@@ -24,20 +24,21 @@ import (
 )
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "status" {
-		os.Exit(runStatus(os.Args[2:]))
-	}
-	if len(os.Args) > 1 && os.Args[1] == "leave" {
-		os.Exit(runLeave(os.Args[2:]))
-	}
-	if len(os.Args) > 1 && os.Args[1] == "keygen" {
-		os.Exit(runKeygen(os.Args[2:]))
-	}
-	if len(os.Args) > 1 && os.Args[1] == "pubkey" {
-		os.Exit(runPubkey(os.Args[2:]))
-	}
-	if len(os.Args) > 1 && os.Args[1] == "sign" {
-		os.Exit(runSign(os.Args[2:]))
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "version", "--version", "-version":
+			os.Exit(runVersion(os.Args[2:]))
+		case "status":
+			os.Exit(runStatus(os.Args[2:]))
+		case "leave":
+			os.Exit(runLeave(os.Args[2:]))
+		case "keygen":
+			os.Exit(runKeygen(os.Args[2:]))
+		case "pubkey":
+			os.Exit(runPubkey(os.Args[2:]))
+		case "sign":
+			os.Exit(runSign(os.Args[2:]))
+		}
 	}
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
