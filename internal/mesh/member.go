@@ -194,8 +194,10 @@ func (m *Mesh) reevaluate(now time.Time) {
 		m.members[name] = e
 	}
 	m.mu.Unlock()
+	// All peers admitted but nothing installed: an over-broad reload just cut this node off. Gossip
+	// rides in the tunnels, so peers will be reaped and rejoining may need a restart.
 	if admitted > 0 && installed == 0 {
-		slog.Warn("--peer-policy installs no routes for any peer; this node is now isolated. Gossip rides in the tunnels, so peers will be reaped and rejoining may need a restart")
+		slog.Warn("--peer-policy installs no routes for any peer; this node is now isolated")
 	}
 	if changed {
 		m.triggerReconcile()

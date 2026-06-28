@@ -27,36 +27,42 @@ func (m *Mesh) peersInKernel() (map[string]bool, error) {
 	return set, nil
 }
 
-// dropContestedRoutes drops any route claimed by more than one party (it never picks a winner) and
-// returns the survivors plus the contested routes. selfRoutes are seeded so a peer claiming our own
-// route loses it, not us.
+// dropContestedRoutes removes routes a peer must not install and returns the survivors plus the
+// contested routes (claimed by more than one peer, installed for none) for status. It also drops any
+// route this node serves itself (selfRoutes) so a peer cannot be handed our traffic; that is not a
+// contest (we still serve it), so it is not reported.
 func dropContestedRoutes(peers map[string]wgPeer, selfRoutes []string) (map[string]wgPeer, map[string][]string) {
-	claims := make(map[string][]string)
+	self := make(map[string]bool, len(selfRoutes))
 	for _, ip := range selfRoutes {
-		claims[ip] = append(claims[ip], "(self)")
+		self[ip] = true
 	}
+	claimants := make(map[string][]string)
 	for name, w := range peers {
 		for _, ip := range w.routes {
-			claims[ip] = append(claims[ip], name)
+			claimants[ip] = append(claimants[ip], name)
 		}
 	}
 	var contested map[string][]string
-	for ip, owners := range claims {
-		if len(owners) > 1 {
+	selfHit := false
+	for ip, owners := range claimants {
+		switch {
+		case len(owners) > 1:
 			if contested == nil {
 				contested = make(map[string][]string)
 			}
 			slices.Sort(owners)
 			contested[ip] = owners
+		case self[ip]:
+			selfHit = true
 		}
 	}
-	if contested == nil {
+	if contested == nil && !selfHit {
 		return peers, nil
 	}
 	effective := make(map[string]wgPeer, len(peers))
 	for name, w := range peers {
 		kept := slices.DeleteFunc(slices.Clone(w.routes), func(ip string) bool {
-			return len(claims[ip]) > 1
+			return contested[ip] != nil || self[ip]
 		})
 		if len(kept) == 0 {
 			continue
@@ -164,7 +170,6 @@ func (m *Mesh) reconcile() error {
 	for _, route := range newlyContested {
 		slog.Warn("route claimed by more than one peer; installed for none until resolved", "route", route, "claimed_by", contested[route])
 	}
-	m.warnStaleKernelPeers()
 	return nil
 }
 
@@ -217,30 +222,4 @@ func (m *Mesh) staleKernelPeers() []string {
 	m.mu.RUnlock()
 	slices.Sort(names)
 	return names
-}
-
-// warnStaleKernelPeers logs once per never-gossiped kernel peer after the settle window, forgetting any
-// that since gossiped. reconcile is the only caller, so warnedKernelPeers needs no lock.
-func (m *Mesh) warnStaleKernelPeers() {
-	settled := false
-	if t := m.joinedAt.Load(); t != 0 {
-		settled = time.Since(time.Unix(0, t)) > kernelSettle
-	}
-	current := map[string]bool{}
-	if settled {
-		m.mu.RLock()
-		for name := range m.kernelPeers {
-			current[name] = true
-			if !m.warnedKernelPeers[name] {
-				m.warnedKernelPeers[name] = true
-				slog.Warn("kernel peer has not gossiped since this node joined; it may be offline or decommissioned (remove it from the WireGuard config if intentional)", "pubkey", name)
-			}
-		}
-		m.mu.RUnlock()
-	}
-	for name := range m.warnedKernelPeers {
-		if !current[name] {
-			delete(m.warnedKernelPeers, name)
-		}
-	}
 }

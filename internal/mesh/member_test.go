@@ -19,13 +19,12 @@ import (
 // without New (which needs a real wgctrl client).
 func newTestMesh() *Mesh {
 	return &Mesh{
-		members:           map[string]member{},
-		applied:           map[string]wgPeer{},
-		kernelPeers:       map[string]bool{},
-		contested:         map[string][]string{},
-		keyConflicts:      map[string]string{},
-		warnedKernelPeers: map[string]bool{},
-		reconcileCh:       make(chan struct{}, 1),
+		members:      map[string]member{},
+		applied:      map[string]wgPeer{},
+		kernelPeers:  map[string]bool{},
+		contested:    map[string][]string{},
+		keyConflicts: map[string]string{},
+		reconcileCh:  make(chan struct{}, 1),
 	}
 }
 

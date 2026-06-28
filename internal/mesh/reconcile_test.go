@@ -4,10 +4,7 @@ package mesh
 
 import (
 	"bytes"
-	"context"
-	"log/slog"
 	"slices"
-	"sync"
 	"testing"
 	"time"
 
@@ -118,9 +115,9 @@ func TestDropContestedRoutes_SelfClaimWins(t *testing.T) {
 
 	effective, conflicts := dropContestedRoutes(peers, selfRoutes)
 
-	must.MapNotContainsKey(t, effective, "impostor", must.Sprint("a peer claiming the self address loses that route"))
+	must.MapNotContainsKey(t, effective, "impostor", must.Sprint("a peer claiming a route we serve loses it"))
 	must.Eq(t, []string{"fd00::9/128"}, effective["honest"].routes, must.Sprint("an unrelated peer is unaffected"))
-	must.Eq(t, []string{"(self)", "impostor"}, conflicts["fd00::1/128"], must.Sprint("self is recorded as a claimant"))
+	must.MapEmpty(t, conflicts, must.Sprint("a self-collision is not a peer-vs-peer contest, so it is not reported"))
 	for _, w := range effective {
 		must.SliceNotContains(t, w.routes, "fd00::1/128", must.Sprint("the self route is never installed for a peer"))
 	}
@@ -140,45 +137,3 @@ func TestStaleKernelPeers(t *testing.T) {
 	delete(m.kernelPeers, "seedA") // seedA gossiped, so store() dropped it from the set
 	must.Eq(t, []string{"seedB"}, m.staleKernelPeers(), must.Sprint("a kernel peer that gossiped is no longer stale"))
 }
-
-// TestWarnStaleKernelPeers guards the once-only logging: a steady-state re-run must not re-warn an
-// already-known stale kernel peer, and a peer that gossips is forgotten so it can warn afresh later.
-func TestWarnStaleKernelPeers(t *testing.T) {
-	h := &countingHandler{counts: map[string]int{}}
-	prev := slog.Default()
-	slog.SetDefault(slog.New(h))
-	t.Cleanup(func() { slog.SetDefault(prev) })
-
-	m := &Mesh{kernelPeers: map[string]bool{"seedA": true, "seedB": true}, warnedKernelPeers: map[string]bool{}}
-	m.joinedAt.Store(time.Now().Add(-2 * kernelSettle).UnixNano())
-
-	const msg = "kernel peer has not gossiped since this node joined; it may be offline or decommissioned (remove it from the WireGuard config if intentional)"
-	m.warnStaleKernelPeers()
-	must.EqOp(t, 2, h.counts[msg], must.Sprint("each newly-stale kernel peer is warned once"))
-
-	m.warnStaleKernelPeers()
-	must.EqOp(t, 2, h.counts[msg], must.Sprint("a steady-state re-run does not re-warn known stale peers"))
-
-	delete(m.kernelPeers, "seedA") // seedA gossiped, so store() dropped it from the set
-	m.warnStaleKernelPeers()
-	must.MapNotContainsKey(t, m.warnedKernelPeers, "seedA", must.Sprint("a kernel peer that gossiped is dropped from the dedup set"))
-	must.MapContainsKey(t, m.warnedKernelPeers, "seedB", must.Sprint("a still-stale kernel peer stays tracked"))
-}
-
-type countingHandler struct {
-	mu     sync.Mutex
-	counts map[string]int
-}
-
-func (h *countingHandler) Enabled(context.Context, slog.Level) bool { return true }
-
-func (h *countingHandler) Handle(_ context.Context, r slog.Record) error {
-	h.mu.Lock()
-	h.counts[r.Message]++
-	h.mu.Unlock()
-	return nil
-}
-
-func (h *countingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
-
-func (h *countingHandler) WithGroup(string) slog.Handler { return h }
