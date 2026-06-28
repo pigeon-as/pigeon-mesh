@@ -98,20 +98,20 @@ In scope: `peer.key`, `peer.endpoint`, `peer.address` (the peer's identity `/128
 `allowedips` are peer-advertised and forgeable.
 
 ```sh
-# block a peer everywhere, including its overlay /128
---peer-policy 'peer.key != "<pubkey>"'
-
-# block one advertised subnet, keep everything else
---peer-policy 'route != "10.0.0.0/24"'
-
-# reachability-only: each peer's identity /128, no extra routes
+# identity only: each peer's /128, no transit routes
 --peer-policy 'route == peer.address'
 
-# keep identity and gate extra routes to the mesh ULA
+# identity plus routes inside the mesh ULA, nothing wider
 --peer-policy 'route == peer.address || cidrSubset("fdcc::/16", route)'
 
-# only the exit node may advertise a default route
+# only the designated exit may advertise a default route
 --peer-policy 'route in ["0.0.0.0/0", "::/0"] ? peer.key == "<exit-pubkey>" : true'
+
+# blocklist: refuse these peers entirely, including their /128
+--peer-policy 'peer.key not in ["<pubkey-a>", "<pubkey-b>"]'
+
+# blocklist: refuse these subnets, keep everything else
+--peer-policy 'route not in ["10.0.0.0/24", "192.168.0.0/16"]'
 ```
 
 Blocking is local route installation, not membership: a blocked peer keeps its grant,
