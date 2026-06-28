@@ -14,7 +14,11 @@ func TestBuildDNSRecords(t *testing.T) {
 	a := netip.MustParseAddr("fdcc::a")
 	b := netip.MustParseAddr("fdcc::b")
 	named := func(addr netip.Addr, name string) member {
-		return member{addr: addr, peer: Peer{Tags: Tags{"name": name}}}
+		return member{
+			addr:   addr,
+			wgPeer: wgPeer{routes: []string{HostRoute(addr).String()}}, // identity /128 installed
+			peer:   Peer{Tags: Tags{"name": name}},
+		}
 	}
 
 	t.Run("self and peers resolve by name", func(t *testing.T) {
@@ -44,5 +48,12 @@ func TestBuildDNSRecords(t *testing.T) {
 	t.Run("an alive node with no accepted member entry is skipped", func(t *testing.T) {
 		got := buildDNSRecords([]string{"ghost"}, map[string]member{}, nil, netip.Addr{}, nil)
 		must.MapEmpty(t, got)
+	})
+
+	t.Run("a policy-blocked peer (its /128 not installed) does not resolve", func(t *testing.T) {
+		blocked := member{addr: a, wgPeer: wgPeer{routes: nil}, peer: Peer{Tags: Tags{"name": "alpha"}}}
+		members := map[string]member{"A": blocked}
+		got := buildDNSRecords([]string{"A"}, members, nil, netip.Addr{}, nil)
+		must.MapEmpty(t, got, must.Sprint("no black-hole record for a peer this node does not route to"))
 	})
 }

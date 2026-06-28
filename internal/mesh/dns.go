@@ -6,6 +6,7 @@ import (
 	"context"
 	"log/slog"
 	"net/netip"
+	"slices"
 
 	"github.com/hashicorp/memberlist"
 	"github.com/pigeon-as/pigeon-mesh/internal/dns"
@@ -56,13 +57,17 @@ func buildDNSRecords(alive []string, members map[string]member, contested map[st
 	add(self, selfTags)
 	for _, name := range alive {
 		e, ok := members[name]
-		if !ok {
+		if !ok || !e.addr.IsValid() {
 			continue
 		}
-		if e.addr.IsValid() {
-			if _, c := contested[HostRoute(e.addr).String()]; c {
-				continue
-			}
+		host := HostRoute(e.addr).String()
+		// Only resolve a peer whose overlay /128 this node actually installs; a policy-blocked peer
+		// is unrouted here, so handing out its address would be a black-hole record.
+		if !slices.Contains(e.wgPeer.routes, host) {
+			continue
+		}
+		if _, c := contested[host]; c {
+			continue
 		}
 		add(e.addr, e.peer.Tags)
 	}

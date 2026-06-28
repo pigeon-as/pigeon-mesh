@@ -14,14 +14,15 @@ import (
 	"github.com/expr-lang/expr/vm"
 )
 
-// PeerPolicy is a compiled --peer-policy predicate, accept(peer, route) -> bool, run
-// per advertised CIDR. Route acceptance only: never the signature/grant tier, never
-// cross-peer arbitration, and the identity /128 is always kept (see policyFilter).
+// PeerPolicy is a compiled --peer-policy predicate, accept(peer, route) -> bool, run per advertised
+// CIDR including the peer's identity /128 (no exemption). Route acceptance only: never the
+// signature/grant tier, never cross-peer arbitration.
 type PeerPolicy struct{ program *vm.Program }
 
 type policyPeer struct {
 	Key        string   `expr:"key"`
 	Endpoint   string   `expr:"endpoint"`
+	Address    string   `expr:"address"` // the peer's key-derived overlay /128, in CIDR form
 	AllowedIPs []string `expr:"allowedips"`
 }
 
@@ -59,9 +60,9 @@ func ParsePeerPolicy(s string) (*PeerPolicy, error) {
 	return &PeerPolicy{program: program}, nil
 }
 
-func (p *PeerPolicy) accept(peer Peer, route string) (bool, error) {
+func (p *PeerPolicy) accept(peer Peer, route, address string) (bool, error) {
 	out, err := expr.Run(p.program, policyEnv{
-		Peer:       policyPeer{Key: peer.PublicKey, Endpoint: peer.Endpoint, AllowedIPs: peer.AllowedIPs},
+		Peer:       policyPeer{Key: peer.PublicKey, Endpoint: peer.Endpoint, Address: address, AllowedIPs: peer.AllowedIPs},
 		Route:      route,
 		CIDRSubset: cidrSubset,
 	})
@@ -75,22 +76,19 @@ func (p *PeerPolicy) accept(peer Peer, route string) (bool, error) {
 	return b, nil
 }
 
-// policyFilter splits advertised AllowedIPs into kept and refused. The identity /128
-// is always kept (exempt). A nil policy accepts everything.
+// policyFilter splits advertised AllowedIPs into kept and refused. The predicate decides every
+// route, including the peer's own identity /128 (no exemption); a nil policy accepts everything.
+// identity is the peer's key-derived overlay address, exposed to the predicate as peer.address.
 func policyFilter(peer Peer, identity netip.Addr, policy *PeerPolicy) (kept, refused []string) {
 	if policy == nil {
 		return peer.AllowedIPs, nil
 	}
-	var id netip.Prefix
+	var address string
 	if identity.IsValid() {
-		id = HostRoute(identity)
+		address = HostRoute(identity).String()
 	}
 	for _, cidr := range peer.AllowedIPs {
-		if r, err := netip.ParsePrefix(cidr); err == nil && id.IsValid() && r == id {
-			kept = append(kept, cidr)
-			continue
-		}
-		ok, err := policy.accept(peer, cidr)
+		ok, err := policy.accept(peer, cidr, address)
 		if err != nil {
 			slog.Debug("peer-policy eval", "peer", peer.PublicKey, "route", cidr, "err", err)
 			refused = append(refused, cidr)

@@ -85,32 +85,39 @@ zone to it.
 
 ## Peer policy
 
-`--peer-policy` decides which routes this node installs from what peers advertise: an
-[expr](https://expr-lang.org) predicate run once per advertised route. A node's own
-identity `/128` always installs, so the policy gates only *extra* routes (subnets,
-exits); a refused route drops locally and shows in `status`. It restricts only this
-node, unset accepts everything, and it is inline or `@file` (`SIGHUP`-reloadable).
+`--peer-policy` is an [expr](https://expr-lang.org) predicate run once per advertised
+route: true installs it, false drops it. It applies to every route, including a peer's
+own identity `/128`, so even that can be blocked. A refused route drops locally and
+shows in `status`. The policy applies only to this node. Leave it unset to install
+everything; pass it inline or as `@file`, reloaded with `SIGHUP`.
 
-In scope: `peer.key`, `peer.endpoint`, the candidate `route`, the peer's full
-`peer.allowedips`, and `cidrSubset(outer, inner)`. Match the single `route` for
-per-route rules, or `any`/`all`/`len` over `peer.allowedips` for whole-peer ones.
+In scope: `peer.key`, `peer.endpoint`, `peer.address` (the peer's identity `/128`),
+`peer.allowedips`, the candidate `route`, and `cidrSubset(outer, inner)`. Only
+`peer.key` and `peer.address` are trustworthy for blocking; `endpoint` and
+`allowedips` are peer-advertised and forgeable.
 
 ```sh
-# refuse every extra route, keep only identity /128s
---peer-policy 'false'
+# block a peer everywhere, including its overlay /128
+--peer-policy 'peer.key != "<pubkey>"'
 
-# per-route: accept only routes inside the mesh ULA, refuse the rest individually
---peer-policy 'cidrSubset("fdcc::/16", route)'
+# block one advertised subnet, keep everything else
+--peer-policy 'route != "10.0.0.0/24"'
 
-# per-route: only the exit node may advertise a default route, others accepted
+# reachability-only: each peer's identity /128, no extra routes
+--peer-policy 'route == peer.address'
+
+# keep identity and gate extra routes to the mesh ULA
+--peer-policy 'route == peer.address || cidrSubset("fdcc::/16", route)'
+
+# only the exit node may advertise a default route
 --peer-policy 'route in ["0.0.0.0/0", "::/0"] ? peer.key == "<exit-pubkey>" : true'
-
-# per-route: only the designated router may advertise a 10.0.0.0/8 subnet
---peer-policy 'cidrSubset("10.0.0.0/8", route) ? peer.key == "<router-pubkey>" : true'
-
-# whole-peer: take a peer's extra routes only if every one is a mesh ULA subnet
---peer-policy 'all(peer.allowedips, cidrSubset("fdcc::/16", #))'
 ```
+
+Blocking is local route installation, not membership: a blocked peer keeps its grant,
+stays in gossip, and is removed mesh-wide only by unsigning it or letting the grant
+expire. Because gossip rides inside the tunnels, blocking a peer's `/128` also severs
+this node's gossip path to it; a policy that installs nothing for any peer isolates
+this node, and the daemon warns.
 
 ## Operations
 
