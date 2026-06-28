@@ -170,6 +170,7 @@ func (m *Mesh) reevaluate(now time.Time) {
 	signers, policy := *m.signers.Load(), m.policy.Load()
 	m.mu.Lock()
 	changed := false
+	admitted, installed := 0, 0
 	for name, e := range m.members {
 		nv := admit(e.peer, name, signers, m.cfg.Prefix, policy, now)
 		if e.admitted() && !nv.admitted() {
@@ -177,6 +178,12 @@ func (m *Mesh) reevaluate(now time.Time) {
 		}
 		if len(e.refusedRoutes) == 0 && len(nv.refusedRoutes) > 0 {
 			slog.Warn("peer routes refused by --peer-policy; not installed", "pubkey", name, "routes", nv.refusedRoutes)
+		}
+		if nv.admitted() {
+			admitted++
+			if len(nv.wgPeer.routes) > 0 {
+				installed++
+			}
 		}
 		// A rejected member always has a zero wgPeer, so reject<->admit flips and route changes are
 		// both caught here; reconcile only on an installed-config change.
@@ -187,6 +194,9 @@ func (m *Mesh) reevaluate(now time.Time) {
 		m.members[name] = e
 	}
 	m.mu.Unlock()
+	if admitted > 0 && installed == 0 {
+		slog.Warn("--peer-policy installs no routes for any peer; this node is now isolated. Gossip rides in the tunnels, so peers will be reaped and rejoining may need a restart")
+	}
 	if changed {
 		m.triggerReconcile()
 	}

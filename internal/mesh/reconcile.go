@@ -120,7 +120,9 @@ func (m *Mesh) reconcile() error {
 	m.mu.RLock()
 	desired := make(map[string]wgPeer, len(m.members)+len(m.kernelPeers))
 	for name, e := range m.members {
-		if e.admitted() {
+		// A fully policy-blocked member is admitted but installs nothing; omit it so diff() removes
+		// it from the kernel instead of toWG() failing on empty AllowedIPs every pass.
+		if e.admitted() && len(e.wgPeer.routes) > 0 {
 			desired[name] = e.wgPeer
 		}
 	}

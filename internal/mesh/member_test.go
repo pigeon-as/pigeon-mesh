@@ -82,11 +82,11 @@ func signedFixture(t *testing.T, now time.Time) (signers []ed25519.PublicKey, ow
 func TestReevaluate_StricterPolicyEvictsRoute(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
 	signers, ownRoute, grant := signedFixture(t, now)
-	deny, err := ParsePeerPolicy(`false`)
+	pol, err := ParsePeerPolicy(`route == peer.address`) // reachability-only: keep the /128, drop extras
 	must.NoError(t, err)
 	m := newTestMesh()
 	m.cfg = Config{Prefix: testPrefix}
-	storeConfig(m, signers, deny)
+	storeConfig(m, signers, pol)
 	m.members[testKey] = member{
 		peer:   Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute, "10.0.0.0/8"}, Signature: grant},
 		wgPeer: wgPeer{key: testKey, endpoint: "203.0.113.1:51820", routes: []string{ownRoute, "10.0.0.0/8"}},
@@ -94,9 +94,31 @@ func TestReevaluate_StricterPolicyEvictsRoute(t *testing.T) {
 	}
 	m.reevaluate(now)
 	got := m.members[testKey]
-	must.Eq(t, []string{ownRoute}, got.wgPeer.routes, must.Sprint("identity /128 survives a deny-all policy reload"))
+	must.Eq(t, []string{ownRoute}, got.wgPeer.routes, must.Sprint("identity /128 kept by matching peer.address, the extra route evicted"))
 	must.Eq(t, []string{"10.0.0.0/8"}, got.refusedRoutes)
 	must.True(t, reconcileTriggered(m.reconcileCh), must.Sprint("an eviction must trigger a reconcile"))
+}
+
+func TestReevaluate_BlockPeerEvictsAll(t *testing.T) {
+	// Blocking a whole peer by key refuses every route, including its identity /128, but leaves
+	// membership intact (the peer stays admitted in gossip).
+	now := time.Unix(1_000_000, 0)
+	signers, ownRoute, grant := signedFixture(t, now)
+	pol, err := ParsePeerPolicy(`peer.key != "` + testKey + `"`)
+	must.NoError(t, err)
+	m := newTestMesh()
+	m.cfg = Config{Prefix: testPrefix}
+	storeConfig(m, signers, pol)
+	m.members[testKey] = member{
+		peer:   Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute, "10.0.0.0/8"}, Signature: grant},
+		wgPeer: wgPeer{key: testKey, endpoint: "203.0.113.1:51820", routes: []string{ownRoute, "10.0.0.0/8"}},
+		meta:   []byte("m"),
+	}
+	m.reevaluate(now)
+	got := m.members[testKey]
+	must.True(t, got.admitted(), must.Sprint("a key-blocked peer stays admitted; membership is untouched"))
+	must.SliceEmpty(t, got.wgPeer.routes, must.Sprint("a key-blocked peer installs nothing, including its /128"))
+	must.Eq(t, []string{ownRoute, "10.0.0.0/8"}, got.refusedRoutes)
 }
 
 func TestReevaluate_LooserPolicyRestoresRoute(t *testing.T) {
@@ -324,14 +346,14 @@ func TestAdmit(t *testing.T) {
 func TestAdmit_PolicyFiltersRoutes(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
 	signers, ownRoute, grant := signedFixture(t, now)
-	pol, err := ParsePeerPolicy(`cidrSubset("10.0.0.0/8", route)`)
+	pol, err := ParsePeerPolicy(`route == peer.address || cidrSubset("10.0.0.0/8", route)`)
 	must.NoError(t, err)
 	p := Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute, "10.1.0.0/16", "192.168.0.0/16"}, Signature: grant}
 
 	r := admit(p, testKey, signers, testPrefix, pol, now)
 	must.NoError(t, r.admitErr)
 	must.True(t, r.addr.IsValid())
-	must.Eq(t, []string{ownRoute, "10.1.0.0/16"}, r.wgPeer.routes, must.Sprint("identity exempt; 10/8 subnet accepted"))
+	must.Eq(t, []string{ownRoute, "10.1.0.0/16"}, r.wgPeer.routes, must.Sprint("identity kept by matching peer.address; 10/8 subnet accepted"))
 	must.Eq(t, []string{"192.168.0.0/16"}, r.refusedRoutes)
 
 	// nil policy keeps everything, refuses nothing

@@ -564,11 +564,44 @@ func TestMesh_PeerPolicyRefusesRoute(t *testing.T) {
 		})
 
 		// The refused route is keyed under the advertising peer and never reaches the kernel;
-		// the identity /128 is exempt from the policy and stays installed.
+		// the identity /128 stays installed because it matches the policy (a subnet of fd00::/8),
+		// not by any exemption.
 		st := decodeStatus(t, sock)
 		must.SliceContains(t, st.RefusedRoutes[b.pub], "10.99.0.0/24", must.Sprint("refused route is keyed under the advertising peer"))
 		must.StrNotContains(t, wgAllowedIPs(a), "10.99.0.0/24", must.Sprint("a route refused by --peer-policy must not reach the kernel"))
-		must.StrContains(t, wgAllowedIPs(a), b.overlay, must.Sprint("b's identity route is exempt from policy and stays installed"))
+		must.StrContains(t, wgAllowedIPs(a), b.overlay, must.Sprint("b's identity /128 matches fd00::/8 and stays installed"))
+	})
+}
+
+func TestMesh_PeerPolicyBlocksPeer(t *testing.T) {
+	forEachProfile(t, func(t *testing.T, profile string) {
+		skipIfNoNetns(t)
+		newBridge(t, "wgmblk-br")
+
+		const prefix = "fdcc::/16"
+		a := newPrefixNode(t, "wgmblk-a", "10.146.0.1", 51820, "wgmblk-br", prefix)
+		b := newPrefixNode(t, "wgmblk-b", "10.146.0.2", 51820, "wgmblk-br", prefix)
+
+		sock := filepath.Join(t.TempDir(), "a.sock")
+		// a blocks peer b entirely by key: none of b's routes install, including its identity /128.
+		// b is seeded as a kernel peer at startup, so this exercises the reconcile zero-route guard
+		// (the /128 must be evicted, not left installed).
+		startMesh(t, a, []*node{b}, 51820, append([]string{"--prefix", prefix, "--socket", sock, "--peer-policy", `peer.key != "` + b.pub + `"`}, profileArgs(profile)...)...)
+		startMesh(t, b, []*node{a}, 51820, append([]string{"--prefix", prefix}, profileArgs(profile)...)...)
+
+		// a still learns b over gossip (membership is untouched by policy)...
+		waitFor(t, "a sees b in gossip", convergeTimeout(profile), func() bool {
+			out, err := exec.Command(meshBin, "status", "--socket", sock, "--json").Output()
+			return err == nil && strings.Contains(string(out), b.pub)
+		})
+		// ...but installs no route for it, evicting the startup-seeded /128.
+		waitFor(t, "a evicts b's overlay /128 from the kernel", convergeTimeout(profile), func() bool {
+			return !strings.Contains(wgAllowedIPs(a), b.overlay)
+		})
+
+		st := decodeStatus(t, sock)
+		must.SliceContains(t, st.RefusedRoutes[b.pub], b.overlay+"/128", must.Sprint("a blocked peer's identity /128 is refused, not just its extras"))
+		must.StrNotContains(t, wgAllowedIPs(a), b.overlay, must.Sprint("a key-blocked peer installs nothing in the kernel"))
 	})
 }
 

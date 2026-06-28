@@ -45,7 +45,7 @@ func main() {
 	iface := flag.String("interface", "", "existing WireGuard interface (required); kernel peers need a /128 or /32 first in AllowedIPs")
 	endpoint := flag.String("endpoint", "", "this node's Endpoint as host:port; hostnames resolved at startup; go-sockaddr templates evaluated (required)")
 	allowedIPs := flag.String("allowed-ips", "", "additional AllowedIPs this node advertises to peers beyond its auto overlay /128, comma-separated")
-	peerPolicy := flag.String("peer-policy", "", "expr predicate accept(peer, route) bool, evaluated per advertised CIDR; false drops only that route (identity /128 always installs; empty accepts all). In scope: peer (.key/.endpoint/.allowedips), route, cidrSubset(outer,inner). Inline or @file (SIGHUP-reloadable)")
+	peerPolicy := flag.String("peer-policy", "", "expr predicate accept(peer, route) bool, evaluated per advertised CIDR including a peer's identity /128 (no exemption); true installs the route, false drops it (empty accepts all). Block a peer with 'peer.key != \"K=\"', a route with 'route != \"C\"'; reachability-only is 'route == peer.address'. In scope: peer (.key/.endpoint/.address/.allowedips), route, cidrSubset(outer,inner). Inline or @file (SIGHUP-reloadable)")
 	gossipPort := flag.Int("gossip-port", 7946, "port to listen on for gossip (TCP and UDP)")
 	persistentKeepalive := flag.Int("persistent-keepalive", 0, "PersistentKeepalive interval in seconds advertised to peers (0 disables)")
 	profile := flag.String("profile", "wan", "memberlist timing profile: lan, wan, or local")
