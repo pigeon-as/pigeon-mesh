@@ -16,16 +16,16 @@ func TestCidrSubset(t *testing.T) {
 		outer, inner string
 		want         bool
 	}{
-		{"10.0.0.0/8", "10.1.2.0/24", true},     // more specific, inside
-		{"10.0.0.0/8", "10.1.2.3", true},        // bare IP treated as /32
-		{"10.0.0.0/8", "10.0.0.0/8", true},      // equal prefixes are subsets
-		{"::/0", "fd00::/8", true},              // v6 default contains the ULA block
-		{"10.0.0.0/16", "10.0.0.0/8", false},    // inner less specific than outer
-		{"10.0.0.0/8", "fd00::1", false},        // cross-family
-		{"0.0.0.0/0", "fd00::/8", false},        // v4 default does not contain v6 (the e2e relies on this)
-		{"10.0.0.0/8", "192.168.0.0/16", false}, // disjoint
-		{"10.0.0.0/8", "not-a-cidr", false},     // garbage inner
-		{"nope", "10.0.0.0/8", false},           // garbage outer
+		{"10.0.0.0/8", "10.1.2.0/24", true},
+		{"10.0.0.0/8", "10.1.2.3", true},
+		{"10.0.0.0/8", "10.0.0.0/8", true},
+		{"::/0", "fd00::/8", true},
+		{"10.0.0.0/16", "10.0.0.0/8", false},
+		{"10.0.0.0/8", "fd00::1", false},
+		{"0.0.0.0/0", "fd00::/8", false}, // v4 default must not contain v6 (e2e relies on this)
+		{"10.0.0.0/8", "192.168.0.0/16", false},
+		{"10.0.0.0/8", "not-a-cidr", false},
+		{"nope", "10.0.0.0/8", false},
 	} {
 		must.EqOp(t, tc.want, cidrSubset(tc.outer, tc.inner), must.Sprintf("cidrSubset(%q, %q)", tc.outer, tc.inner))
 	}
@@ -60,14 +60,12 @@ func TestPeerPolicy_Accept(t *testing.T) {
 	must.NoError(t, err)
 	must.False(t, ok, must.Sprint("gw's non-10/8 route is refused"))
 
-	// peer.allowedips list is in scope
 	pol2, err := ParsePeerPolicy(`len(peer.allowedips) <= 2`)
 	must.NoError(t, err)
 	ok, err = pol2.accept(Peer{AllowedIPs: []string{"a", "b"}}, "a", "")
 	must.NoError(t, err)
 	must.True(t, ok)
 
-	// peer.address is in scope: the identity route matches it, an extra route does not
 	idp, err := ParsePeerPolicy(`route == peer.address`)
 	must.NoError(t, err)
 	ok, err = idp.accept(gw, "fdcc::ab/128", "fdcc::ab/128")
@@ -80,8 +78,7 @@ func TestPeerPolicy_Accept(t *testing.T) {
 
 func TestPeerPolicy_WholePeerAllowedips(t *testing.T) {
 	id := netip.MustParseAddr("fdcc::1")
-	// A whole-peer rule via all()/any() over peer.allowedips returns the same verdict for every
-	// route, so it behaves all-or-nothing: accept the extras only if every route is a ULA subnet.
+	// all()/any() over peer.allowedips gives the same verdict for every route: all-or-nothing.
 	pol, err := ParsePeerPolicy(`all(peer.allowedips, cidrSubset("fd00::/8", #))`)
 	must.NoError(t, err)
 
@@ -100,42 +97,37 @@ func TestPolicyFilter(t *testing.T) {
 	id := netip.MustParseAddr("fdcc::1")
 	peer := Peer{PublicKey: "exit", AllowedIPs: []string{"fdcc::1/128", "0.0.0.0/0", "10.0.0.0/8"}}
 
-	// false now refuses every route, including the identity /128 (no exemption)
 	deny, err := ParsePeerPolicy(`false`)
 	must.NoError(t, err)
 	kept, refused := policyFilter(peer, peer.AllowedIPs, id, deny)
 	must.SliceEmpty(t, kept, must.Sprint("false refuses everything, including the identity /128"))
 	must.Eq(t, peer.AllowedIPs, refused)
 
-	// reachability-only: route == peer.address keeps just the identity /128
 	idOnly, err := ParsePeerPolicy(`route == peer.address`)
 	must.NoError(t, err)
 	kept, refused = policyFilter(peer, peer.AllowedIPs, id, idOnly)
 	must.Eq(t, []string{"fdcc::1/128"}, kept, must.Sprint("only the identity /128 matches peer.address"))
 	must.Eq(t, []string{"0.0.0.0/0", "10.0.0.0/8"}, refused)
 
-	// keep identity and gate extras: reproduces the old exemption behavior via an explicit predicate
+	// reproduce the old identity exemption via an explicit predicate
 	keepID, err := ParsePeerPolicy(`route == peer.address || (peer.key == "exit" && route in ["0.0.0.0/0", "::/0"])`)
 	must.NoError(t, err)
 	kept, refused = policyFilter(peer, peer.AllowedIPs, id, keepID)
 	must.Eq(t, []string{"fdcc::1/128", "0.0.0.0/0"}, kept, must.Sprint("identity kept by matching peer.address; only the default extra accepted"))
 	must.Eq(t, []string{"10.0.0.0/8"}, refused)
 
-	// block this whole peer by key: nothing installs, including its /128
 	block, err := ParsePeerPolicy(`peer.key != "exit"`)
 	must.NoError(t, err)
 	kept, refused = policyFilter(peer, peer.AllowedIPs, id, block)
 	must.SliceEmpty(t, kept, must.Sprint("peer.key != exit refuses all of exit's routes"))
 	must.Eq(t, peer.AllowedIPs, refused)
 
-	// drop only this peer's overlay /128, keep its other routes
 	dropID, err := ParsePeerPolicy(`peer.key != "exit" || route != peer.address`)
 	must.NoError(t, err)
 	kept, refused = policyFilter(peer, peer.AllowedIPs, id, dropID)
 	must.Eq(t, []string{"0.0.0.0/0", "10.0.0.0/8"}, kept, must.Sprint("only the identity /128 is dropped"))
 	must.Eq(t, []string{"fdcc::1/128"}, refused)
 
-	// nil policy accepts everything, refuses nothing
 	kept, refused = policyFilter(peer, peer.AllowedIPs, id, nil)
 	must.Eq(t, peer.AllowedIPs, kept)
 	must.SliceEmpty(t, refused)
@@ -151,8 +143,6 @@ func TestPolicyFilter_MalformedCIDRRefused(t *testing.T) {
 }
 
 func TestPolicyFilter_EmptyAddressWhenNoPrefix(t *testing.T) {
-	// No overlay prefix: peer.address is the empty string, so route == peer.address never holds and
-	// false refuses every route.
 	deny, err := ParsePeerPolicy(`false`)
 	must.NoError(t, err)
 	peer := Peer{AllowedIPs: []string{"fdcc::1/128", "10.0.0.0/8"}}
@@ -162,8 +152,6 @@ func TestPolicyFilter_EmptyAddressWhenNoPrefix(t *testing.T) {
 }
 
 func TestPolicyFilter_AddressMatchesOnlyExactHostRoute(t *testing.T) {
-	// peer.address is the exact /128; a covering prefix is not it, so route == peer.address keeps
-	// only the /128.
 	idOnly, err := ParsePeerPolicy(`route == peer.address`)
 	must.NoError(t, err)
 	peer := Peer{AllowedIPs: []string{"fdcc::1/128", "fdcc::/64"}}
@@ -194,7 +182,7 @@ func TestParsePeerPolicyFlag(t *testing.T) {
 }
 
 func TestParsePeerPolicy_UnknownIdentifierFailsCompile(t *testing.T) {
-	// A typo must be caught at startup (exit 2), not silently refuse every route at runtime.
+	// a typo must fail at startup, not silently refuse every route at runtime
 	_, err := ParsePeerPolicy(`peer.bogus == 1`)
 	must.Error(t, err, must.Sprint("unknown field is caught by the typed env at compile"))
 	_, err = ParsePeerPolicy(`nope(route)`)

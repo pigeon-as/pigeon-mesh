@@ -25,7 +25,7 @@ func mkSig(t *testing.T) (ed25519.PrivateKey, ed25519.PublicKey, []byte) {
 
 func TestSelfReject_MalformedSignatureNotExpired(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
-	// A non-parseable signature has signature.NotAfter()==0, which must NOT be read as expiry.
+	// non-parseable signature has NotAfter()==0; must NOT read as expiry
 	must.NoError(t, selfSignatureError([]byte{0, 1, 2}, now), must.Sprint("garbage signature is not treated as expired"))
 }
 
@@ -62,13 +62,11 @@ func TestReloadSignersFromFile(t *testing.T) {
 		meta:   []byte("m"),
 	}
 
-	// under the wrong signer the signed member is rejected
 	m.reevaluate(time.Now())
 	must.StrContains(t, m.members[testKey].admitErr.Error(), "unknown signer", must.Sprint("a member signed by an untrusted key is rejected"))
 	must.EqOp(t, "", m.members[testKey].wgPeer.key, must.Sprint("a rejected member installs no kernel config"))
 	must.True(t, reconcileTriggered(m.reconcileCh))
 
-	// rotating in the correct signer re-accepts it, and the re-resolution reaches reconcile
 	n, err := m.ReloadSignersFromFile(writeTemp(t, base64.StdEncoding.EncodeToString(pub)))
 	must.NoError(t, err)
 	must.EqOp(t, 1, n)
@@ -76,7 +74,6 @@ func TestReloadSignersFromFile(t *testing.T) {
 	must.EqOp(t, testKey, m.members[testKey].wgPeer.key)
 	must.True(t, reconcileTriggered(m.reconcileCh))
 
-	// a failed reload keeps the trusted set (fail-closed)
 	prev := m.signers.Load()
 	_, err = m.ReloadSignersFromFile(filepath.Join(t.TempDir(), "nope"))
 	must.Error(t, err)
@@ -99,7 +96,6 @@ func TestApplySelfGrant(t *testing.T) {
 	m.selfGrant.Store(&old)
 	m.selfExpired.Store(true)
 
-	// a valid renewal swaps in the grant, re-encodes the advertisement, and clears the expiry latch
 	renewed, err := signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix())
 	must.NoError(t, err)
 	must.NoError(t, m.applySelfGrant(renewed))
@@ -109,13 +105,12 @@ func TestApplySelfGrant(t *testing.T) {
 	must.NoError(t, decodeMeta(*m.meta.Load(), &adv))
 	must.Eq(t, renewed, adv.Signature, must.Sprint("the advertisement carries the renewed grant"))
 
-	// an expired grant is rejected and the running grant is kept
 	expired, err := signature.Sign(priv, sub, now.Add(-time.Hour).Unix(), now.Add(-time.Minute).Unix())
 	must.NoError(t, err)
 	must.Error(t, m.applySelfGrant(expired), must.Sprint("an expired grant is rejected"))
 	must.Eq(t, renewed, *m.selfGrant.Load(), must.Sprint("a rejected grant leaves the running one in place"))
 
-	// a grant from an untrusted signer is rejected (Verify also pins it to our own key)
+	// Verify also pins the grant to our own key
 	otherPriv, _, _ := mkSig(t)
 	rogue, err := signature.Sign(otherPriv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix())
 	must.NoError(t, err)
@@ -127,7 +122,7 @@ func TestApplySelfGrant_RejectsUnauthorizedSelfRoute(t *testing.T) {
 	priv, pub, sub := mkSig(t)
 	derived, err := DeriveAddr(testKey, testPrefix)
 	must.NoError(t, err)
-	// self advertises a transit route, so its own grant must authorize it.
+	// self advertises a transit route, so its grant must authorize it
 	self := Peer{PublicKey: testKey, AllowedIPs: []string{HostRoute(derived).String(), "10.0.0.0/8"}}
 	m := newTestMesh()
 	m.cfg = Config{Self: self}

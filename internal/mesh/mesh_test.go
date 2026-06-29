@@ -90,13 +90,13 @@ func TestReloadPolicyFromFile(t *testing.T) {
 		meta:   []byte("m"),
 	}
 
-	// success: reload to reachability-only refuses the extra route, keeps the identity, swaps in.
+	// success: reachability-only refuses the extra route, keeps identity.
 	must.NoError(t, m.ReloadPolicyFromFile(writeTemp(t, "route == peer.address")))
 	must.NotNil(t, m.policy.Load(), must.Sprint("a successful reload installs the new policy"))
 	must.Eq(t, []string{ownRoute}, m.members[testKey].wgPeer.routes)
 	must.Eq(t, []string{"10.0.0.0/8"}, m.members[testKey].refusedRoutes)
 
-	// invalid policy: error, policy UNCHANGED, previous policy retained (fail-closed).
+	// invalid policy: error, previous policy retained (fail-closed).
 	prev := m.policy.Load()
 	must.Error(t, m.ReloadPolicyFromFile(writeTemp(t, "&&")))
 	must.EqOp(t, prev, m.policy.Load(), must.Sprint("a bad reload must not swap the policy"))

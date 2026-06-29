@@ -192,7 +192,6 @@ func main() {
 			os.Exit(2)
 		}
 	}
-	// Trust anchor for verifying peers. Default: the signer of this node's own grant.
 	if *signers != "" {
 		cfg.Signers, err = signature.ParseSigners(*signers)
 		if err != nil {

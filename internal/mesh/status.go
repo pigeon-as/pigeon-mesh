@@ -33,6 +33,7 @@ type PeerView struct {
 	RxBytes      int64    `json:"rx_bytes,omitempty"`
 	TxBytes      int64    `json:"tx_bytes,omitempty"`
 	WGAlive      *bool    `json:"wg_alive,omitempty"`
+	GrantExpiry  *int64   `json:"grant_expiry_s,omitempty"`
 }
 
 type Status struct {
@@ -47,7 +48,7 @@ type Status struct {
 	StaleKernelPeers   []string            `json:"stale_kernel_peers,omitempty"`
 }
 
-// Status from our own tracking; memberlist.Node.State is always Alive.
+// memberlist.Node.State is always Alive; derive status ourselves.
 func memberStatus(accepted, failed bool) string {
 	switch {
 	case !accepted:
@@ -157,11 +158,9 @@ func (m *Mesh) status() Status {
 		}
 	}
 
-	// Use our own member map: memberlist.Members() always shows "alive" and
-	// drops failed-but-not-yet-reaped peers.
+	// our own member map: memberlist.Members() is always alive, drops failed-but-not-reaped peers
 	members, contested := m.snapshot()
 	peers := make(map[string]PeerView, len(members)+1)
-	// Reject/refuse views derived on read from each member's verdict, not stored.
 	rejected := map[string]string{}
 	refused := map[string][]string{}
 	unauthorized := map[string][]string{}
@@ -181,10 +180,14 @@ func (m *Mesh) status() Status {
 		if len(e.unauthorizedRoutes) > 0 {
 			unauthorized[name] = e.unauthorizedRoutes
 		}
+		if e.grantExpiry > 0 {
+			ge := e.grantExpiry
+			pv.GrantExpiry = &ge
+		}
 		fillWG(&pv, name)
 		peers[name] = pv
 	}
-	// self is never in the member table; report it from cfg.Self.
+	// self is never in the member table
 	selfPV := PeerView{
 		Endpoint:   m.cfg.Self.Endpoint,
 		AllowedIPs: m.cfg.Self.AllowedIPs,
@@ -194,6 +197,9 @@ func (m *Mesh) status() Status {
 	if err := selfSignatureError(*m.selfGrant.Load(), now); err != nil {
 		selfPV.Status = "rejected"
 		rejected[m.cfg.Self.PublicKey] = err.Error()
+	}
+	if ge := m.selfGrantExpiry(); ge > 0 {
+		selfPV.GrantExpiry = &ge
 	}
 	peers[m.cfg.Self.PublicKey] = selfPV
 	return Status{

@@ -18,26 +18,21 @@ import (
 	"github.com/hashicorp/memberlist"
 )
 
-// member.go is the membership engine: the gossip-derived member set and everything that mutates it.
-
-// member is the locally-tracked state for one gossip peer.
 type member struct {
 	meta               []byte
-	peer               Peer       // gossip advertisement (wire format)
-	addr               netip.Addr // key-derived overlay address
-	wgPeer             wgPeer     // kernel config to install when admitted
-	admitErr           error      // nil = admitted; else why not installed
-	refusedRoutes      []string   // advertised routes --peer-policy refused
-	unauthorizedRoutes []string   // advertised routes the grant does not authorize
-	grantExpiry        int64      // operator-grant expiry, unix seconds (0 = none)
-	failed             bool       // SWIM liveness
-	leaveTime          time.Time  // set when failed; reaped at +ReconnectTimeout
+	peer               Peer
+	addr               netip.Addr
+	wgPeer             wgPeer
+	admitErr           error // nil = admitted
+	refusedRoutes      []string
+	unauthorizedRoutes []string
+	grantExpiry        int64 // unix seconds; 0 = none
+	failed             bool
+	leaveTime          time.Time
 }
 
 func (m member) admitted() bool { return m.admitErr == nil }
 
-// admit checks an advertisement's signature, identity, and policy and returns the member to track:
-// admitted with its kernel config, or not admitted with admitErr set. Pure; holds no lock.
 func admit(p Peer, name string, signers []ed25519.PublicKey, prefix netip.Prefix, policy *PeerPolicy, now time.Time) member {
 	grant, err := verifyGrant(p, name, signers, now)
 	if err != nil {
@@ -47,21 +42,18 @@ func admit(p Peer, name string, signers []ed25519.PublicKey, prefix netip.Prefix
 	if err != nil {
 		return member{admitErr: err}
 	}
-	// Authorize advertised transit routes against the grant before policy; unauthorized routes are
-	// dropped, but the peer stays admitted for its identity /128 and its authorized routes.
+	// Authorize against the grant before policy; unauthorized routes drop but the peer stays admitted.
 	authorized, unauthorized := authorizeRoutes(p.AllowedIPs, addr, grant.Routes)
 	pc := wgPeer{key: name, endpoint: p.Endpoint, routes: authorized, keepalive: p.PersistentKeepalive}
 	if _, err := pc.toWG(); err != nil {
 		return member{admitErr: fmt.Errorf("invalid peer config: %w", err)}
 	}
 	kept, refused := policyFilter(p, authorized, addr, policy)
-	pc.routes = kept // grant-authorized and policy-accepted routes, not the raw advertisement
+	pc.routes = kept
 	return member{addr: addr, wgPeer: pc, refusedRoutes: refused, unauthorizedRoutes: unauthorized, grantExpiry: grant.NotAfter}
 }
 
-// authorizeRoutes splits advertised AllowedIPs into those the grant authorizes and those it does not.
-// A peer's key-derived identity /128 is always authorized (self-certified, exempt from grant routes);
-// every other route must be contained in one of the grant's routes. A malformed CIDR is unauthorized.
+// identity /128 is self-certified (exempt from grant routes); other routes must be contained in a grant route.
 func authorizeRoutes(allowedIPs []string, identity netip.Addr, grantRoutes []netip.Prefix) (authorized, unauthorized []string) {
 	var id netip.Prefix
 	if identity.IsValid() {
@@ -74,7 +66,7 @@ func authorizeRoutes(allowedIPs []string, identity netip.Addr, grantRoutes []net
 			continue
 		}
 		if id.IsValid() && r == id {
-			authorized = append(authorized, cidr) // identity /128, self-certified
+			authorized = append(authorized, cidr)
 			continue
 		}
 		if routeAuthorized(r, grantRoutes) {
@@ -86,8 +78,6 @@ func authorizeRoutes(allowedIPs []string, identity netip.Addr, grantRoutes []net
 	return authorized, unauthorized
 }
 
-// routeAuthorized reports whether r is contained in some grant route: at least as specific as it and
-// inside it (Nebula unsafe_networks / a subnet of a Tailscale-approved route).
 func routeAuthorized(r netip.Prefix, grantRoutes []netip.Prefix) bool {
 	for _, g := range grantRoutes {
 		if r.Bits() >= g.Bits() && g.Contains(r.Addr()) {
@@ -97,8 +87,7 @@ func routeAuthorized(r netip.Prefix, grantRoutes []netip.Prefix) bool {
 	return false
 }
 
-// CheckSelfRoutes returns an error if this node advertises a transit route its own grant does not
-// authorize. Startup and SIGHUP both fail fast on it: with no control plane, there is no later approval.
+// Startup and SIGHUP fail fast on this: no control plane means no later approval.
 func CheckSelfRoutes(allowedIPs []string, identity netip.Addr, grantRoutes []netip.Prefix) error {
 	if _, unauthorized := authorizeRoutes(allowedIPs, identity, grantRoutes); len(unauthorized) > 0 {
 		return fmt.Errorf("advertises routes its grant does not authorize: %v", unauthorized)
@@ -106,8 +95,7 @@ func CheckSelfRoutes(allowedIPs []string, identity netip.Addr, grantRoutes []net
 	return nil
 }
 
-// setMember resolves a gossiped advertisement and stores it. Re-resolves if a SIGHUP swapped
-// signers/policy under us, so a peer is never accepted under stale trust.
+// Re-resolves if a SIGHUP swapped signers/policy under us, so no peer is accepted under stale trust.
 func (m *Mesh) setMember(n *memberlist.Node) {
 	if n.Name == m.cfg.Self.PublicKey || len(n.Meta) == 0 {
 		return
@@ -143,8 +131,8 @@ func (m *Mesh) setMember(n *memberlist.Node) {
 	m.triggerReconcile()
 }
 
-// removeMember handles NotifyLeave: a graceful leave deletes the member; a failure marks it failed
-// (kept until reapDead) so a brief partition or restart does not churn its tunnel.
+// A graceful leave deletes the member; a failure marks it failed (kept until reapDead) so a brief
+// partition or restart does not churn its tunnel.
 func (m *Mesh) removeMember(n *memberlist.Node) {
 	if n.Name == m.cfg.Self.PublicKey {
 		return
@@ -167,16 +155,14 @@ func (m *Mesh) removeMember(n *memberlist.Node) {
 	m.mu.Unlock()
 }
 
-// handleConflict handles NotifyConflict: two hosts advertising the same WireGuard key. pigeon keeps the
-// first-seen endpoint (never picks a winner) and logs it. memberlist gives no "resolved" event, so this
-// is a logged event, not sticky state (serf/consul log name conflicts the same way).
+// Same WireGuard key on two hosts: keep the first-seen endpoint (never pick a winner), log only.
 func (m *Mesh) handleConflict(existing, other *memberlist.Node) {
 	if existing.Name == m.cfg.Self.PublicKey {
 		slog.Error("another node is advertising our WireGuard key; the same private key is on more than one host. staying up as the key holder, regenerate the key on the other host",
 			"pubkey", existing.Name, "other_addr", other.Addr.String(), "other_port", other.Port)
 		return
 	}
-	// memberlist also fires this on restart/roam; only alarm if our table still has the peer alive.
+	// memberlist also fires on restart/roam; only alarm if the peer is still alive in our table.
 	m.mu.RLock()
 	e, ok := m.members[existing.Name]
 	alive := ok && !e.failed
@@ -191,7 +177,6 @@ func (m *Mesh) handleConflict(existing, other *memberlist.Node) {
 		"other_addr", other.Addr.String(), "other_port", other.Port)
 }
 
-// unchanged reports that name already holds this exact advertisement and is not failed.
 func (m *Mesh) unchanged(name string, meta []byte) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -199,8 +184,7 @@ func (m *Mesh) unchanged(name string, meta []byte) bool {
 	return ok && !e.failed && bytes.Equal(e.meta, meta)
 }
 
-// store records a resolved member and drops it from kernelPeers: it has gossiped, so its fate is now
-// membership (admitted kept, rejected/left removed). Returns the prior value.
+// Drops it from kernelPeers: it has gossiped, so its fate is now membership.
 func (m *Mesh) store(name string, cur member) (old member) {
 	m.mu.Lock()
 	old = m.members[name]
@@ -210,10 +194,8 @@ func (m *Mesh) store(name string, cur member) (old member) {
 	return old
 }
 
-// reevaluate re-resolves every member after a SIGHUP reload, storing the fresh verdict and
-// reconciling when an installed config changed. A rare O(members) pass, so it re-stores
-// unconditionally rather than diffing verdicts. Runs even when the config is now empty, or removing
-// a policy would never restore refused routes.
+// Re-stores every verdict unconditionally (rare O(members) pass); must run even when the config is now
+// empty, else removing a policy would never restore refused routes.
 func (m *Mesh) reevaluate(now time.Time) {
 	signers, policy := *m.signers.Load(), m.policy.Load()
 	m.mu.Lock()
@@ -236,17 +218,15 @@ func (m *Mesh) reevaluate(now time.Time) {
 				installed++
 			}
 		}
-		// A rejected member always has a zero wgPeer, so reject<->admit flips and route changes are
-		// both caught here; reconcile only on an installed-config change.
+		// Rejected => zero wgPeer, so reject<->admit flips and route changes both show here.
 		if !e.wgPeer.equal(nv.wgPeer) {
 			changed = true
 		}
-		e.addr, e.wgPeer, e.admitErr, e.refusedRoutes, e.grantExpiry = nv.addr, nv.wgPeer, nv.admitErr, nv.refusedRoutes, nv.grantExpiry
+		e.addr, e.wgPeer, e.admitErr, e.refusedRoutes, e.unauthorizedRoutes, e.grantExpiry = nv.addr, nv.wgPeer, nv.admitErr, nv.refusedRoutes, nv.unauthorizedRoutes, nv.grantExpiry
 		m.members[name] = e
 	}
 	m.mu.Unlock()
-	// All peers admitted but nothing installed: an over-broad reload just cut this node off. Gossip
-	// rides in the tunnels, so peers will be reaped and rejoining may need a restart.
+	// Admitted but nothing installed: an over-broad reload cut this node off (gossip rides the tunnels).
 	if admitted > 0 && installed == 0 {
 		slog.Warn("--peer-policy installs no routes for any peer; this node is now isolated")
 	}
@@ -255,15 +235,7 @@ func (m *Mesh) reevaluate(now time.Time) {
 	}
 }
 
-// maintain ages out members each tick: checks our own grant, expires peers' lapsed grants, and reaps
-// peers SWIM-failed past --reconnect-timeout.
 func (m *Mesh) maintain(ctx context.Context) {
-	// random phase offset so nodes sharing a grant expiry don't all reconcile at once
-	select {
-	case <-ctx.Done():
-		return
-	case <-time.After(time.Duration(rand.Int64N(int64(reapInterval)))):
-	}
 	ticker := time.NewTicker(reapInterval)
 	defer ticker.Stop()
 	for {
@@ -281,8 +253,7 @@ func (m *Mesh) maintain(ctx context.Context) {
 	}
 }
 
-// expireGrants rejects members whose operator grant lapsed; runs on the maintain ticker so expiry
-// needs no gossip update.
+// Local expiry, needs no gossip update.
 func (m *Mesh) expireGrants(now time.Time) (changed bool) {
 	ts := now.Unix()
 	m.mu.Lock()
@@ -290,7 +261,7 @@ func (m *Mesh) expireGrants(now time.Time) (changed bool) {
 		if !e.admitted() || e.grantExpiry == 0 || ts < e.grantExpiry {
 			continue
 		}
-		e.admitErr, e.wgPeer, e.refusedRoutes = errSignatureExpired, wgPeer{}, nil
+		e.admitErr, e.wgPeer, e.refusedRoutes, e.unauthorizedRoutes = errSignatureExpired, wgPeer{}, nil, nil
 		m.members[name] = e
 		slog.Warn("peer grant expired; not installed", "pubkey", name)
 		changed = true
@@ -299,7 +270,6 @@ func (m *Mesh) expireGrants(now time.Time) (changed bool) {
 	return changed
 }
 
-// reapDead deletes members SWIM-failed past --reconnect-timeout, dropping their key-conflict alert.
 func (m *Mesh) reapDead(now time.Time) (changed bool) {
 	m.mu.Lock()
 	for name, e := range m.members {
@@ -312,9 +282,7 @@ func (m *Mesh) reapDead(now time.Time) (changed bool) {
 	return changed
 }
 
-// checkSelfExpiry tracks whether this node's own grant has expired, halting self DNS while set (self
-// is never in the member set). It both sets and clears the latch from the current grant, so a renewal
-// that raced a tick self-heals on the next one.
+// Sets and clears the latch from the current grant, so a renewal that raced a tick self-heals next tick.
 func (m *Mesh) checkSelfExpiry(now time.Time) {
 	expired := selfSignatureError(*m.selfGrant.Load(), now) != nil
 	if was := m.selfExpired.Swap(expired); expired && !was {
@@ -322,7 +290,6 @@ func (m *Mesh) checkSelfExpiry(now time.Time) {
 	}
 }
 
-// join seeds the gossip cluster from the kernel's existing peers: up to joinSeedCount carrying a host route.
 func (m *Mesh) join() (int, error) {
 	peers, err := m.cfg.WG.Peers(m.cfg.Iface)
 	if err != nil {
@@ -353,11 +320,9 @@ func (m *Mesh) join() (int, error) {
 	return m.memberlist.Join(targets)
 }
 
-// retryJoin keeps attempting to join until the cluster is reached, then idles at retryJoinInterval.
 func (m *Mesh) retryJoin(ctx context.Context) {
 	backoff := time.Second
 	for {
-		// attempt before waiting: the first join is immediate
 		if m.memberlist.NumMembers() > 1 {
 			backoff = retryJoinInterval
 		} else {
@@ -383,7 +348,6 @@ func (m *Mesh) retryJoin(ctx context.Context) {
 	}
 }
 
-// reconnect periodically re-Joins a sampled SWIM-failed peer so a brief partition heals.
 func (m *Mesh) reconnect(ctx context.Context) {
 	ticker := time.NewTicker(reconnectInterval)
 	defer ticker.Stop()
@@ -415,8 +379,7 @@ func (m *Mesh) reconnectOnce() {
 	if len(targets) == 0 {
 		return
 	}
-	// Probe a sampled failed peer with probability ~failed/alive, so a large cluster does not
-	// thundering-herd re-Joins when many peers are down.
+	// Probe with probability ~failed/alive, so a large cluster doesn't thundering-herd re-Joins.
 	if alive == 0 {
 		alive = 1
 	}
@@ -429,14 +392,12 @@ func (m *Mesh) reconnectOnce() {
 	}
 }
 
-// snapshot copies the member set and contested routes under one read lock, for status.
 func (m *Mesh) snapshot() (members map[string]member, contested map[string][]string) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return maps.Clone(m.members), maps.Clone(m.contested)
 }
 
-// liveMembers copies the admitted, non-failed members plus contested routes, for the DNS bridge.
 func (m *Mesh) liveMembers() (members map[string]member, contested map[string][]string) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

@@ -13,8 +13,7 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
-// Peer is the gossip wire format: what a node broadcasts about itself, carried as node
-// metadata. PublicKey is identity and is not encoded; it is the node name, filled in on decode.
+// PublicKey is identity, not encoded; it is the node name, filled in on decode.
 type Peer struct {
 	PublicKey           string   `codec:"-"`
 	Endpoint            string   `codec:"ep"`
@@ -59,11 +58,10 @@ func decodePeer(name string, meta []byte) (Peer, error) {
 	return p, nil
 }
 
-// wgPeer is the kernel face of a peer: the WireGuard config we install for it.
 type wgPeer struct {
 	key       string
 	endpoint  string
-	routes    []string // the AllowedIPs we install
+	routes    []string
 	keepalive int
 }
 
@@ -100,7 +98,6 @@ func (w wgPeer) toWG() (wgtypes.PeerConfig, error) {
 	}, nil
 }
 
-// equal lets reconcile skip an unchanged peer.
 func (w wgPeer) equal(o wgPeer) bool {
 	return w.key == o.key && w.endpoint == o.endpoint && w.keepalive == o.keepalive &&
 		slices.Equal(w.routes, o.routes)

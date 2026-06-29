@@ -7,8 +7,7 @@ import (
 	"runtime/debug"
 )
 
-// version is the build version, set via -ldflags "-X main.version=...". The Makefile stamps it from
-// `git describe`; a plain `go build` leaves it "dev" and falls back to the embedded VCS revision.
+// set via -ldflags -X main.version; plain go build falls back to the embedded VCS revision.
 var version = "dev"
 
 func runVersion([]string) int {

@@ -87,14 +87,14 @@ func printStatus(st mesh.Status) {
 		fmt.Fprintln(w, strings.Join(cols, "\t"))
 	}
 
-	row("PUBKEY", "ENDPOINT", "ALLOWED-IPS", "STATUS", "WG", "HANDSHAKE", "TAGS")
+	row("PUBKEY", "ENDPOINT", "ALLOWED-IPS", "STATUS", "WG", "HANDSHAKE", "GRANT", "TAGS")
 	for _, k := range slices.Sorted(maps.Keys(st.Peers)) {
 		p := st.Peers[k]
 		name := k
 		if k == st.Self {
 			name += " (self)"
 		}
-		row(name, p.Endpoint, strings.Join(p.AllowedIPs, ","), p.Status, formatWGAlive(p.WGAlive), formatAge(p.HandshakeAge), formatTags(p.Tags))
+		row(name, p.Endpoint, strings.Join(p.AllowedIPs, ","), p.Status, formatWGAlive(p.WGAlive), formatAge(p.HandshakeAge), formatExpiry(p.GrantExpiry), formatTags(p.Tags))
 	}
 	w.Flush()
 
@@ -116,6 +116,13 @@ func printStatus(st mesh.Status) {
 		fmt.Println("\nrefused routes (rejected by --peer-policy, not installed):")
 		for _, k := range slices.Sorted(maps.Keys(st.RefusedRoutes)) {
 			fmt.Printf("  %s  %s\n", k, strings.Join(st.RefusedRoutes[k], ", "))
+		}
+	}
+
+	if len(st.UnauthorizedRoutes) > 0 {
+		fmt.Println("\nunauthorized routes (not authorized by the peer's grant, not installed):")
+		for _, k := range slices.Sorted(maps.Keys(st.UnauthorizedRoutes)) {
+			fmt.Printf("  %s  %s\n", k, strings.Join(st.UnauthorizedRoutes[k], ", "))
 		}
 	}
 
@@ -150,4 +157,21 @@ func formatAge(s *int64) string {
 		return "-"
 	}
 	return fmt.Sprintf("%ds", *s)
+}
+
+func formatExpiry(unix *int64) string {
+	if unix == nil {
+		return "-"
+	}
+	d := time.Until(time.Unix(*unix, 0))
+	switch {
+	case d <= 0:
+		return "expired"
+	case d >= 24*time.Hour:
+		return fmt.Sprintf("%dd", d/(24*time.Hour))
+	case d >= time.Hour:
+		return fmt.Sprintf("%dh", d/time.Hour)
+	default:
+		return fmt.Sprintf("%dm", d/time.Minute)
+	}
 }

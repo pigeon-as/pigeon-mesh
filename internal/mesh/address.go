@@ -33,7 +33,6 @@ func HostRoute(a netip.Addr) netip.Prefix {
 	return netip.PrefixFrom(a, a.BitLen())
 }
 
-// Single host route (/32 or /128) among cidrs: a peer's identity address.
 func hostAddr(cidrs []string) (netip.Addr, bool) {
 	for _, c := range cidrs {
 		if pfx, err := netip.ParsePrefix(c); err == nil && pfx.IsSingleIP() {
@@ -43,7 +42,6 @@ func hostAddr(cidrs []string) (netip.Addr, bool) {
 	return netip.Addr{}, false
 }
 
-// hasHostRoute is hostAddr over the kernel net.IPNet values wgctrl returns.
 func hasHostRoute(ips []net.IPNet) bool {
 	for _, ipn := range ips {
 		ones, bits := ipn.Mask.Size()

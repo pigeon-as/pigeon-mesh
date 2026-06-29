@@ -13,8 +13,6 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
-// reconcile.go drives the kernel WireGuard peer set toward the gossip members.
-
 func (m *Mesh) peersInKernel() (map[string]bool, error) {
 	peers, err := m.cfg.WG.Peers(m.cfg.Iface)
 	if err != nil {
@@ -27,10 +25,8 @@ func (m *Mesh) peersInKernel() (map[string]bool, error) {
 	return set, nil
 }
 
-// dropContestedRoutes removes routes a peer must not install and returns the survivors plus the
-// contested routes (claimed by more than one peer, installed for none) for status. It also drops any
-// route this node serves itself (selfRoutes) so a peer cannot be handed our traffic; that is not a
-// contest (we still serve it), so it is not reported.
+// dropContestedRoutes drops routes claimed by >1 peer (installed for none; returned as contested)
+// and any selfRoutes this node serves (so a peer cannot take our traffic; a self-collision is not reported).
 func dropContestedRoutes(peers map[string]wgPeer, selfRoutes []string) (map[string]wgPeer, map[string][]string) {
 	self := make(map[string]bool, len(selfRoutes))
 	for _, ip := range selfRoutes {
@@ -114,26 +110,23 @@ func diff(prev, cur map[string]wgPeer, inKernel map[string]bool) []wgtypes.PeerC
 	return changes
 }
 
-// reconcile diffs the desired set (accepted members + not-yet-gossiped kernel peers) against applied +
-// kernel and applies the delta, then records contested routes and warns about silent kernel peers.
 func (m *Mesh) reconcile() error {
 	inKernel, err := m.peersInKernel()
 	if err != nil {
 		return err
 	}
 
-	// Snapshot under one read lock, then apply lock-free (WG.Apply is slow I/O).
+	// Snapshot under read lock, apply lock-free (WG.Apply is slow I/O).
 	m.mu.RLock()
 	desired := make(map[string]wgPeer, len(m.members)+len(m.kernelPeers))
 	for name, e := range m.members {
-		// A fully policy-blocked member is admitted but installs nothing; omit it so diff() removes
-		// it from the kernel instead of toWG() failing on empty AllowedIPs every pass.
+		// Omit policy-blocked members (no routes) so diff() removes them and toWG() isn't called on empty AllowedIPs.
 		if e.admitted() && len(e.wgPeer.routes) > 0 {
 			desired[name] = e.wgPeer
 		}
 	}
 	for name := range m.kernelPeers {
-		// Keep a kernel peer until it gossips; store() drops gossiped ones from the set.
+		// Keep a kernel peer until it gossips; store() drops gossiped ones.
 		if _, ok := desired[name]; ok {
 			continue
 		}
@@ -144,7 +137,7 @@ func (m *Mesh) reconcile() error {
 	prev := maps.Clone(m.applied)
 	m.mu.RUnlock()
 
-	// Seed our full advertised set (not just the overlay /128) so a peer cannot hijack a route we advertise.
+	// Seed our full advertised set so a peer cannot hijack a route we advertise.
 	effective, contested := dropContestedRoutes(desired, m.cfg.Self.AllowedIPs)
 
 	changes := diff(prev, effective, inKernel)
@@ -173,8 +166,7 @@ func (m *Mesh) reconcile() error {
 	return nil
 }
 
-// adoptKernelPeers records the operator's pre-existing kernel peers as the applied baseline and seeds
-// each one's derived overlay /128 so it is reachable before it gossips.
+// adoptKernelPeers seeds each pre-existing kernel peer's derived overlay /128 so it is reachable before it gossips.
 func (m *Mesh) adoptKernelPeers() error {
 	peers, err := m.cfg.WG.Peers(m.cfg.Iface)
 	if err != nil {
@@ -211,7 +203,6 @@ func (m *Mesh) adoptKernelPeers() error {
 	return nil
 }
 
-// staleKernelPeers returns the kernel peers that never gossiped after the settle window; nil before it.
 func (m *Mesh) staleKernelPeers() []string {
 	t := m.joinedAt.Load()
 	if t == 0 || time.Since(time.Unix(0, t)) <= kernelSettle {

@@ -14,15 +14,14 @@ import (
 	"github.com/expr-lang/expr/vm"
 )
 
-// PeerPolicy is a compiled --peer-policy predicate, accept(peer, route) -> bool, run per advertised
-// CIDR including the peer's identity /128 (no exemption). Route acceptance only: never the
-// signature/grant tier, never cross-peer arbitration.
+// PeerPolicy gates every advertised CIDR incl the identity /128 (no exemption); route acceptance
+// only, never the signature/grant tier nor cross-peer arbitration.
 type PeerPolicy struct{ program *vm.Program }
 
 type policyPeer struct {
 	Key        string   `expr:"key"`
 	Endpoint   string   `expr:"endpoint"`
-	Address    string   `expr:"address"` // the peer's key-derived overlay /128, in CIDR form
+	Address    string   `expr:"address"`
 	AllowedIPs []string `expr:"allowedips"`
 }
 
@@ -32,7 +31,6 @@ type policyEnv struct {
 	CIDRSubset func(outer, inner string) bool `expr:"cidrSubset"`
 }
 
-// ParsePeerPolicyFlag compiles --peer-policy: inline predicate, or @file (SIGHUP-reloadable).
 func ParsePeerPolicyFlag(spec string) (*PeerPolicy, error) {
 	if path, ok := strings.CutPrefix(spec, "@"); ok {
 		return LoadPeerPolicy(path)
@@ -48,7 +46,7 @@ func LoadPeerPolicy(path string) (*PeerPolicy, error) {
 	return ParsePeerPolicy(strings.TrimSpace(string(data)))
 }
 
-// ParsePeerPolicy compiles the predicate. Empty string returns nil (accept all).
+// Empty string returns nil = accept all.
 func ParsePeerPolicy(s string) (*PeerPolicy, error) {
 	if s == "" {
 		return nil, nil
@@ -76,9 +74,8 @@ func (p *PeerPolicy) accept(peer Peer, route, address string) (bool, error) {
 	return b, nil
 }
 
-// policyFilter splits routes (the grant-authorized advertisements) into kept and refused. The predicate
-// decides every route, including the peer's own identity /128 (no exemption); a nil policy accepts
-// everything. identity is the peer's key-derived overlay address, exposed to the predicate as peer.address.
+// policyFilter splits routes into kept and refused; the predicate decides every route incl the
+// identity /128 (no exemption). nil policy accepts everything; identity is exposed as peer.address.
 func policyFilter(peer Peer, routes []string, identity netip.Addr, policy *PeerPolicy) (kept, refused []string) {
 	if policy == nil {
 		return routes, nil
@@ -103,8 +100,6 @@ func policyFilter(peer Peer, routes []string, identity netip.Addr, policy *PeerP
 	return kept, refused
 }
 
-// cidrSubset reports whether inner is a subset of outer: at least as specific and
-// inside it. A bare IP is treated as a /32 or /128.
 func cidrSubset(outer, inner string) bool {
 	o, err := netip.ParsePrefix(outer)
 	if err != nil {

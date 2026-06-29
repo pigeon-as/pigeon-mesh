@@ -4,15 +4,12 @@ package mesh
 
 import (
 	"context"
-	"log/slog"
 	"net/netip"
 	"slices"
 
-	"github.com/hashicorp/memberlist"
 	"github.com/pigeon-as/pigeon-mesh/internal/dns"
 )
 
-// serveDNS runs the overlay DNS server, fed by dnsRecords. No-op unless --dns set a zone.
 func (m *Mesh) serveDNS(ctx context.Context) {
 	if m.cfg.DNSZone == "" {
 		return
@@ -20,26 +17,17 @@ func (m *Mesh) serveDNS(ctx context.Context) {
 	dns.Serve(ctx, dns.Config{Iface: m.cfg.Iface, Addr: m.selfAddr, Zone: m.cfg.DNSZone}, m.dnsRecords)
 }
 
-// dnsRecords is the live name->address set, called per query by the DNS server.
 func (m *Mesh) dnsRecords() map[string]netip.Addr {
 	members, contested := m.liveMembers()
-	var alive []string
-	for _, n := range m.memberlist.Members() {
-		if n.Name != m.cfg.Self.PublicKey && n.State == memberlist.StateAlive {
-			alive = append(alive, n.Name)
-		}
-	}
 	self := m.selfAddr
 	if m.selfExpired.Load() {
-		self = netip.Addr{} // expired: invalid addr drops self from DNS
+		self = netip.Addr{} // expired: drop from DNS
 	}
-	return buildDNSRecords(alive, members, contested, self, m.cfg.Self.Tags)
+	return buildDNSRecords(members, contested, self, m.cfg.Self.Tags)
 }
 
-// buildDNSRecords maps each alive, accepted, uncontested member's name= tag to its address, plus
-// self. Drops any label more than one peer claims. Pure.
-func buildDNSRecords(alive []string, members map[string]member, contested map[string][]string, self netip.Addr, selfTags Tags) map[string]netip.Addr {
-	records := make(map[string]netip.Addr, len(alive)+1)
+func buildDNSRecords(members map[string]member, contested map[string][]string, self netip.Addr, selfTags Tags) map[string]netip.Addr {
+	records := make(map[string]netip.Addr, len(members)+1)
 	collided := make(map[string]bool)
 	add := func(addr netip.Addr, tags Tags) {
 		label := dns.SanitizeLabel(tags["name"])
@@ -47,22 +35,19 @@ func buildDNSRecords(alive []string, members map[string]member, contested map[st
 			return
 		}
 		if existing, dup := records[label]; dup && existing != addr {
-			delete(records, label)
+			delete(records, label) // contested name resolves to neither
 			collided[label] = true
-			slog.Warn("dns name claimed by more than one peer; not resolving it", "name", label)
 			return
 		}
 		records[label] = addr
 	}
 	add(self, selfTags)
-	for _, name := range alive {
-		e, ok := members[name]
-		if !ok || !e.addr.IsValid() {
+	for _, e := range members {
+		if !e.addr.IsValid() {
 			continue
 		}
+		// no black-hole records: skip unrouted and contested
 		host := HostRoute(e.addr).String()
-		// Only resolve a peer whose overlay /128 this node actually installs; a policy-blocked peer
-		// is unrouted here, so handing out its address would be a black-hole record.
 		if !slices.Contains(e.wgPeer.routes, host) {
 			continue
 		}

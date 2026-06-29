@@ -1,6 +1,3 @@
-// Package dns is pigeon-mesh's overlay DNS: an authoritative server answering
-// A/AAAA for peer name= tags in one zone, plus a systemd-resolved client routing
-// that zone to it (split-DNS). Owns no mesh state; fed name->address records as a callback.
 package dns
 
 import (
@@ -17,8 +14,6 @@ func normalizeZone(s string) string {
 	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(s), "."))
 }
 
-// SanitizeLabel returns s as a valid DNS label (lowercase, <=63, [a-z0-9-], no
-// leading/trailing '-'), or "" if it cannot be one.
 func SanitizeLabel(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	if s == "" || len(s) > 63 || s[0] == '-' || s[len(s)-1] == '-' {
@@ -62,8 +57,6 @@ func soa(zone string) *dns.SOA {
 	}
 }
 
-// reply builds the authoritative answer for r in zone. Refuses out-of-zone,
-// NXDOMAIN for unknown names.
 func reply(r *dns.Msg, zone string, records map[string]netip.Addr) *dns.Msg {
 	msg := new(dns.Msg)
 	msg.SetReply(r)
