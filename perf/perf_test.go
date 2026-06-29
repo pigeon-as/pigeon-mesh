@@ -79,7 +79,10 @@ func TestFailureDetection(t *testing.T) {
 
 			cfg := memberlist.DefaultLANConfig()
 			maxSuspicion := time.Duration(cfg.SuspicionMult*cfg.SuspicionMaxTimeoutMult) * cfg.ProbeInterval
-			timeout := 60*time.Second + time.Duration(math.Log10(float64(n))*float64(maxSuspicion))
+			// A SWIM-failed peer is not removed at detection: the daemon holds it for ReconnectTimeout
+			// (floored to 60s) and reaps on the next 15s tick, so removal lands ~75s after detection.
+			// Budget that hold plus suspicion growth (and slack for a loaded host).
+			timeout := 120*time.Second + time.Duration(math.Log10(float64(n))*float64(maxSuspicion))
 			waitFor(t, "remove dead peer", timeout, 500*time.Millisecond, func() bool {
 				for i, src := range nodes {
 					if i == target {

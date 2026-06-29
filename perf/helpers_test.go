@@ -3,11 +3,15 @@
 package perf
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
 	"fmt"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,14 +20,21 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pigeon-as/pigeon-mesh/internal/mesh"
+	"github.com/pigeon-as/pigeon-mesh/internal/signature"
 	"github.com/shoenig/test/must"
 )
 
 const staggerInterval = 25 * time.Millisecond
 
+// clusterPrefix is the overlay ULA every perf node derives its /128 under (matches the daemon default).
+const clusterPrefix = "fdcc::/48"
+
 var (
-	meshBin string
-	clkTck  float64
+	meshBin       string
+	clkTck        float64
+	meshSigner    ed25519.PrivateKey // package operator signer; every perf node trusts it
+	meshSignerArg string             // --signers value (base64 signer pubkey)
 )
 
 func TestMain(m *testing.M) {
@@ -69,6 +80,13 @@ func TestMain(m *testing.M) {
 		}
 		meshBin = p
 	}
+
+	signerPub, signerPriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "generate signer: %v\n", err)
+		os.Exit(1)
+	}
+	meshSigner, meshSignerArg = signerPriv, base64.StdEncoding.EncodeToString(signerPub)
 
 	sweepStaleClusters()
 
@@ -165,7 +183,7 @@ func newBridge(t *testing.T, name string) {
 	t.Cleanup(func() { exec.Command("ip", "link", "del", name).Run() })
 }
 
-func newNode(t *testing.T, name, underlay, overlay string, port int, bridge string) *node {
+func newNode(t *testing.T, name, underlay string, port int, bridge, prefix string) *node {
 	t.Helper()
 	hostVeth, nsVeth := name+"-vh", name+"-vn"
 	exec.Command("ip", "netns", "del", name).Run()
@@ -182,10 +200,11 @@ func newNode(t *testing.T, name, underlay, overlay string, port int, bridge stri
 	runIn(t, name, "ip", "link", "set", nsVeth, "up")
 
 	priv, pub := genKeypair(t)
+	overlay, err := mesh.DeriveAddr(pub, netip.MustParsePrefix(prefix))
+	must.NoError(t, err)
 	keyFile := writeFile(t, priv+"\n")
 	runIn(t, name, "ip", "link", "add", "wg0", "type", "wireguard")
 	runIn(t, name, "wg", "set", "wg0", "private-key", keyFile, "listen-port", fmt.Sprint(port))
-	runIn(t, name, "ip", "-6", "addr", "add", overlay+"/128", "dev", "wg0")
 	runIn(t, name, "ip", "link", "set", "wg0", "up")
 
 	t.Cleanup(func() {
@@ -193,7 +212,18 @@ func newNode(t *testing.T, name, underlay, overlay string, port int, bridge stri
 		exec.Command("ip", "link", "del", hostVeth).Run()
 	})
 
-	return &node{ns: name, underlay: underlay, overlay: overlay, pub: pub}
+	return &node{ns: name, underlay: underlay, overlay: overlay.String(), pub: pub}
+}
+
+// grantFile signs a routeless grant for pub from the package signer and returns the file path.
+// Perf nodes are identity-only, so the grant needs no routes and no mandatory expiry.
+func grantFile(t *testing.T, pub string) string {
+	t.Helper()
+	sub, err := base64.StdEncoding.DecodeString(pub)
+	must.NoError(t, err)
+	blob, err := signature.Sign(meshSigner, sub, time.Now().Add(-time.Minute).Unix(), time.Now().Add(6*time.Hour).Unix())
+	must.NoError(t, err)
+	return writeFile(t, base64.StdEncoding.EncodeToString(blob))
 }
 
 func startMesh(t *testing.T, n *node, peers []*node, port int, extraArgs ...string) *exec.Cmd {
@@ -202,6 +232,14 @@ func startMesh(t *testing.T, n *node, peers []*node, port int, extraArgs ...stri
 		runIn(t, n.ns, "wg", "set", "wg0", "peer", p.pub,
 			"endpoint", fmt.Sprintf("%s:%d", p.underlay, port),
 			"allowed-ips", p.overlay+"/128")
+	}
+	// --signature is mandatory; provision a grant from the package signer unless the caller manages it.
+	if !slices.Contains(extraArgs, "--signature") {
+		extraArgs = append([]string{
+			"--signature", grantFile(t, n.pub),
+			"--signers", meshSignerArg,
+			"--prefix", clusterPrefix,
+		}, extraArgs...)
 	}
 	args := []string{"netns", "exec", n.ns, meshBin,
 		"--interface", "wg0",
@@ -299,12 +337,7 @@ func buildCluster(t *testing.T, port, n int) []*node {
 	for i := 0; i < n; i++ {
 		name := fmt.Sprintf("wgp%x-%d", id, i)
 		underlay := fmt.Sprintf("10.200.%d.%d", i/250, i%250+1)
-		overlay := fmt.Sprintf("fd00:%x::%x", id, i+1)
-		nodes[i] = newNode(t, name, underlay, overlay, port, bridge)
-	}
-	route := fmt.Sprintf("fd00:%x::/64", id)
-	for _, nd := range nodes {
-		runIn(t, nd.ns, "ip", "-6", "route", "replace", route, "dev", "wg0")
+		nodes[i] = newNode(t, name, underlay, port, bridge, clusterPrefix)
 	}
 	return nodes
 }
