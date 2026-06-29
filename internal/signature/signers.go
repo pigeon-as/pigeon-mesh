@@ -9,7 +9,6 @@ import (
 	"strings"
 )
 
-// ParseSigners parses a signer spec: @path (key file) or comma-separated base64 ed25519 keys.
 func ParseSigners(spec string) ([]ed25519.PublicKey, error) {
 	if path, ok := strings.CutPrefix(spec, "@"); ok {
 		return LoadSigners(path)
@@ -28,7 +27,6 @@ func ParseSigners(spec string) ([]ed25519.PublicKey, error) {
 	return keys, nil
 }
 
-// LoadSigners reads signer keys: one base64 key per line, # comments ok.
 func LoadSigners(path string) ([]ed25519.PublicKey, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -63,7 +61,6 @@ func parseSignerKey(s string) (ed25519.PublicKey, error) {
 	return ed25519.PublicKey(raw), nil
 }
 
-// LoadSignature reads a base64 grant blob, verifying it parses.
 func LoadSignature(path string) ([]byte, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

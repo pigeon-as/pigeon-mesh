@@ -14,8 +14,6 @@ import (
 	"github.com/shoenig/test/must"
 )
 
-// newTestMesh builds a Mesh with its membership maps initialized, for tests that construct it
-// without New (which needs a real wgctrl client).
 func newTestMesh() *Mesh {
 	return &Mesh{
 		members:     map[string]member{},
@@ -51,8 +49,6 @@ func reconcileTriggered(ch chan struct{}) bool {
 	}
 }
 
-// storeConfig sets the hot-reloadable trust config (signers + policy) on a test Mesh built without
-// New, which is where those atomics are normally initialized.
 func storeConfig(m *Mesh, signers []ed25519.PublicKey, policy *PeerPolicy) {
 	m.signers.Store(&signers)
 	m.policy.Store(policy)
@@ -60,10 +56,7 @@ func storeConfig(m *Mesh, signers []ed25519.PublicKey, policy *PeerPolicy) {
 
 var testPrefix = netip.MustParsePrefix("fdcc::/48")
 
-// signedFixture returns the single trust-model fixtures for testKey: a signers list trusting a
-// fresh operator key, testKey's derived overlay /128 under testPrefix, and a grant for testKey
-// valid in a one-hour window around now. The collapse made --signers and --prefix mandatory, so
-// every resolve/setMember test peer must be signed and advertise its key-derived address.
+// signers trusting a fresh operator key, testKey's derived /128, and a grant valid for one hour around now.
 func signedFixture(t *testing.T, now time.Time, routes ...netip.Prefix) (signers []ed25519.PublicKey, ownRoute string, grant []byte) {
 	t.Helper()
 	priv, pub, sub := mkSig(t)
@@ -77,7 +70,7 @@ func signedFixture(t *testing.T, now time.Time, routes ...netip.Prefix) (signers
 func TestReevaluate_StricterPolicyEvictsRoute(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
 	signers, ownRoute, grant := signedFixture(t, now, netip.MustParsePrefix("10.0.0.0/8"))
-	pol, err := ParsePeerPolicy(`route == peer.address`) // reachability-only: keep the /128, drop extras
+	pol, err := ParsePeerPolicy(`route == peer.address`) // reachability-only: keep /128, drop extras
 	must.NoError(t, err)
 	m := newTestMesh()
 	m.cfg = Config{Prefix: testPrefix}
@@ -95,8 +88,7 @@ func TestReevaluate_StricterPolicyEvictsRoute(t *testing.T) {
 }
 
 func TestReevaluate_BlockPeerEvictsAll(t *testing.T) {
-	// Blocking a whole peer by key refuses every route, including its identity /128, but leaves
-	// membership intact (the peer stays admitted in gossip).
+	// Blocking a peer by key refuses every route incl its /128, but membership stays intact.
 	now := time.Unix(1_000_000, 0)
 	signers, ownRoute, grant := signedFixture(t, now, netip.MustParsePrefix("10.0.0.0/8"))
 	pol, err := ParsePeerPolicy(`peer.key != "` + testKey + `"`)
@@ -117,16 +109,16 @@ func TestReevaluate_BlockPeerEvictsAll(t *testing.T) {
 }
 
 func TestReevaluate_LooserPolicyRestoresRoute(t *testing.T) {
-	// Removing the policy (reload to empty => nil) must restore a route it had refused.
+	// Removing the policy (=> nil) must restore a refused route.
 	now := time.Unix(1_000_000, 0)
 	signers, ownRoute, grant := signedFixture(t, now, netip.MustParsePrefix("10.0.0.0/8"))
 	m := newTestMesh()
 	m.cfg = Config{Prefix: testPrefix}
-	storeConfig(m, signers, nil) // policy removed -> nil
+	storeConfig(m, signers, nil)
 	m.members[testKey] = member{
 		peer:          Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute, "10.0.0.0/8"}, Signature: grant},
 		wgPeer:        wgPeer{key: testKey, endpoint: "203.0.113.1:51820", routes: []string{ownRoute}},
-		refusedRoutes: []string{"10.0.0.0/8"}, // previously refused under a since-removed policy
+		refusedRoutes: []string{"10.0.0.0/8"},
 		meta:          []byte("m"),
 	}
 	m.reevaluate(now)
@@ -137,8 +129,7 @@ func TestReevaluate_LooserPolicyRestoresRoute(t *testing.T) {
 }
 
 func TestReevaluate_RejectReasonRefreshes(t *testing.T) {
-	// A peer that stays rejected across a reload but for a DIFFERENT reason must show the fresh
-	// reason (reevaluate re-stores the verdict unconditionally, not only on an admitted<->rejected flip).
+	// Stays rejected across a reload but for a DIFFERENT reason: must show the fresh reason.
 	now := time.Now()
 	priv, pub, sub := mkSig(t)
 	grant, err := signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix())
@@ -146,8 +137,7 @@ func TestReevaluate_RejectReasonRefreshes(t *testing.T) {
 	m := newTestMesh()
 	m.cfg = Config{Prefix: testPrefix}
 	storeConfig(m, []ed25519.PublicKey{pub}, nil)
-	// signed-valid, but advertises a /128 that is not its key derivation, so re-admission rejects it
-	// for the address mismatch -- not the stale "unknown signer" we seed it with.
+	// signed-valid but advertises a non-derived /128: re-admission rejects for address mismatch, not the seeded "unknown signer".
 	m.members[testKey] = member{
 		peer:     Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{"fdcc::dead/128"}, Signature: grant},
 		admitErr: errors.New("unknown signer"),
@@ -159,8 +149,28 @@ func TestReevaluate_RejectReasonRefreshes(t *testing.T) {
 	must.StrContains(t, got.admitErr.Error(), "derives", must.Sprint("the reject reason refreshes to the address mismatch"))
 }
 
+func TestReevaluate_RejectClearsUnauthorizedRoutes(t *testing.T) {
+	// Admitted with an unauthorized route, then rejected by a signer reload: must drop the stale unauthorized route.
+	now := time.Unix(1_000_000, 0)
+	signers, ownRoute, grant := signedFixture(t, now) // grant authorizes only the identity /128
+	m := newTestMesh()
+	m.cfg = Config{Prefix: testPrefix}
+	storeConfig(m, signers, nil)
+	m.members[testKey] = member{
+		peer:               Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute, "10.0.0.0/8"}, Signature: grant},
+		wgPeer:             wgPeer{key: testKey, endpoint: "203.0.113.1:51820", routes: []string{ownRoute}},
+		unauthorizedRoutes: []string{"10.0.0.0/8"},
+		meta:               []byte("m"),
+	}
+	_, otherPub, _ := mkSig(t)
+	storeConfig(m, []ed25519.PublicKey{otherPub}, nil) // reload to a key that doesn't trust the grant
+	m.reevaluate(now)
+	got := m.members[testKey]
+	must.False(t, got.admitted(), must.Sprint("a peer signed by an untrusted key is rejected"))
+	must.SliceEmpty(t, got.unauthorizedRoutes, must.Sprint("a rejected peer reports no unauthorized routes"))
+}
+
 func TestReevaluate_NoopWhenConsistent(t *testing.T) {
-	// An already-consistent member must not churn.
 	now := time.Unix(1_000_000, 0)
 	signers, ownRoute, grant := signedFixture(t, now)
 	m := newTestMesh()
@@ -195,13 +205,11 @@ func TestSetMember_RoamReresolvesEndpoint(t *testing.T) {
 	must.EqOp(t, "203.0.113.1:51820", m.members[testKey].wgPeer.endpoint)
 	must.True(t, reconcileTriggered(m.reconcileCh), must.Sprint("a first advertisement triggers a reconcile"))
 
-	// A re-advertisement that only roams the endpoint changes the meta, so unchanged() must not
-	// suppress it: the member re-resolves and the kernel config carries the new endpoint.
+	// A roam changes the meta, so unchanged() must not suppress it: the member re-resolves with the new endpoint.
 	m.setMember(advertise("203.0.113.2:51820"))
 	must.EqOp(t, "203.0.113.2:51820", m.members[testKey].wgPeer.endpoint, must.Sprint("a roamed endpoint is re-resolved into the kernel config"))
 	must.True(t, reconcileTriggered(m.reconcileCh), must.Sprint("an endpoint roam triggers a reconcile"))
 
-	// The same advertisement again is unchanged: skipped, with no reconcile churn.
 	m.setMember(advertise("203.0.113.2:51820"))
 	must.False(t, reconcileTriggered(m.reconcileCh), must.Sprint("an unchanged advertisement is skipped"))
 }
@@ -224,8 +232,7 @@ func TestSetMember_ReannounceClearsFailed(t *testing.T) {
 	m.removeMember(&memberlist.Node{Name: testKey, State: memberlist.StateDead})
 	must.True(t, m.members[testKey].failed, must.Sprint("the peer is now SWIM-failed"))
 
-	// The same node re-announcing byte-identical meta must not count as unchanged (it is failed),
-	// so setMember re-resolves it and the peer recovers to alive -- not stranded failed.
+	// A failed peer re-announcing identical meta must not be treated as unchanged: it re-resolves and recovers to alive.
 	m.setMember(node)
 	must.False(t, m.members[testKey].failed, must.Sprint("a failed peer re-announcing identical meta recovers to alive"))
 	must.True(t, reconcileTriggered(m.reconcileCh), must.Sprint("recovery re-resolves and triggers a reconcile"))
@@ -270,8 +277,7 @@ func TestCheckSelfExpiry(t *testing.T) {
 	ok.checkSelfExpiry(now)
 	must.False(t, ok.selfExpired.Load(), must.Sprint("a valid signature keeps the node live"))
 
-	// self-heal: a latch left set by a renewal that raced a tick clears once the tick re-reads the
-	// now-valid grant (the old set-only CAS could not express this).
+	// self-heal: a latch left set by a renewal that raced a tick clears once the tick re-reads the valid grant.
 	healed := &Mesh{cfg: Config{Self: Peer{PublicKey: "self", Signature: valid}}}
 	storeConfig(healed, []ed25519.PublicKey{pub}, nil)
 	healed.selfGrant.Store(&valid)
@@ -351,7 +357,7 @@ func TestAdmit_PolicyFiltersRoutes(t *testing.T) {
 	must.Eq(t, []string{ownRoute, "10.1.0.0/16"}, r.wgPeer.routes, must.Sprint("identity kept by matching peer.address; 10/8 subnet accepted"))
 	must.Eq(t, []string{"192.168.0.0/16"}, r.refusedRoutes)
 
-	// nil policy keeps everything, refuses nothing
+	// nil policy keeps everything
 	r = admit(p, testKey, signers, testPrefix, nil, now)
 	must.Eq(t, p.AllowedIPs, r.wgPeer.routes)
 	must.SliceEmpty(t, r.refusedRoutes)
@@ -359,7 +365,7 @@ func TestAdmit_PolicyFiltersRoutes(t *testing.T) {
 
 func TestAdmit_AuthorizesRoutes(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
-	// grant authorizes only 10.0.0.0/8; the peer advertises its /128, a 10/8 subnet, and 192.168/16.
+	// grant authorizes only 10.0.0.0/8
 	signers, ownRoute, grant := signedFixture(t, now, netip.MustParsePrefix("10.0.0.0/8"))
 	p := Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute, "10.1.0.0/16", "192.168.0.0/16"}, Signature: grant}
 
@@ -371,7 +377,7 @@ func TestAdmit_AuthorizesRoutes(t *testing.T) {
 
 func TestAdmit_BroadGrantAuthorizesSubprefixes(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
-	// a 0.0.0.0/0 grant authorizes the default route and any IPv4 sub-prefix by containment.
+	// a 0.0.0.0/0 grant authorizes the default and any sub-prefix by containment.
 	signers, ownRoute, grant := signedFixture(t, now, netip.MustParsePrefix("0.0.0.0/0"))
 	p := Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute, "0.0.0.0/0", "10.0.0.0/8"}, Signature: grant}
 	r := admit(p, testKey, signers, testPrefix, nil, now)
@@ -379,9 +385,8 @@ func TestAdmit_BroadGrantAuthorizesSubprefixes(t *testing.T) {
 	must.SliceEmpty(t, r.unauthorizedRoutes)
 }
 
-// TestStoreDropsKernelPeers guards the load-bearing store() -> delete(m.kernelPeers): once a peer gossips
-// it must leave the kernel-peers set, or reconcile would fold it back from applied after it is rejected
-// or leaves, and never remove it from the kernel (a security/correctness bug the e2e did not catch).
+// Guards store() -> delete(m.kernelPeers): once a peer gossips it must leave the kernel-peers set, else
+// reconcile folds it back from applied and never removes it (e2e missed this).
 func TestStoreDropsKernelPeers(t *testing.T) {
 	m := newTestMesh()
 	m.kernelPeers["seed"] = true

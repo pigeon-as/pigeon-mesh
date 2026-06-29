@@ -16,8 +16,7 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
-// DeriveAddr returns the key-derived overlay address: leftmost host bits of SHA-512(key) under
-// prefix. Pure function of the key, so a node cannot claim another's address.
+// DeriveAddr is a pure function of the key, so a node cannot claim another's address.
 func DeriveAddr(pubkey string, prefix netip.Prefix) (netip.Addr, error) {
 	if !prefix.Addr().Is6() || prefix.Bits()%8 != 0 {
 		return netip.Addr{}, fmt.Errorf("overlay prefix %s must be a byte-aligned IPv6 prefix", prefix)
@@ -35,8 +34,7 @@ func DeriveAddr(pubkey string, prefix netip.Prefix) (netip.Addr, error) {
 	return netip.AddrFrom16(addr), nil
 }
 
-// validateOverlayAddr checks a peer advertises its own key-derived address (and no other inside the
-// prefix). A wrong or missing claim is rejected: identity is self-certifying, never contestable.
+// validateOverlayAddr rejects any wrong or missing address claim: identity is self-certifying, never contestable.
 func validateOverlayAddr(pubkey string, p Peer, prefix netip.Prefix) (netip.Addr, error) {
 	want, err := DeriveAddr(pubkey, prefix)
 	if err != nil {
@@ -52,7 +50,7 @@ func validateOverlayAddr(pubkey string, p Peer, prefix netip.Prefix) (netip.Addr
 			continue
 		}
 		if pfx.Bits() < prefix.Bits() {
-			continue // supernet of the overlay (e.g. ::/0): an aggregate/exit route, not an address claim; defer to --peer-policy
+			continue // supernet (e.g. ::/0): an exit route, not an address claim; defer to --peer-policy
 		}
 		if pfx.Bits() != pfx.Addr().BitLen() || pfx.Addr() != want {
 			return netip.Addr{}, fmt.Errorf("claims overlay route %s but key derives %s", c, want)
@@ -65,9 +63,8 @@ func validateOverlayAddr(pubkey string, p Peer, prefix netip.Prefix) (netip.Addr
 	return want, nil
 }
 
-// guardOverlayRoute is the sole owner of this node's overlay-prefix route: sets it on startup,
-// re-asserts on each netlink resubscribe (covering deletes missed while down) and on external
-// delete. reconcile must not touch this route. No-op without --prefix.
+// guardOverlayRoute is the sole owner of the overlay-prefix route; reconcile must not touch it.
+// Re-asserts on resubscribe (catches deletes missed while down) and on external delete.
 func (m *Mesh) guardOverlayRoute(ctx context.Context) {
 	if !m.cfg.Prefix.IsValid() {
 		return

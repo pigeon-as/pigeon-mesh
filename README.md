@@ -6,6 +6,9 @@ cluster. Nodes are identified by WireGuard public key. No central server.
 
 > **Status:** early development, with breaking changes between v0.0.x versions.
 
+**What it is and what it isn't:** It is an always-on mesh; gossip keeps every tunnel warm, which gives real-time membership and zero first-packet latency, but it isn't suitable for battery powered or roaming clients / road warriors.
+
+
 ## Run
 
 You need a WireGuard interface and an operator signing key (`pigeon-mesh keygen >
@@ -17,8 +20,9 @@ pigeon-mesh --interface wg0 --endpoint 203.0.113.1:51820 --signature node.sig
 ```
 
 The node derives its overlay address from its key (`--prefix`, default `fdcc::/48`)
-and trusts whoever signed its grant. It runs as systemd `Type=notify`. `pigeon-mesh
---help` lists every flag. See the [quickstart](docs/quickstart.md).
+and trusts whoever signed its grant. It runs as systemd `Type=notify` (see
+[systemd](docs/systemd.md)). `pigeon-mesh --help` lists every flag. See the
+[quickstart](docs/quickstart.md).
 
 `--endpoint` accepts [go-sockaddr](https://github.com/hashicorp/go-sockaddr)
 templates for runtime resolution:
@@ -130,10 +134,9 @@ reaped.
 
 ## Performance
 
-A joining node is visible cluster-wide within seconds. A failed node is
-detected and dropped in a few seconds on the `lan` profile or ~30 s on the
-`wan` default. Both grow only logarithmically with cluster size, so it should stay
-responsive into the thousands.
+A joining node is visible cluster-wide within seconds, and a failed one is detected
+in a few seconds on the `lan` profile or ~30 s on the `wan` default. Both grow only
+logarithmically with cluster size, so it should stay responsive into the thousands.
 
 ## Limitations
 

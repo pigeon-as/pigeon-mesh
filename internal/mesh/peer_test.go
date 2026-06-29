@@ -61,8 +61,7 @@ func TestWgPeer_ConfigKeepaliveZeroClears(t *testing.T) {
 	must.EqOp(t, time.Duration(0), *wp.PersistentKeepaliveInterval)
 }
 
-// wgPeer carries no tags, so a tag-only change is structurally invisible to diff; equal
-// compares the kernel fields.
+// wgPeer carries no tags; a tag-only change is invisible to equal.
 func TestWgPeerEqual(t *testing.T) {
 	base := wgPeer{key: testKey, endpoint: "203.0.113.7:51820", routes: []string{"fd00::1/128"}, keepalive: 25}
 	must.True(t, base.equal(base))

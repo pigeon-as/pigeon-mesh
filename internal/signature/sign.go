@@ -1,6 +1,3 @@
-// Package signature implements operator-signed admission grants: an operator signs a
-// short-lived grant for a node's WireGuard public key; peers verify it against trusted
-// signer keys. Pure functions of their inputs, no daemon state or lock.
 package signature
 
 import (
@@ -24,11 +21,9 @@ type claims struct {
 	KeyID     []byte   `cbor:"3,keyasint"`
 	NotBefore int64    `cbor:"4,keyasint"`
 	NotAfter  int64    `cbor:"5,keyasint"`
-	Routes    [][]byte `cbor:"6,keyasint,omitempty"` // transit CIDRs (Prefix.MarshalBinary); omitted = none
+	Routes    [][]byte `cbor:"6,keyasint,omitempty"` // transit CIDRs as Prefix.MarshalBinary
 }
 
-// Grant is a verified operator grant: the node key it authorizes, its expiry, and the transit routes the
-// node may advertise. Returned by Verify only after the signature, key-binding, and expiry checks pass.
 type Grant struct {
 	Sub      []byte
 	NotAfter int64
@@ -66,9 +61,7 @@ func mustDec() cbor.DecMode {
 	return dm
 }
 
-// Sign issues a grant for node key sub, valid in [notBefore, notAfter); notAfter 0 = no expiry. routes
-// are the transit CIDRs the node may advertise beyond its key-derived identity; a grant carrying routes
-// must have an expiry, since a route capability can only be narrowed by letting it lapse.
+// notAfter 0 = no expiry. A route grant must carry an expiry: route capability narrows only by lapsing.
 func Sign(key ed25519.PrivateKey, sub []byte, notBefore, notAfter int64, routes ...netip.Prefix) ([]byte, error) {
 	if len(routes) > 0 && notAfter == 0 {
 		return nil, errors.New("a route grant must carry an expiry")
@@ -80,8 +73,7 @@ func Sign(key ed25519.PrivateKey, sub []byte, notBefore, notAfter int64, routes 
 	return signClaims(key, claims{Sub: sub, NotBefore: notBefore, NotAfter: notAfter, Routes: encRoutes})
 }
 
-// encodeRoutes masks, dedups, and bytewise-sorts the prefixes into canonical wire form (each
-// Prefix.MarshalBinary), so the signed body is stable regardless of input order. nil for no routes.
+// Canonical (masked, deduped, bytewise-sorted) so the signed body is stable regardless of input order.
 func encodeRoutes(routes []netip.Prefix) ([][]byte, error) {
 	if len(routes) == 0 {
 		return nil, nil
@@ -136,9 +128,7 @@ func parse(b []byte) (signedClaims, error) {
 	return s, nil
 }
 
-// Verify checks a grant against the trusted signer keys for node pubkey at time now, returning the
-// verified Grant (its key binding, expiry, and authorized routes). Routes are decoded only after the
-// signature passes, so an unauthenticated reader can never obtain them.
+// Routes are decoded only after the signature passes, so an unauthenticated reader never obtains them.
 func Verify(signers []ed25519.PublicKey, pubkey string, blob []byte, now time.Time) (Grant, error) {
 	s, err := parse(blob)
 	if err != nil {
@@ -147,8 +137,7 @@ func Verify(signers []ed25519.PublicKey, pubkey string, blob []byte, now time.Ti
 	if err := s.verify(signers, pubkey, now); err != nil {
 		return Grant{}, err
 	}
-	// Below runs only on a verified grant, so its claims are authenticated. A grant carrying routes
-	// must have an expiry: a route capability narrows only by lapsing.
+	// verified above, so claims are authenticated; a route grant must carry an expiry.
 	if len(s.Claims.Routes) > 0 && s.Claims.NotAfter == 0 {
 		return Grant{}, errors.New("route grant must carry an expiry")
 	}
@@ -193,7 +182,7 @@ func (s signedClaims) verify(signers []ed25519.PublicKey, pubkey string, now tim
 	return nil
 }
 
-// NotAfter returns a grant's expiry (unix seconds; 0 if absent or unparseable).
+// grant expiry in unix seconds; 0 if absent or unparseable.
 func NotAfter(blob []byte) int64 {
 	if len(blob) == 0 {
 		return 0
@@ -205,8 +194,7 @@ func NotAfter(blob []byte) int64 {
 	return s.Claims.NotAfter
 }
 
-// SignerKey returns the grant's claimed signer key (embedded KeyID), so a node can trust
-// whoever signed its own grant without a --signers flag. Unverified: caller must still Verify.
+// The grant's claimed (unverified) signer key; caller must still Verify.
 func SignerKey(blob []byte) (ed25519.PublicKey, error) {
 	s, err := parse(blob)
 	if err != nil {

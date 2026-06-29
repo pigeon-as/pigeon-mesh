@@ -4,8 +4,6 @@ package mesh
 
 import "github.com/hashicorp/memberlist"
 
-// Thin adapter forwarding memberlist callbacks into the membership engine (member.go).
-
 type delegate struct {
 	mesh *Mesh
 }

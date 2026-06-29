@@ -52,8 +52,7 @@ func TestRunSign_TTLExactNoJitter(t *testing.T) {
 	must.NoError(t, err)
 
 	signers := []ed25519.PublicKey{signerPub}
-	// Valid just before now+ttl and expired just after => notAfter == now+ttl exactly,
-	// with no random jitter added (a jittered grant would push expiry minutes out).
+	// notAfter == now+ttl exactly, no jitter (a jittered grant would push expiry minutes out).
 	_, err = signature.Verify(signers, node, raw, before.Add(time.Hour-time.Second))
 	must.NoError(t, err, must.Sprint("valid just before now+ttl"))
 	_, err = signature.Verify(signers, node, raw, before.Add(time.Hour+2*time.Second))
@@ -65,7 +64,7 @@ func TestRunSign_TTLExactNoJitter(t *testing.T) {
 func TestRunSign_NoExpiry(t *testing.T) {
 	keyPath, signerPub, node := writeSignerKey(t)
 	out := captureStdout(t, func() {
-		must.EqOp(t, 0, runSign([]string{"--key", keyPath, node})) // ttl defaults to 0 = no expiry
+		must.EqOp(t, 0, runSign([]string{"--key", keyPath, node}))
 	})
 	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(out))
 	must.NoError(t, err)

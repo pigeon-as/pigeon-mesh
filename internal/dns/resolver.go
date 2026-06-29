@@ -24,7 +24,6 @@ const (
 	dbusBrokerPath   = dbus.ObjectPath("/org/freedesktop/DBus")
 	nameOwnerChanged = "NameOwnerChanged"
 
-	// Bounds every resolved D-Bus call.
 	resolvedCallTimeout = 2 * time.Second
 	watchBackoffMax     = 30 * time.Second
 )
@@ -39,15 +38,13 @@ type resolvedLinkDomain struct {
 	RoutingOnly bool
 }
 
-// Config for the overlay DNS server. Empty Zone disables DNS entirely.
+// Empty Zone disables DNS.
 type Config struct {
 	Iface string
 	Addr  netip.Addr
 	Zone  string
 }
 
-// Serve answers A/AAAA for cfg.Zone and routes the zone there via systemd-resolved,
-// re-asserting if resolved restarts. Blocks until ctx cancel, then reverts. No-op if Zone empty.
 func Serve(ctx context.Context, cfg Config, records func() map[string]netip.Addr) {
 	zone := normalizeZone(cfg.Zone)
 	if zone == "" {
@@ -98,7 +95,7 @@ func Serve(ctx context.Context, cfg Config, records func() map[string]netip.Addr
 	_ = tcp.Shutdown()
 }
 
-// watch re-programs resolved on each restart (name owner change); a restart wipes our link config.
+// resolved restart wipes our link config; reprogram on each (re)start.
 func watch(ctx context.Context, iface string, addr netip.Addr, zone string) {
 	match := []dbus.MatchOption{
 		dbus.WithMatchObjectPath(dbusBrokerPath),
@@ -185,8 +182,7 @@ func resync(ctx context.Context, iface string, addr netip.Addr, zone string) {
 	}
 }
 
-// program points resolved at addr for zone on iface: routing-only split-DNS, with
-// DNSSEC/LLMNR/mDNS/DoT disabled on the link. Old resolved versions lack some calls; tolerated.
+// Old resolved versions lack some of these calls; tolerated.
 func program(iface string, addr netip.Addr, zone string) error {
 	ifi, err := net.InterfaceByName(iface)
 	if err != nil {
@@ -218,7 +214,7 @@ func program(iface string, addr netip.Addr, zone string) error {
 		return fmt.Errorf("SetLinkDomains: %w", err)
 	}
 	if call := mgr.CallWithContext(ctx, resolvedManagerIface+".SetLinkDefaultRoute", 0, idx, false); call.Err != nil {
-		// SetLinkDefaultRoute is absent on old systemd-resolved (e.g. v237); tolerate it.
+		// absent on old systemd-resolved (e.g. v237); tolerate
 		if dbusErr, ok := call.Err.(dbus.Error); ok && dbusErr.Name == dbus.ErrMsgUnknownMethod.Name {
 			slog.Debug("resolved SetLinkDefaultRoute unsupported; continuing", "err", call.Err)
 		} else {
@@ -252,7 +248,7 @@ func revert(iface string) {
 		slog.Debug("revert resolved", "err", err)
 		return
 	}
-	// Fresh bounded context: run ctx is already cancelled, must not wedge teardown.
+	// fresh ctx: run ctx already cancelled, must not wedge teardown.
 	ctx, cancel := context.WithTimeout(context.Background(), resolvedCallTimeout)
 	defer cancel()
 	mgr := conn.Object(resolvedDest, resolvedPath)

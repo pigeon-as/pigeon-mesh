@@ -15,7 +15,6 @@ import (
 	"github.com/pigeon-as/pigeon-mesh/internal/signature"
 )
 
-// stringList is a repeatable string flag (one value per occurrence).
 type stringList []string
 
 func (s *stringList) String() string     { return strings.Join(*s, ",") }
@@ -57,8 +56,8 @@ func runSign(args []string) int {
 	fs.Parse(args)
 
 	node := fs.Arg(0)
-	if *keyFile == "" || node == "" {
-		fmt.Fprintln(os.Stderr, "usage: pigeon-mesh sign --key <key> [--ttl <dur>] [--route <cidr> ...] <node-wg-pubkey>")
+	if *keyFile == "" || node == "" || fs.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "usage: pigeon-mesh sign --key <key> [--ttl <dur>] [--route <cidr> ...] <node-wg-pubkey> (flags before the pubkey)")
 		return 2
 	}
 	if *ttl < 0 {

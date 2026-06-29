@@ -31,7 +31,6 @@ const (
 
 	kernelSettle = 30 * time.Second
 
-	// grantUpdateTimeout bounds the wait for a renewed grant to gossip to a peer.
 	grantUpdateTimeout = 5 * time.Second
 )
 
@@ -51,25 +50,21 @@ type Config struct {
 }
 
 type Mesh struct {
-	// configuration and the gossip layer (cfg/selfAddr immutable after New)
-	cfg        Config
-	meta       atomic.Pointer[[]byte] // encoded self advertisement; re-advertised on grant renewal
-	selfGrant  atomic.Pointer[[]byte] // current operator grant; swapped on hitless renewal
-	selfAddr   netip.Addr             // this node's key-derived overlay address, parsed from cfg.BindAddr
+	cfg        Config // cfg/selfAddr immutable after New
+	meta       atomic.Pointer[[]byte]
+	selfGrant  atomic.Pointer[[]byte]
+	selfAddr   netip.Addr
 	memberlist *memberlist.Memberlist
 
-	// membership state, all under mu
-	mu          sync.RWMutex
-	members     map[string]member   // gossip-derived members, keyed by pubkey
-	applied     map[string]wgPeer   // last config pushed to the kernel; the diff baseline
-	kernelPeers map[string]bool     // kernel peers present at startup, awaiting first gossip; dropped once they gossip
-	contested   map[string][]string // overlay routes claimed by >1 peer, installed for none
+	mu          sync.RWMutex // guards the membership maps below
+	members     map[string]member
+	applied     map[string]wgPeer
+	kernelPeers map[string]bool     // kernel peers awaiting first gossip; dropped once they gossip
+	contested   map[string][]string // claimed by >1 peer, installed for none
 
-	// hot-reloadable trust config, swapped whole on SIGHUP so a reader gets a lock-free snapshot
-	signers atomic.Pointer[[]ed25519.PublicKey]
+	signers atomic.Pointer[[]ed25519.PublicKey] // swapped whole on SIGHUP for lock-free reads
 	policy  atomic.Pointer[PeerPolicy]
 
-	// lifecycle: reconcile signalling, join tracking, shutdown
 	reconcileCh chan struct{}
 	leave       chan struct{}
 	joinedAt    atomic.Int64
@@ -93,8 +88,7 @@ func New(cfg Config) (*Mesh, error) {
 		return nil, fmt.Errorf("encoded self meta %d bytes exceeds limit %d", len(meta), memberlist.MetaMaxSize)
 	}
 
-	// Floor the timeout to 2 probe cycles: reaping sooner would tear down a tunnel a brief
-	// partition or peer restart would have restored. The margin, not loop ordering, protects it.
+	// Floor to 2 probe cycles: reaping sooner tears down a tunnel a brief partition/restart would restore.
 	if floor := 2 * reconnectInterval; cfg.ReconnectTimeout < floor {
 		if cfg.ReconnectTimeout > 0 {
 			slog.Warn("--reconnect-timeout is shorter than the reconnect probe cycle; raising it so peers are not reaped before they can reconnect",
@@ -141,13 +135,11 @@ func New(cfg Config) (*Mesh, error) {
 	mc.Events = d
 	mc.Conflict = d
 	mc.Logger = newMemberlistLogger()
-	// Name and gossip address are both key-derived, so a same-key restart reclaims its name for free;
-	// this only bites a restart on a different --gossip-port, reclaiming in 30s vs --reconnect-timeout.
+	// Name+gossip addr both key-derived: a same-key restart reclaims its name free; only bites a restart on a different --gossip-port.
 	mc.DeadNodeReclaimTime = 30 * time.Second
 
-	// Must seed kernelPeers BEFORE Create starts the gossip listener: a remote join landing first
-	// makes store()'s delete no-op, re-adds the peer, and leaves it un-removable on graceful leave.
-	// Do NOT move after Create. After the profile switch so an invalid profile returns untouched.
+	// Must seed kernelPeers before Create: a remote join landing first makes store()'s delete a no-op,
+	// leaving the peer un-removable on graceful leave. After the profile switch so an invalid profile returns untouched.
 	if err := m.adoptKernelPeers(); err != nil {
 		slog.Warn("adopt kernel peers; departed peers may persist this run", "err", err)
 	}
@@ -183,8 +175,8 @@ func (m *Mesh) Run(ctx context.Context) error {
 		if err := m.shutdownMemberlist(); err != nil {
 			slog.Warn("memberlist shutdown", "err", err)
 		}
-		// Graceful leave only: undo the overlay address+route we assigned (interface is not ours).
-		// After runCtx cancel, so the route monitor will not re-assert it.
+		// Graceful leave only: undo the overlay addr+route we assigned (interface not ours).
+		// After runCtx cancel so the route monitor won't re-assert it.
 		if leaving {
 			if err := m.cfg.WG.DelRoute(m.cfg.Iface, m.cfg.Prefix); err != nil {
 				slog.Warn("remove overlay route on leave", "err", err)
@@ -208,7 +200,7 @@ func (m *Mesh) Run(ctx context.Context) error {
 		m.serveDNS(runCtx)
 	})
 
-	// Async: a synchronous join would block Run (and leave/shutdown) on a cold seed tunnel.
+	// Async: a synchronous join would block Run on a cold seed tunnel.
 	go m.retryJoin(runCtx)
 	go m.reconnect(runCtx)
 	go m.maintain(runCtx)
