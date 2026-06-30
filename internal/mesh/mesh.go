@@ -61,6 +61,7 @@ type Mesh struct {
 	applied     map[string]wgPeer
 	kernelPeers map[string]bool     // kernel peers awaiting first gossip; dropped once they gossip
 	contested   map[string][]string // claimed by >1 peer, installed for none
+	isolated    bool                // isolation warn-once latch
 
 	signers atomic.Pointer[[]ed25519.PublicKey] // swapped whole on SIGHUP for lock-free reads
 	policy  atomic.Pointer[PeerPolicy]

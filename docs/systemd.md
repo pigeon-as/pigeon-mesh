@@ -53,6 +53,15 @@ ExecStart=/usr/local/bin/pigeon-mesh --interface wg0 --signature %d/pigeon-grant
 Restart=on-failure
 WatchdogSec=30
 
+# NET_ADMIN drives WireGuard/routes; NET_BIND_SERVICE only matters with --dns on :53
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/run
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
 [Install]
 WantedBy=multi-user.target
 ```

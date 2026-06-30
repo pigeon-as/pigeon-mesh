@@ -200,7 +200,6 @@ func (m *Mesh) reevaluate(now time.Time) {
 	signers, policy := *m.signers.Load(), m.policy.Load()
 	m.mu.Lock()
 	changed := false
-	admitted, installed := 0, 0
 	for name, e := range m.members {
 		nv := admit(e.peer, name, signers, m.cfg.Prefix, policy, now)
 		if e.admitted() && !nv.admitted() {
@@ -212,12 +211,6 @@ func (m *Mesh) reevaluate(now time.Time) {
 		if len(e.unauthorizedRoutes) == 0 && len(nv.unauthorizedRoutes) > 0 {
 			slog.Warn("peer advertises routes its grant does not authorize; not installed", "pubkey", name, "routes", nv.unauthorizedRoutes)
 		}
-		if nv.admitted() {
-			admitted++
-			if len(nv.wgPeer.routes) > 0 {
-				installed++
-			}
-		}
 		// Rejected => zero wgPeer, so reject<->admit flips and route changes both show here.
 		if !e.wgPeer.equal(nv.wgPeer) {
 			changed = true
@@ -226,10 +219,6 @@ func (m *Mesh) reevaluate(now time.Time) {
 		m.members[name] = e
 	}
 	m.mu.Unlock()
-	// Admitted but nothing installed: an over-broad reload cut this node off (gossip rides the tunnels).
-	if admitted > 0 && installed == 0 {
-		slog.Warn("--peer-policy installs no routes for any peer; this node is now isolated")
-	}
 	if changed {
 		m.triggerReconcile()
 	}

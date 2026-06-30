@@ -243,7 +243,7 @@ func TestExpireGrants(t *testing.T) {
 	now := time.Now()
 	m.members["accepted-noexpiry"] = member{grantExpiry: 0}
 	m.members["accepted-valid"] = member{grantExpiry: now.Add(time.Hour).Unix()}
-	m.members["accepted-expired"] = member{grantExpiry: now.Add(-time.Second).Unix()}
+	m.members["accepted-expired"] = member{grantExpiry: now.Add(-time.Second).Unix(), refusedRoutes: []string{"192.168.0.0/16"}, unauthorizedRoutes: []string{"10.0.0.0/8"}}
 	m.members["already-rejected"] = member{admitErr: errors.New("no signature")}
 	m.members["failed-expired"] = member{failed: true, grantExpiry: now.Add(-time.Hour).Unix()}
 
@@ -252,6 +252,8 @@ func TestExpireGrants(t *testing.T) {
 	must.NoError(t, m.members["accepted-noexpiry"].admitErr, must.Sprint("a member with no expiry stays admitted"))
 	must.NoError(t, m.members["accepted-valid"].admitErr, must.Sprint("a member with a future expiry stays admitted"))
 	must.EqOp(t, "signature expired", m.members["accepted-expired"].admitErr.Error())
+	must.SliceEmpty(t, m.members["accepted-expired"].unauthorizedRoutes, must.Sprint("expiry clears the unauthorized-route register"))
+	must.SliceEmpty(t, m.members["accepted-expired"].refusedRoutes, must.Sprint("expiry clears the refused-route register"))
 	must.EqOp(t, "no signature", m.members["already-rejected"].admitErr.Error())
 	must.EqOp(t, "signature expired", m.members["failed-expired"].admitErr.Error(), must.Sprint("expiry is enforced even for offline/failed peers"))
 }

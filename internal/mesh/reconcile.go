@@ -119,9 +119,15 @@ func (m *Mesh) reconcile() error {
 	// Snapshot under read lock, apply lock-free (WG.Apply is slow I/O).
 	m.mu.RLock()
 	desired := make(map[string]wgPeer, len(m.members)+len(m.kernelPeers))
+	admitted, installed := 0, 0
 	for name, e := range m.members {
+		if !e.admitted() {
+			continue
+		}
+		admitted++
 		// Omit policy-blocked members (no routes) so diff() removes them and toWG() isn't called on empty AllowedIPs.
-		if e.admitted() && len(e.wgPeer.routes) > 0 {
+		if len(e.wgPeer.routes) > 0 {
+			installed++
 			desired[name] = e.wgPeer
 		}
 	}
@@ -158,10 +164,16 @@ func (m *Mesh) reconcile() error {
 		}
 	}
 	m.contested = contested
+	nowIsolated := admitted > 0 && installed == 0
+	wasIsolated := m.isolated
+	m.isolated = nowIsolated
 	m.mu.Unlock()
 
 	for _, route := range newlyContested {
 		slog.Warn("route claimed by more than one peer; installed for none until resolved", "route", route, "claimed_by", contested[route])
+	}
+	if nowIsolated && !wasIsolated {
+		slog.Warn("--peer-policy installs no routes for any peer; this node is now isolated")
 	}
 	return nil
 }
