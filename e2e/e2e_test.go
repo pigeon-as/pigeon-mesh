@@ -494,7 +494,11 @@ func TestMesh_SignatureRevocation(t *testing.T) {
 	// Operator signs an anti-grant for c (horizon = c's grant expiry) and injects it on a only.
 	antiGrant, err := exec.Command(meshBin, "sign-revocation", "--key", keyFile, "--grant", sigC, c.pub).Output()
 	must.NoError(t, err)
-	out, err := exec.Command(meshBin, "revoke", "--socket", sock, strings.TrimSpace(string(antiGrant))).CombinedOutput()
+	var out []byte
+	waitFor(t, "a's status socket accepts the revoke", 10*time.Second, func() bool {
+		out, err = exec.Command(meshBin, "revoke", "--socket", sock, strings.TrimSpace(string(antiGrant))).CombinedOutput()
+		return err == nil
+	})
 	must.NoError(t, err, must.Sprintf("revoke: %s", out))
 
 	// a evicts c directly; b evicts c having learned the revocation only over gossip.
