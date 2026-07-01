@@ -31,7 +31,7 @@ func revokedSetup(t *testing.T, now time.Time) (signers []ed25519.PublicKey, pee
 	priv, pub, sub := mkSig(t)
 	derived, err := DeriveAddr(testKey, testPrefix)
 	must.NoError(t, err)
-	grant, err := signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix())
+	grant, err := signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), "")
 	must.NoError(t, err)
 	antiGrant, err = signature.SignRevocation(priv, sub, now.Add(time.Hour).Unix())
 	must.NoError(t, err)

@@ -69,7 +69,7 @@ func signedFixture(t *testing.T, now time.Time, routes ...netip.Prefix) (signers
 	priv, pub, sub := mkSig(t)
 	derived, err := DeriveAddr(testKey, testPrefix)
 	must.NoError(t, err)
-	grant, err = signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), routes...)
+	grant, err = signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), "", routes...)
 	must.NoError(t, err)
 	return []ed25519.PublicKey{pub}, HostRoute(derived).String(), grant
 }
@@ -139,7 +139,7 @@ func TestReevaluate_RejectReasonRefreshes(t *testing.T) {
 	// Stays rejected across a reload but for a DIFFERENT reason: must show the fresh reason.
 	now := time.Now()
 	priv, pub, sub := mkSig(t)
-	grant, err := signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix())
+	grant, err := signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), "")
 	must.NoError(t, err)
 	m := newTestMesh()
 	m.cfg = Config{Prefix: testPrefix}
@@ -268,7 +268,7 @@ func TestExpireGrants(t *testing.T) {
 func TestCheckSelfExpiry(t *testing.T) {
 	priv, pub, sub := mkSig(t)
 	now := time.Now()
-	blob, err := signature.Sign(priv, sub, now.Add(-time.Hour).Unix(), now.Add(-time.Minute).Unix())
+	blob, err := signature.Sign(priv, sub, now.Add(-time.Hour).Unix(), now.Add(-time.Minute).Unix(), "")
 	must.NoError(t, err)
 	m := &Mesh{cfg: Config{Self: Peer{PublicKey: "self", Signature: blob}}}
 	storeConfig(m, []ed25519.PublicKey{pub}, nil)
@@ -278,7 +278,7 @@ func TestCheckSelfExpiry(t *testing.T) {
 	m.checkSelfExpiry(now)
 	must.True(t, m.selfExpired.Load(), must.Sprint("an expired own signature halts self participation"))
 
-	valid, err := signature.Sign(priv, sub, now.Add(-time.Hour).Unix(), now.Add(time.Hour).Unix())
+	valid, err := signature.Sign(priv, sub, now.Add(-time.Hour).Unix(), now.Add(time.Hour).Unix(), "")
 	must.NoError(t, err)
 	ok := &Mesh{cfg: Config{Self: Peer{PublicKey: "self", Signature: valid}}}
 	storeConfig(ok, []ed25519.PublicKey{pub}, nil)
@@ -305,7 +305,7 @@ func TestAdmit(t *testing.T) {
 	signers := []ed25519.PublicKey{pub}
 	now := time.Unix(1_000_000, 0)
 	sign := func(notBefore, notAfter int64) []byte {
-		blob, err := signature.Sign(priv, sub, notBefore, notAfter)
+		blob, err := signature.Sign(priv, sub, notBefore, notAfter, "")
 		must.NoError(t, err)
 		return blob
 	}
