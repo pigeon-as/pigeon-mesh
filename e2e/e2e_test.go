@@ -398,11 +398,7 @@ func signNode(t *testing.T, signer ed25519.PrivateKey, n *node, ttl time.Duratio
 	t.Helper()
 	sub, err := base64.StdEncoding.DecodeString(n.pub)
 	must.NoError(t, err)
-	var notAfter int64
-	if ttl > 0 {
-		notAfter = time.Now().Add(ttl).Unix()
-	}
-	blob, err := signature.Sign(signer, sub, time.Now().Add(-time.Minute).Unix(), notAfter)
+	blob, err := signature.Sign(signer, sub, time.Now().Add(-time.Minute).Unix(), time.Now().Add(ttl).Unix())
 	must.NoError(t, err)
 	return writeFile(t, base64.StdEncoding.EncodeToString(blob))
 }
@@ -458,6 +454,10 @@ func TestMesh_Signature(t *testing.T) {
 	must.StrNotContains(t, wgPeers(b), c.pub, must.Sprint("b re-admitted untrusted c"))
 }
 
+// A gossip-native anti-grant injected on one node revokes a third node across the whole mesh, including
+// the peer that never received the injection (b learns it only over gossip). Supersedes the old
+// signer-rotation stand-in: this exercises the real revocation path (sign-revocation + the socket revoke
+// verb + memberlist broadcast/push-pull) end to end.
 func TestMesh_SignatureRevocation(t *testing.T) {
 	skipIfNoNetns(t)
 	newBridge(t, "wgmrev-br")
@@ -465,36 +465,42 @@ func TestMesh_SignatureRevocation(t *testing.T) {
 
 	a := newPrefixNode(t, "wgmrev-a", "10.156.0.1", 51820, "wgmrev-br", prefix)
 	b := newPrefixNode(t, "wgmrev-b", "10.156.0.2", 51820, "wgmrev-br", prefix)
+	c := newPrefixNode(t, "wgmrev-c", "10.156.0.3", 51820, "wgmrev-br", prefix)
 
-	signer1pub, signer1priv, err := ed25519.GenerateKey(nil)
+	signerPub, signerPriv, err := ed25519.GenerateKey(nil)
 	must.NoError(t, err)
-	signer2pub, _, err := ed25519.GenerateKey(nil)
-	must.NoError(t, err)
-
-	signersA := filepath.Join(t.TempDir(), "signersA")
-	signersB := filepath.Join(t.TempDir(), "signersB")
-	must.NoError(t, os.WriteFile(signersA, []byte(base64.StdEncoding.EncodeToString(signer1pub)+"\n"), 0o600))
-	must.NoError(t, os.WriteFile(signersB, []byte(base64.StdEncoding.EncodeToString(signer1pub)+"\n"), 0o600))
-	sigA := signNode(t, signer1priv, a, time.Hour)
-	sigB := signNode(t, signer1priv, b, time.Hour)
+	signers := base64.StdEncoding.EncodeToString(signerPub)
+	keyFile := writeFile(t, base64.StdEncoding.EncodeToString(signerPriv))
+	sigA := signNode(t, signerPriv, a, time.Hour)
+	sigB := signNode(t, signerPriv, b, time.Hour)
+	sigC := signNode(t, signerPriv, c, time.Hour)
 
 	sock := filepath.Join(t.TempDir(), "a.sock")
-	cmdA := startMesh(t, a, []*node{b}, 51820, "--prefix", prefix, "--socket", sock,
-		"--signers", "@"+signersA, "--signature", sigA)
-	startMesh(t, b, []*node{a}, 51820, "--prefix", prefix,
-		"--signers", "@"+signersB, "--signature", sigB)
+	startMesh(t, a, []*node{b, c}, 51820, "--prefix", prefix, "--socket", sock, "--signers", signers, "--signature", sigA)
+	startMesh(t, b, []*node{a, c}, 51820, "--prefix", prefix, "--signers", signers, "--signature", sigB)
+	startMesh(t, c, []*node{a, b}, 51820, "--prefix", prefix, "--signers", signers, "--signature", sigC)
 
-	waitFor(t, "a admits b under signer 1", 30*time.Second, func() bool {
-		out, err := exec.Command(meshBin, "status", "--socket", sock, "--json").Output()
-		return err == nil && strings.Contains(string(out), b.pub) && strings.Contains(wgPeers(a), b.pub)
+	waitFor(t, "all three admit each other", 30*time.Second, func() bool {
+		return strings.Contains(wgPeers(a), c.pub) && strings.Contains(wgPeers(b), c.pub) &&
+			strings.Contains(wgPeers(a), b.pub)
 	})
 
-	must.NoError(t, os.WriteFile(signersA, []byte(base64.StdEncoding.EncodeToString(signer2pub)+"\n"), 0o600))
-	must.NoError(t, cmdA.Process.Signal(syscall.SIGHUP))
+	// Operator signs an anti-grant for c (horizon = c's grant expiry) and injects it on a only.
+	antiGrant, err := exec.Command(meshBin, "sign-revocation", "--key", keyFile, "--grant", sigC, c.pub).Output()
+	must.NoError(t, err)
+	out, err := exec.Command(meshBin, "revoke", "--socket", sock, strings.TrimSpace(string(antiGrant))).CombinedOutput()
+	must.NoError(t, err, must.Sprintf("revoke: %s", out))
 
-	waitFor(t, "a evicts b once b's signer is rotated out", 15*time.Second, func() bool {
-		return !strings.Contains(wgPeers(a), b.pub)
+	// a evicts c directly; b evicts c having learned the revocation only over gossip.
+	waitFor(t, "the anti-grant gossips: a and b both evict c", 30*time.Second, func() bool {
+		return !strings.Contains(wgPeers(a), c.pub) && !strings.Contains(wgPeers(b), c.pub)
 	})
+
+	// Terminal and targeted: c stays out even while it keeps advertising a valid grant, and a/b keep each other.
+	time.Sleep(3 * time.Second)
+	must.StrNotContains(t, wgPeers(a), c.pub, must.Sprint("a re-admitted a revoked node"))
+	must.StrNotContains(t, wgPeers(b), c.pub, must.Sprint("b re-admitted a revoked node"))
+	must.StrContains(t, wgPeers(a), b.pub, must.Sprint("revocation of c must not evict b"))
 }
 
 func TestMesh_DuplicateRouteDropped(t *testing.T) {

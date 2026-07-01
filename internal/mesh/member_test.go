@@ -15,13 +15,16 @@ import (
 )
 
 func newTestMesh() *Mesh {
-	return &Mesh{
+	m := &Mesh{
 		members:     map[string]member{},
 		applied:     map[string]wgPeer{},
 		kernelPeers: map[string]bool{},
 		contested:   map[string][]string{},
 		reconcileCh: make(chan struct{}, 1),
 	}
+	revoked := map[string]revocation{}
+	m.revoked.Store(&revoked)
+	return m
 }
 
 func TestReapDead(t *testing.T) {
@@ -52,6 +55,10 @@ func reconcileTriggered(ch chan struct{}) bool {
 func storeConfig(m *Mesh, signers []ed25519.PublicKey, policy *PeerPolicy) {
 	m.signers.Store(&signers)
 	m.policy.Store(policy)
+	if m.revoked.Load() == nil {
+		revoked := map[string]revocation{}
+		m.revoked.Store(&revoked)
+	}
 }
 
 var testPrefix = netip.MustParsePrefix("fdcc::/48")
@@ -243,7 +250,7 @@ func TestExpireGrants(t *testing.T) {
 	now := time.Now()
 	m.members["accepted-noexpiry"] = member{grantExpiry: 0}
 	m.members["accepted-valid"] = member{grantExpiry: now.Add(time.Hour).Unix()}
-	m.members["accepted-expired"] = member{grantExpiry: now.Add(-time.Second).Unix()}
+	m.members["accepted-expired"] = member{grantExpiry: now.Add(-time.Second).Unix(), refusedRoutes: []string{"192.168.0.0/16"}, unauthorizedRoutes: []string{"10.0.0.0/8"}}
 	m.members["already-rejected"] = member{admitErr: errors.New("no signature")}
 	m.members["failed-expired"] = member{failed: true, grantExpiry: now.Add(-time.Hour).Unix()}
 
@@ -252,6 +259,8 @@ func TestExpireGrants(t *testing.T) {
 	must.NoError(t, m.members["accepted-noexpiry"].admitErr, must.Sprint("a member with no expiry stays admitted"))
 	must.NoError(t, m.members["accepted-valid"].admitErr, must.Sprint("a member with a future expiry stays admitted"))
 	must.EqOp(t, "signature expired", m.members["accepted-expired"].admitErr.Error())
+	must.SliceEmpty(t, m.members["accepted-expired"].unauthorizedRoutes, must.Sprint("expiry clears the unauthorized-route register"))
+	must.SliceEmpty(t, m.members["accepted-expired"].refusedRoutes, must.Sprint("expiry clears the refused-route register"))
 	must.EqOp(t, "no signature", m.members["already-rejected"].admitErr.Error())
 	must.EqOp(t, "signature expired", m.members["failed-expired"].admitErr.Error(), must.Sprint("expiry is enforced even for offline/failed peers"))
 }
@@ -331,7 +340,7 @@ func TestAdmit(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			r := admit(tc.peer, testKey, tc.signers, prefix, nil, now)
+			r := admit(tc.peer, testKey, tc.signers, nil, prefix, nil, now)
 			if tc.wantReject == "" {
 				must.NoError(t, r.admitErr)
 			} else {
@@ -351,14 +360,14 @@ func TestAdmit_PolicyFiltersRoutes(t *testing.T) {
 	must.NoError(t, err)
 	p := Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute, "10.1.0.0/16", "192.168.0.0/16"}, Signature: grant}
 
-	r := admit(p, testKey, signers, testPrefix, pol, now)
+	r := admit(p, testKey, signers, nil, testPrefix, pol, now)
 	must.NoError(t, r.admitErr)
 	must.True(t, r.addr.IsValid())
 	must.Eq(t, []string{ownRoute, "10.1.0.0/16"}, r.wgPeer.routes, must.Sprint("identity kept by matching peer.address; 10/8 subnet accepted"))
 	must.Eq(t, []string{"192.168.0.0/16"}, r.refusedRoutes)
 
 	// nil policy keeps everything
-	r = admit(p, testKey, signers, testPrefix, nil, now)
+	r = admit(p, testKey, signers, nil, testPrefix, nil, now)
 	must.Eq(t, p.AllowedIPs, r.wgPeer.routes)
 	must.SliceEmpty(t, r.refusedRoutes)
 }
@@ -369,7 +378,7 @@ func TestAdmit_AuthorizesRoutes(t *testing.T) {
 	signers, ownRoute, grant := signedFixture(t, now, netip.MustParsePrefix("10.0.0.0/8"))
 	p := Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute, "10.1.0.0/16", "192.168.0.0/16"}, Signature: grant}
 
-	r := admit(p, testKey, signers, testPrefix, nil, now)
+	r := admit(p, testKey, signers, nil, testPrefix, nil, now)
 	must.True(t, r.admitted(), must.Sprint("an unauthorized extra route does not reject the peer"))
 	must.Eq(t, []string{ownRoute, "10.1.0.0/16"}, r.wgPeer.routes, must.Sprint("identity /128 and the 10/8 sub-prefix install"))
 	must.Eq(t, []string{"192.168.0.0/16"}, r.unauthorizedRoutes, must.Sprint("a route outside the grant is dropped as unauthorized"))
@@ -380,7 +389,7 @@ func TestAdmit_BroadGrantAuthorizesSubprefixes(t *testing.T) {
 	// a 0.0.0.0/0 grant authorizes the default and any sub-prefix by containment.
 	signers, ownRoute, grant := signedFixture(t, now, netip.MustParsePrefix("0.0.0.0/0"))
 	p := Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute, "0.0.0.0/0", "10.0.0.0/8"}, Signature: grant}
-	r := admit(p, testKey, signers, testPrefix, nil, now)
+	r := admit(p, testKey, signers, nil, testPrefix, nil, now)
 	must.Eq(t, []string{ownRoute, "0.0.0.0/0", "10.0.0.0/8"}, r.wgPeer.routes, must.Sprint("a default-route grant authorizes the default and any sub-prefix"))
 	must.SliceEmpty(t, r.unauthorizedRoutes)
 }
