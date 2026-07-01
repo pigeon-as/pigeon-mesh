@@ -241,6 +241,10 @@ func startMesh(t *testing.T, n *node, peers []*node, port int, extraArgs ...stri
 			"--prefix", clusterPrefix,
 		}, extraArgs...)
 	}
+	// per-node socket so membership is queryable; the default path collides on the shared /run.
+	if !slices.Contains(extraArgs, "--socket") {
+		extraArgs = append(extraArgs, "--socket", sockPath(n))
+	}
 	args := []string{"netns", "exec", n.ns, meshBin,
 		"--interface", "wg0",
 		"--endpoint", fmt.Sprintf("%s:%d", n.underlay, port),
@@ -250,9 +254,12 @@ func startMesh(t *testing.T, n *node, peers []*node, port int, extraArgs ...stri
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	must.NoError(t, cmd.Start())
-	t.Cleanup(func() { stop(cmd) })
+	t.Cleanup(func() { stop(cmd); os.Remove(sockPath(n)) })
 	return cmd
 }
+
+// sockPath is a node's status socket, unique per netns.
+func sockPath(n *node) string { return filepath.Join("/run", n.ns+".sock") }
 
 func waitFor(t *testing.T, what string, timeout, interval time.Duration, cond func() bool) {
 	t.Helper()
@@ -342,8 +349,8 @@ func buildCluster(t *testing.T, port, n int) []*node {
 	return nodes
 }
 
-func bootstrap(t *testing.T, nodes []*node, port, seedCount int, extraArgs ...string) []*exec.Cmd {
-	t.Helper()
+// seedBoots gives each node its bootstrap targets: seeds join all others, non-seeds join the seeds.
+func seedBoots(nodes []*node, seedCount int) [][]*node {
 	seeds := nodes
 	if len(nodes) > seedCount {
 		seeds = nodes[:seedCount]
@@ -352,19 +359,27 @@ func bootstrap(t *testing.T, nodes []*node, port, seedCount int, extraArgs ...st
 	for _, s := range seeds {
 		isSeed[s] = true
 	}
-	cmds := make([]*exec.Cmd, len(nodes))
+	boots := make([][]*node, len(nodes))
 	for i, n := range nodes {
-		var boot []*node
 		if isSeed[n] {
 			for _, other := range nodes {
 				if other != n {
-					boot = append(boot, other)
+					boots[i] = append(boots[i], other)
 				}
 			}
 		} else {
-			boot = seeds
+			boots[i] = seeds
 		}
-		cmds[i] = startMesh(t, n, boot, port, extraArgs...)
+	}
+	return boots
+}
+
+func bootstrap(t *testing.T, nodes []*node, port, seedCount int, extraArgs ...string) []*exec.Cmd {
+	t.Helper()
+	boots := seedBoots(nodes, seedCount)
+	cmds := make([]*exec.Cmd, len(nodes))
+	for i, n := range nodes {
+		cmds[i] = startMesh(t, n, boots[i], port, extraArgs...)
 		time.Sleep(staggerInterval)
 	}
 	return cmds
