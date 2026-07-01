@@ -33,7 +33,7 @@ func revokedSetup(t *testing.T, now time.Time) (signers []ed25519.PublicKey, pee
 	must.NoError(t, err)
 	grant, err := signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix())
 	must.NoError(t, err)
-	antiGrant, err = signature.SignRevocation(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix())
+	antiGrant, err = signature.SignRevocation(priv, sub, now.Add(time.Hour).Unix())
 	must.NoError(t, err)
 	peer = Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{HostRoute(derived).String()}, Signature: grant}
 	return []ed25519.PublicKey{pub}, peer, antiGrant
@@ -61,7 +61,7 @@ func TestReevaluate_RevokedEvicts(t *testing.T) {
 		wgPeer: wgPeer{key: testKey, endpoint: peer.Endpoint, routes: peer.AllowedIPs},
 		meta:   []byte("m"),
 	}
-	must.True(t, m.mergeRevocationBlobs([][]byte{antiGrant}, now), must.Sprint("a fresh revocation changes the set"))
+	must.True(t, m.mergeRevocationBlobs([][]byte{antiGrant}), must.Sprint("a fresh revocation changes the set"))
 	got := m.members[testKey]
 	must.False(t, got.admitted(), must.Sprint("a revoked member is no longer admitted"))
 	must.SliceEmpty(t, got.wgPeer.routes, must.Sprint("a revoked member installs nothing, so reconcile removes its kernel peer"))
@@ -74,19 +74,19 @@ func TestMergeRevocationBlobs_DropsUnverifiable(t *testing.T) {
 	storeConfig(m, signers, nil)
 
 	// the gossip transport is untrusted: garbage and wrong-signer blobs are dropped, never merged.
-	must.False(t, m.mergeRevocationBlobs([][]byte{{0, 1, 2}}, now), must.Sprint("garbage does not enter the set"))
+	must.False(t, m.mergeRevocationBlobs([][]byte{{0, 1, 2}}), must.Sprint("garbage does not enter the set"))
 	must.MapLen(t, 0, *m.revoked.Load())
 
 	otherPriv, _, sub := mkSig(t)
-	wrong, err := signature.SignRevocation(otherPriv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix())
+	wrong, err := signature.SignRevocation(otherPriv, sub, now.Add(time.Hour).Unix())
 	must.NoError(t, err)
-	must.False(t, m.mergeRevocationBlobs([][]byte{wrong}, now), must.Sprint("a wrong-signer revocation is dropped"))
+	must.False(t, m.mergeRevocationBlobs([][]byte{wrong}), must.Sprint("a wrong-signer revocation is dropped"))
 	must.MapLen(t, 0, *m.revoked.Load())
 
 	// the genuine one merges, and re-merging it is a no-op (grow-only).
-	must.True(t, m.mergeRevocationBlobs([][]byte{antiGrant}, now))
+	must.True(t, m.mergeRevocationBlobs([][]byte{antiGrant}))
 	must.MapLen(t, 1, *m.revoked.Load())
-	must.False(t, m.mergeRevocationBlobs([][]byte{antiGrant}, now), must.Sprint("re-merging an existing revocation is a no-op"))
+	must.False(t, m.mergeRevocationBlobs([][]byte{antiGrant}), must.Sprint("re-merging an existing revocation is a no-op"))
 }
 
 func TestReapRevocations(t *testing.T) {
@@ -115,7 +115,7 @@ func TestLoadRevoked(t *testing.T) {
 	path := filepath.Join(dir, "revoked")
 	content := "# operator blocklist\n\n" + base64.StdEncoding.EncodeToString(antiGrant) + "\n"
 	must.NoError(t, os.WriteFile(path, []byte(content), 0o600))
-	set, err := LoadRevoked(path, signers, now)
+	set, err := LoadRevoked(path, signers)
 	must.NoError(t, err)
 	must.MapLen(t, 1, set, must.Sprint("the floor loads the revocation, skipping comments and blanks"))
 	_, ok := set[testKey]
@@ -124,15 +124,15 @@ func TestLoadRevoked(t *testing.T) {
 	// the file is the trusted floor: a malformed or unverifiable line fails the whole load (no silent hole).
 	bad := filepath.Join(dir, "bad")
 	must.NoError(t, os.WriteFile(bad, []byte("not-base64!\n"), 0o600))
-	_, err = LoadRevoked(bad, signers, now)
+	_, err = LoadRevoked(bad, signers)
 	must.Error(t, err, must.Sprint("a malformed line fails the load"))
 
 	wrong := filepath.Join(dir, "wrong")
 	otherPriv, _, sub := mkSig(t)
-	w, err := signature.SignRevocation(otherPriv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix())
+	w, err := signature.SignRevocation(otherPriv, sub, now.Add(time.Hour).Unix())
 	must.NoError(t, err)
 	must.NoError(t, os.WriteFile(wrong, []byte(base64.StdEncoding.EncodeToString(w)+"\n"), 0o600))
-	_, err = LoadRevoked(wrong, signers, now)
+	_, err = LoadRevoked(wrong, signers)
 	must.ErrorContains(t, err, "unknown signer", must.Sprint("an unverifiable line fails the load"))
 }
 
@@ -144,14 +144,14 @@ func TestReloadRevokedFromFile_Unions(t *testing.T) {
 	m := newTestMesh()
 	storeConfig(m, signers, nil)
 
-	gossiped, err := signature.SignRevocation(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix())
+	gossiped, err := signature.SignRevocation(priv, sub, now.Add(time.Hour).Unix())
 	must.NoError(t, err)
-	must.True(t, m.mergeRevocationBlobs([][]byte{gossiped}, now))
+	must.True(t, m.mergeRevocationBlobs([][]byte{gossiped}))
 
 	otherNode := base64.StdEncoding.EncodeToString(append([]byte{9}, make([]byte, 31)...))
 	otherSub, err := base64.StdEncoding.DecodeString(otherNode)
 	must.NoError(t, err)
-	fileRev, err := signature.SignRevocation(priv, otherSub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix())
+	fileRev, err := signature.SignRevocation(priv, otherSub, now.Add(time.Hour).Unix())
 	must.NoError(t, err)
 	path := filepath.Join(t.TempDir(), "revoked")
 	must.NoError(t, os.WriteFile(path, []byte(base64.StdEncoding.EncodeToString(fileRev)+"\n"), 0o600))
@@ -172,7 +172,7 @@ func TestRevocationState_RoundTrip(t *testing.T) {
 
 	a := newTestMesh()
 	storeConfig(a, signers, nil)
-	must.True(t, a.mergeRevocationBlobs([][]byte{antiGrant}, now))
+	must.True(t, a.mergeRevocationBlobs([][]byte{antiGrant}))
 	state := a.revocationState()
 	must.SliceNotEmpty(t, state, must.Sprint("a node ships its anti-grant set in push/pull local state"))
 
@@ -236,7 +236,7 @@ func TestApplyRevoke(t *testing.T) {
 
 	// unlike the silent-drop gossip paths, the socket surfaces a verification failure to the operator.
 	otherPriv, _, sub := mkSig(t)
-	wrong, err := signature.SignRevocation(otherPriv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix())
+	wrong, err := signature.SignRevocation(otherPriv, sub, now.Add(time.Hour).Unix())
 	must.NoError(t, err)
 	must.Error(t, m.applyRevoke(base64.StdEncoding.EncodeToString(wrong)), must.Sprint("an untrusted signer is refused"))
 	must.Error(t, m.applyRevoke("not-base64!"), must.Sprint("garbage is refused"))
@@ -288,9 +288,9 @@ func TestMergeRevocations_ConcurrentFanIn(t *testing.T) {
 	for i := 0; i < N; i++ {
 		sub := make([]byte, 32)
 		sub[0], sub[1] = byte(i), 0xa5
-		blob, err := signature.SignRevocation(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix())
+		blob, err := signature.SignRevocation(priv, sub, now.Add(time.Hour).Unix())
 		must.NoError(t, err)
-		wg.Go(func() { m.mergeRevocationBlobs([][]byte{blob}, now) })
+		wg.Go(func() { m.mergeRevocationBlobs([][]byte{blob}) })
 	}
 	wg.Wait()
 

@@ -212,7 +212,7 @@ func main() {
 		cfg.Signers = []ed25519.PublicKey{signer}
 	}
 	if *revoked != "" {
-		cfg.Revoked, err = mesh.LoadRevoked(*revoked, cfg.Signers, time.Now())
+		cfg.Revoked, err = mesh.LoadRevoked(*revoked, cfg.Signers)
 		if err != nil {
 			slog.Error("revoked", "err", err)
 			os.Exit(1)

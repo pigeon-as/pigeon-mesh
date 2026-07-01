@@ -33,17 +33,17 @@ type revocation struct {
 // LoadRevoked reads a file of base64 anti-grants, verifies each against signers, and keys them by the
 // revoked node pubkey. The file is the config-managed completeness floor (serf's keyring pattern: the
 // authoritative copy is on disk; gossip is the fast layer on top).
-func LoadRevoked(path string, signers []ed25519.PublicKey, now time.Time) (map[string]revocation, error) {
+func LoadRevoked(path string, signers []ed25519.PublicKey) (map[string]revocation, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	return parseRevoked(strings.Split(string(data), "\n"), signers, now)
+	return parseRevoked(strings.Split(string(data), "\n"), signers)
 }
 
 // parseRevoked is strict: a malformed or unverifiable line fails the whole load, so a config mistake in
 // the trusted floor is surfaced rather than silently dropping a revocation.
-func parseRevoked(lines []string, signers []ed25519.PublicKey, now time.Time) (map[string]revocation, error) {
+func parseRevoked(lines []string, signers []ed25519.PublicKey) (map[string]revocation, error) {
 	out := map[string]revocation{}
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -54,7 +54,7 @@ func parseRevoked(lines []string, signers []ed25519.PublicKey, now time.Time) (m
 		if err != nil {
 			return nil, fmt.Errorf("revocation: %w", err)
 		}
-		key, rev, err := verifyRevocation(blob, signers, now)
+		key, rev, err := verifyRevocation(blob, signers)
 		if err != nil {
 			return nil, fmt.Errorf("revocation: %w", err)
 		}
@@ -63,8 +63,8 @@ func parseRevoked(lines []string, signers []ed25519.PublicKey, now time.Time) (m
 	return out, nil
 }
 
-func verifyRevocation(blob []byte, signers []ed25519.PublicKey, now time.Time) (string, revocation, error) {
-	sub, horizon, err := signature.VerifyRevocation(signers, blob, now)
+func verifyRevocation(blob []byte, signers []ed25519.PublicKey) (string, revocation, error) {
+	sub, horizon, err := signature.VerifyRevocation(signers, blob)
 	if err != nil {
 		return "", revocation{}, err
 	}
@@ -103,11 +103,11 @@ func (m *Mesh) mergeRevocations(incoming map[string]revocation) bool {
 
 // mergeRevocationBlobs verifies untrusted blobs (gossip or the socket) against the signer set and unions
 // the valid ones. An unverifiable blob is dropped, not errored: the transport is untrusted.
-func (m *Mesh) mergeRevocationBlobs(blobs [][]byte, now time.Time) bool {
+func (m *Mesh) mergeRevocationBlobs(blobs [][]byte) bool {
 	signers := *m.signers.Load()
 	incoming := map[string]revocation{}
 	for _, blob := range blobs {
-		if key, rev, err := verifyRevocation(blob, signers, now); err == nil {
+		if key, rev, err := verifyRevocation(blob, signers); err == nil {
 			setRevocation(incoming, key, rev)
 		}
 	}
@@ -138,7 +138,7 @@ func (m *Mesh) reapRevocations(now time.Time) bool {
 }
 
 func (m *Mesh) ReloadRevokedFromFile(path string) (int, error) {
-	set, err := LoadRevoked(path, *m.signers.Load(), time.Now())
+	set, err := LoadRevoked(path, *m.signers.Load())
 	if err != nil {
 		return 0, err
 	}
@@ -174,7 +174,7 @@ func (m *Mesh) handleRevocationMsg(buf []byte) {
 		return
 	}
 	blob := bytes.Clone(buf)
-	if m.mergeRevocationBlobs([][]byte{blob}, time.Now()) {
+	if m.mergeRevocationBlobs([][]byte{blob}) {
 		m.queueRevocation(blob)
 	}
 }
@@ -206,7 +206,7 @@ func (m *Mesh) applyRevoke(b64 string) error {
 	if err != nil {
 		return fmt.Errorf("revoke: %w", err)
 	}
-	key, rev, err := verifyRevocation(blob, *m.signers.Load(), time.Now())
+	key, rev, err := verifyRevocation(blob, *m.signers.Load())
 	if err != nil {
 		return fmt.Errorf("revoke: %w", err)
 	}
@@ -227,5 +227,5 @@ func (m *Mesh) mergeRevocationState(buf []byte) {
 		slog.Warn("decode revocation state", "err", err)
 		return
 	}
-	m.mergeRevocationBlobs(blobs, time.Now())
+	m.mergeRevocationBlobs(blobs)
 }

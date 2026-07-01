@@ -106,7 +106,7 @@ func TestRunSignRevocation(t *testing.T) {
 	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(out))
 	must.NoError(t, err)
 
-	sub, horizon, err := signature.VerifyRevocation([]ed25519.PublicKey{signerPub}, raw, time.Now())
+	sub, horizon, err := signature.VerifyRevocation([]ed25519.PublicKey{signerPub}, raw)
 	must.NoError(t, err)
 	nodeRaw, _ := base64.StdEncoding.DecodeString(node)
 	must.Eq(t, nodeRaw, sub, must.Sprint("the anti-grant revokes the node named in the grant"))

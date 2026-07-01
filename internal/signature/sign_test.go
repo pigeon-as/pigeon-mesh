@@ -166,9 +166,9 @@ func TestRevocation_RoundTrip(t *testing.T) {
 	priv, pub, sub := newSigner(t)
 	now := time.Now()
 	horizon := now.Add(time.Hour).Unix()
-	blob, err := SignRevocation(priv, sub, now.Add(-time.Minute).Unix(), horizon)
+	blob, err := SignRevocation(priv, sub, horizon)
 	must.NoError(t, err)
-	gotSub, gotHorizon, err := VerifyRevocation([]ed25519.PublicKey{pub}, blob, now)
+	gotSub, gotHorizon, err := VerifyRevocation([]ed25519.PublicKey{pub}, blob)
 	must.NoError(t, err)
 	must.True(t, bytes.Equal(sub, gotSub), must.Sprint("revocation names the revoked node key"))
 	must.EqOp(t, horizon, gotHorizon)
@@ -179,9 +179,9 @@ func TestRevocation_PastHorizonStillVerifies(t *testing.T) {
 	// can propagate until every node reaps it. Dropping it on receive would re-admit the revoked key.
 	priv, pub, sub := newSigner(t)
 	now := time.Now()
-	blob, err := SignRevocation(priv, sub, now.Add(-2*time.Hour).Unix(), now.Add(-time.Hour).Unix())
+	blob, err := SignRevocation(priv, sub, now.Add(-time.Hour).Unix())
 	must.NoError(t, err)
-	_, horizon, err := VerifyRevocation([]ed25519.PublicKey{pub}, blob, now)
+	_, horizon, err := VerifyRevocation([]ed25519.PublicKey{pub}, blob)
 	must.NoError(t, err, must.Sprint("a past-horizon revocation still verifies"))
 	must.EqOp(t, now.Add(-time.Hour).Unix(), horizon)
 }
@@ -189,17 +189,17 @@ func TestRevocation_PastHorizonStillVerifies(t *testing.T) {
 func TestRevocation_Rejections(t *testing.T) {
 	priv, pub, sub := newSigner(t)
 	now := time.Now()
-	blob, err := SignRevocation(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix())
+	blob, err := SignRevocation(priv, sub, now.Add(time.Hour).Unix())
 	must.NoError(t, err)
 
 	otherPub, _, err := ed25519.GenerateKey(nil)
 	must.NoError(t, err)
-	_, _, err = VerifyRevocation([]ed25519.PublicKey{otherPub}, blob, now)
+	_, _, err = VerifyRevocation([]ed25519.PublicKey{otherPub}, blob)
 	must.ErrorContains(t, err, "unknown signer")
 
 	tampered := bytes.Clone(blob)
 	tampered[len(tampered)-1] ^= 0xff
-	_, _, err = VerifyRevocation([]ed25519.PublicKey{pub}, tampered, now)
+	_, _, err = VerifyRevocation([]ed25519.PublicKey{pub}, tampered)
 	must.ErrorContains(t, err, "bad signature")
 }
 
@@ -209,7 +209,7 @@ func TestRevocation_ClockIndependent(t *testing.T) {
 	priv, pub, sub := newSigner(t)
 	now := time.Now()
 	future := mint(t, priv, claims{Sub: sub, NotBefore: now.Add(time.Hour).Unix(), NotAfter: now.Add(2 * time.Hour).Unix()}, revocationDomain)
-	gotSub, horizon, err := VerifyRevocation([]ed25519.PublicKey{pub}, future, now)
+	gotSub, horizon, err := VerifyRevocation([]ed25519.PublicKey{pub}, future)
 	must.NoError(t, err, must.Sprint("a revocation verifies even when the receiver's clock is behind its NotBefore"))
 	must.True(t, bytes.Equal(sub, gotSub))
 	must.EqOp(t, now.Add(2*time.Hour).Unix(), horizon)
@@ -222,7 +222,7 @@ func TestRevocation_ClockIndependent(t *testing.T) {
 
 func TestSignRevocation_RequiresHorizon(t *testing.T) {
 	priv, _, sub := newSigner(t)
-	_, err := SignRevocation(priv, sub, time.Now().Unix(), 0)
+	_, err := SignRevocation(priv, sub, 0)
 	must.ErrorContains(t, err, "horizon", must.Sprint("a revocation must carry a reap horizon so the tombstone is bounded"))
 }
 
@@ -235,10 +235,10 @@ func TestDomainSeparation(t *testing.T) {
 
 	grant, err := Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix())
 	must.NoError(t, err)
-	revocation, err := SignRevocation(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix())
+	revocation, err := SignRevocation(priv, sub, now.Add(time.Hour).Unix())
 	must.NoError(t, err)
 
-	_, _, err = VerifyRevocation(signers, grant, now)
+	_, _, err = VerifyRevocation(signers, grant)
 	must.ErrorContains(t, err, "wrong signature domain", must.Sprint("a grant blob does not verify as a revocation"))
 	_, err = Verify(signers, testKey, revocation, now)
 	must.ErrorContains(t, err, "wrong signature domain", must.Sprint("a revocation blob does not verify as a grant"))

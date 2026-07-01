@@ -77,12 +77,13 @@ func Sign(key ed25519.PrivateKey, sub []byte, notBefore, notAfter int64, routes 
 }
 
 // SignRevocation signs an anti-grant: a terminal statement that the grant for sub is dead. notAfter is
-// the reap horizon (the revoked grant's expiry); required so the tombstone is bounded.
-func SignRevocation(key ed25519.PrivateKey, sub []byte, notBefore, notAfter int64) ([]byte, error) {
+// the reap horizon (the revoked grant's expiry); required so the tombstone is bounded. A revocation has
+// no valid-from window: it applies the moment any node sees it, so it carries no NotBefore.
+func SignRevocation(key ed25519.PrivateKey, sub []byte, notAfter int64) ([]byte, error) {
 	if notAfter == 0 {
 		return nil, errors.New("a revocation must carry a reap horizon")
 	}
-	return signClaims(key, claims{Sub: sub, NotBefore: notBefore, NotAfter: notAfter}, revocationDomain)
+	return signClaims(key, claims{Sub: sub, NotAfter: notAfter}, revocationDomain)
 }
 
 // Canonical (masked, deduped, bytewise-sorted) so the signed body is stable regardless of input order.
@@ -144,9 +145,12 @@ func parse(b []byte) (signedClaims, error) {
 // expiry, and unexpired. Routes are decoded only after the signature passes, so an unauthenticated
 // reader never obtains them.
 func Verify(signers []ed25519.PublicKey, pubkey string, blob []byte, now time.Time) (Grant, error) {
-	c, err := verifySig(signers, blob, domain, now, true)
+	c, err := verifySig(signers, blob, domain)
 	if err != nil {
 		return Grant{}, err
+	}
+	if now.Unix() < c.NotBefore {
+		return Grant{}, errors.New("signature not yet valid")
 	}
 	sub, err := base64.StdEncoding.DecodeString(pubkey)
 	if err != nil || !bytes.Equal(sub, c.Sub) {
@@ -166,11 +170,11 @@ func Verify(signers []ed25519.PublicKey, pubkey string, blob []byte, now time.Ti
 }
 
 // VerifyRevocation returns the revoked node key and reap horizon from an anti-grant. A revocation is a
-// terminal fact, accepted on receipt regardless of the receiver's clock: NotBefore is not enforced (a
-// time-behind or clock-skewed node must still honor it, else it fails open), and NotAfter is the reap
-// horizon, not a reject (a past-horizon revocation still propagates until every node reaps it).
-func VerifyRevocation(signers []ed25519.PublicKey, blob []byte, now time.Time) (sub []byte, horizon int64, err error) {
-	c, err := verifySig(signers, blob, revocationDomain, now, false)
+// terminal fact with no time gate: it verifies on signature and domain alone, so a clock-skewed or
+// time-behind node still honors it (else revocation fails open), and NotAfter is the reap horizon,
+// returned as data, never a reject.
+func VerifyRevocation(signers []ed25519.PublicKey, blob []byte) (sub []byte, horizon int64, err error) {
+	c, err := verifySig(signers, blob, revocationDomain)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -178,9 +182,9 @@ func VerifyRevocation(signers []ed25519.PublicKey, blob []byte, now time.Time) (
 }
 
 // verifySig checks domain, signer-set membership, and signature, returning the authenticated claims. The
-// distinct domain stops a grant blob replaying as a revocation. NotBefore is enforced only for grants
-// (enforceNotBefore); a revocation carries no valid-from window since it applies the moment it is seen.
-func verifySig(signers []ed25519.PublicKey, blob []byte, dom string, now time.Time, enforceNotBefore bool) (claims, error) {
+// distinct domain stops a grant blob replaying as a revocation. Time policy is the caller's: Verify gates
+// a grant on NotBefore/NotAfter; a revocation is a terminal fact with no time gate.
+func verifySig(signers []ed25519.PublicKey, blob []byte, dom string) (claims, error) {
 	s, err := parse(blob)
 	if err != nil {
 		return claims{}, err
@@ -204,9 +208,6 @@ func verifySig(signers []ed25519.PublicKey, blob []byte, dom string, now time.Ti
 	}
 	if len(s.Sig) != ed25519.SignatureSize || !ed25519.Verify(signer, body, s.Sig) {
 		return claims{}, errors.New("bad signature")
-	}
-	if enforceNotBefore && now.Unix() < s.Claims.NotBefore {
-		return claims{}, errors.New("signature not yet valid")
 	}
 	return s.Claims, nil
 }
