@@ -137,8 +137,7 @@ func runSignRevocation(args []string) int {
 		fmt.Fprintln(os.Stderr, "the --grant carries no expiry; cannot bound the revocation")
 		return 1
 	}
-	// notBefore is 0: a revocation carries no valid-from window, it applies the moment any node sees it.
-	blob, err := signature.SignRevocation(priv, sub, 0, horizon)
+	blob, err := signature.SignRevocation(priv, sub, horizon)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
