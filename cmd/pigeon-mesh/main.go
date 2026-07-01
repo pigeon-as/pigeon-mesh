@@ -54,7 +54,7 @@ func main() {
 	persistentKeepalive := flag.Int("persistent-keepalive", 0, "PersistentKeepalive interval in seconds advertised to peers (0 disables)")
 	profile := flag.String("profile", "wan", "memberlist timing profile: lan, wan, or local")
 	socket := flag.String("socket", mesh.DefaultSocketPath, "path to the status query socket served for the status command; empty disables")
-	dnsZone := flag.String("dns", "", "serve AAAA records for peers' name= tag and program systemd-resolved split-DNS for this zone (e.g. mesh.internal)")
+	dnsZone := flag.String("dns", "", "serve AAAA records for peers' operator-signed sign --name and program systemd-resolved split-DNS for this zone (e.g. mesh.internal)")
 	prefix := flag.String("prefix", "fdcc::/48", "byte-aligned IPv6 ULA prefix; the daemon derives this node's overlay address from its key (sha512) and assigns it to the interface, and requires every peer's address to be the same derivation of its key (self-certifying)")
 	signers := flag.String("signers", "", "trusted operator signer key(s) to verify peers against: a base64 key, comma-separated, or @file (SIGHUP-reloadable). Defaults to the key that signed this node's own --signature; set it explicitly only to pin multiple operators or to rotate signers")
 	signatureFile := flag.String("signature", "", "path to this node's base64 operator-signed grant (required); advertised to peers for admission (SIGHUP-reloadable for hitless renewal)")
