@@ -45,6 +45,7 @@ type Config struct {
 	Policy           *PeerPolicy
 	DNSZone          string
 	Signers          []ed25519.PublicKey
+	Revoked          map[string]revocation
 	ReconnectTimeout time.Duration
 	WG               *wg.Client
 }
@@ -56,6 +57,8 @@ type Mesh struct {
 	selfAddr   netip.Addr
 	memberlist *memberlist.Memberlist
 
+	revocationBroadcasts *memberlist.TransmitLimitedQueue // epidemic fast-path for newly learned anti-grants
+
 	mu          sync.RWMutex // guards the membership maps below
 	members     map[string]member
 	applied     map[string]wgPeer
@@ -63,13 +66,16 @@ type Mesh struct {
 	contested   map[string][]string // claimed by >1 peer, installed for none
 	isolated    bool                // isolation warn-once latch
 
-	signers atomic.Pointer[[]ed25519.PublicKey] // swapped whole on SIGHUP for lock-free reads
-	policy  atomic.Pointer[PeerPolicy]
+	signers   atomic.Pointer[[]ed25519.PublicKey] // swapped whole on SIGHUP for lock-free reads
+	policy    atomic.Pointer[PeerPolicy]
+	revoked   atomic.Pointer[map[string]revocation] // grow-only anti-grant set; copy-on-write under revokedMu
+	revokedMu sync.Mutex
 
 	reconcileCh chan struct{}
 	leave       chan struct{}
 	joinedAt    atomic.Int64
 	selfExpired atomic.Bool
+	selfRevoked atomic.Bool
 	shutdownMu  sync.Mutex
 	shutdown    bool
 }
@@ -118,6 +124,11 @@ func New(cfg Config) (*Mesh, error) {
 	sigs := cfg.Signers
 	m.signers.Store(&sigs)
 	m.policy.Store(cfg.Policy)
+	revoked := cfg.Revoked
+	if revoked == nil {
+		revoked = map[string]revocation{}
+	}
+	m.revoked.Store(&revoked)
 
 	d := &delegate{mesh: m}
 	var mc *memberlist.Config
@@ -138,6 +149,18 @@ func New(cfg Config) (*Mesh, error) {
 	mc.Logger = newMemberlistLogger()
 	// Name+gossip addr both key-derived: a same-key restart reclaims its name free; only bites a restart on a different --gossip-port.
 	mc.DeadNodeReclaimTime = 30 * time.Second
+
+	// Set before Create: memberlist's scheduled gossip can call the delegate's GetBroadcasts at once.
+	// NumNodes uses the live cluster size (>=1 self) so the retransmit count is never floored to zero.
+	m.revocationBroadcasts = &memberlist.TransmitLimitedQueue{
+		NumNodes: func() int {
+			if m.memberlist == nil {
+				return 1
+			}
+			return m.memberlist.NumMembers()
+		},
+		RetransmitMult: mc.RetransmitMult,
+	}
 
 	// Must seed kernelPeers before Create: a remote join landing first makes store()'s delete a no-op,
 	// leaving the peer un-removable on graceful leave. After the profile switch so an invalid profile returns untouched.

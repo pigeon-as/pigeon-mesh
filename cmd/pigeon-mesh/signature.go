@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
 	"flag"
@@ -49,19 +50,19 @@ func runPubkey(args []string) int {
 func runSign(args []string) int {
 	fs := flag.NewFlagSet("sign", flag.ExitOnError)
 	keyFile := fs.String("key", "", "signing key file from 'keygen'")
-	ttl := fs.Duration("ttl", 0, "validity duration from now (0 = no expiry)")
+	ttl := fs.Duration("ttl", 0, "validity duration from now (required); renew before it lapses")
 	skew := fs.Duration("not-before-skew", time.Minute, "tolerance before now to absorb clock skew")
 	var routeFlags stringList
-	fs.Var(&routeFlags, "route", "a transit CIDR the node may advertise beyond its identity /128; repeatable (requires --ttl)")
+	fs.Var(&routeFlags, "route", "a transit CIDR the node may advertise beyond its identity /128; repeatable")
 	fs.Parse(args)
 
 	node := fs.Arg(0)
 	if *keyFile == "" || node == "" || fs.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: pigeon-mesh sign --key <key> [--ttl <dur>] [--route <cidr> ...] <node-wg-pubkey> (flags before the pubkey)")
+		fmt.Fprintln(os.Stderr, "usage: pigeon-mesh sign --key <key> --ttl <dur> [--route <cidr> ...] <node-wg-pubkey> (flags before the pubkey)")
 		return 2
 	}
-	if *ttl < 0 {
-		fmt.Fprintln(os.Stderr, "sign: --ttl must be >= 0 (0 = no expiry)")
+	if *ttl <= 0 {
+		fmt.Fprintln(os.Stderr, "sign: --ttl is required and must be positive (every grant carries an expiry)")
 		return 2
 	}
 	routes := make([]netip.Prefix, 0, len(routeFlags))
@@ -72,10 +73,6 @@ func runSign(args []string) int {
 			return 1
 		}
 		routes = append(routes, p)
-	}
-	if len(routes) > 0 && *ttl == 0 {
-		fmt.Fprintln(os.Stderr, "sign: a --route grant requires --ttl (a route capability is de-authorized only by expiry)")
-		return 2
 	}
 	priv, err := loadSigningKey(*keyFile)
 	if err != nil {
@@ -88,11 +85,61 @@ func runSign(args []string) int {
 		return 1
 	}
 	now := time.Now()
-	var notAfter int64
-	if *ttl > 0 {
-		notAfter = now.Add(*ttl).Unix()
-	}
+	notAfter := now.Add(*ttl).Unix()
 	blob, err := signature.Sign(priv, subRaw, now.Add(-*skew).Unix(), notAfter, routes...)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	fmt.Println(base64.StdEncoding.EncodeToString(blob))
+	return 0
+}
+
+func runSignRevocation(args []string) int {
+	fs := flag.NewFlagSet("sign-revocation", flag.ExitOnError)
+	keyFile := fs.String("key", "", "signing key file from 'keygen'")
+	grantFile := fs.String("grant", "", "the operator-signed grant being revoked (required); its expiry is the reap horizon")
+	skew := fs.Duration("not-before-skew", time.Minute, "tolerance before now to absorb clock skew")
+	fs.Parse(args)
+
+	node := fs.Arg(0)
+	if *keyFile == "" || *grantFile == "" || node == "" || fs.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "usage: pigeon-mesh sign-revocation --key <key> --grant <grant-file> <node-wg-pubkey> (flags before the pubkey)")
+		return 2
+	}
+	priv, err := loadSigningKey(*keyFile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	sub, err := base64.StdEncoding.DecodeString(strings.TrimSpace(node))
+	if err != nil || len(sub) != 32 {
+		fmt.Fprintln(os.Stderr, "node must be a base64 32-byte WireGuard public key")
+		return 1
+	}
+	grant, err := signature.LoadSignature(*grantFile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "grant file:", err)
+		return 1
+	}
+	// Horizon = the grant's own expiry, never operator-chosen: reaping while the grant still verifies
+	// would re-admit the key. Cross-check the grant's subject against <node> to catch a wrong --grant.
+	gsub, err := signature.Subject(grant)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "grant file:", err)
+		return 1
+	}
+	if !bytes.Equal(gsub, sub) {
+		fmt.Fprintln(os.Stderr, "the --grant is not for this node key")
+		return 1
+	}
+	horizon := signature.NotAfter(grant)
+	if horizon == 0 {
+		fmt.Fprintln(os.Stderr, "the --grant carries no expiry; cannot bound the revocation")
+		return 1
+	}
+	now := time.Now()
+	blob, err := signature.SignRevocation(priv, sub, now.Add(-*skew).Unix(), horizon)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1

@@ -20,8 +20,8 @@ func (m *Mesh) serveDNS(ctx context.Context) {
 func (m *Mesh) dnsRecords() map[string]netip.Addr {
 	members, contested := m.liveMembers()
 	self := m.selfAddr
-	if m.selfExpired.Load() {
-		self = netip.Addr{} // expired: drop from DNS
+	if m.selfExpired.Load() || m.selfRevoked.Load() {
+		self = netip.Addr{} // expired or revoked: drop from DNS
 	}
 	return buildDNSRecords(members, contested, self, m.cfg.Self.Tags)
 }

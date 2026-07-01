@@ -33,7 +33,10 @@ type member struct {
 
 func (m member) admitted() bool { return m.admitErr == nil }
 
-func admit(p Peer, name string, signers []ed25519.PublicKey, prefix netip.Prefix, policy *PeerPolicy, now time.Time) member {
+func admit(p Peer, name string, signers []ed25519.PublicKey, revoked map[string]revocation, prefix netip.Prefix, policy *PeerPolicy, now time.Time) member {
+	if _, ok := revoked[name]; ok {
+		return member{admitErr: errRevoked}
+	}
 	grant, err := verifyGrant(p, name, signers, now)
 	if err != nil {
 		return member{admitErr: err}
@@ -112,10 +115,10 @@ func (m *Mesh) setMember(n *memberlist.Node) {
 		slog.Warn("decode peer", "node", n.Name, "err", err)
 		return
 	}
-	sig, pol := m.signers.Load(), m.policy.Load()
-	cur := admit(p, n.Name, *sig, m.cfg.Prefix, pol, time.Now())
-	if m.signers.Load() != sig || m.policy.Load() != pol {
-		cur = admit(p, n.Name, *m.signers.Load(), m.cfg.Prefix, m.policy.Load(), time.Now())
+	sig, pol, rev := m.signers.Load(), m.policy.Load(), m.revoked.Load()
+	cur := admit(p, n.Name, *sig, *rev, m.cfg.Prefix, pol, time.Now())
+	if m.signers.Load() != sig || m.policy.Load() != pol || m.revoked.Load() != rev {
+		cur = admit(p, n.Name, *m.signers.Load(), *m.revoked.Load(), m.cfg.Prefix, m.policy.Load(), time.Now())
 	}
 	cur.meta, cur.peer = bytes.Clone(n.Meta), p
 	old := m.store(n.Name, cur)
@@ -197,11 +200,11 @@ func (m *Mesh) store(name string, cur member) (old member) {
 // Re-stores every verdict unconditionally (rare O(members) pass); must run even when the config is now
 // empty, else removing a policy would never restore refused routes.
 func (m *Mesh) reevaluate(now time.Time) {
-	signers, policy := *m.signers.Load(), m.policy.Load()
+	signers, policy, revoked := *m.signers.Load(), m.policy.Load(), *m.revoked.Load()
 	m.mu.Lock()
 	changed := false
 	for name, e := range m.members {
-		nv := admit(e.peer, name, signers, m.cfg.Prefix, policy, now)
+		nv := admit(e.peer, name, signers, revoked, m.cfg.Prefix, policy, now)
 		if e.admitted() && !nv.admitted() {
 			slog.Warn("peer rejected", "pubkey", name, "reason", nv.admitErr.Error())
 		}
@@ -234,8 +237,9 @@ func (m *Mesh) maintain(ctx context.Context) {
 		case <-ticker.C:
 			now := time.Now()
 			m.checkSelfExpiry(now)
-			expired, dead := m.expireGrants(now), m.reapDead(now)
-			if expired || dead {
+			m.checkSelfRevoked()
+			expired, dead, reaped := m.expireGrants(now), m.reapDead(now), m.reapRevocations(now)
+			if expired || dead || reaped {
 				m.triggerReconcile()
 			}
 		}
@@ -276,6 +280,15 @@ func (m *Mesh) checkSelfExpiry(now time.Time) {
 	expired := selfSignatureError(*m.selfGrant.Load(), now) != nil
 	if was := m.selfExpired.Swap(expired); expired && !was {
 		slog.Warn("this node's own operator signature has expired; halting self DNS until re-signed (SIGHUP reloads the grant) or restarted; signature-verifying peers will also drop this node")
+	}
+}
+
+// A node honors its own operator anti-grant: it halts self-advertisement (peers drop it regardless). Unlike
+// expiry this is terminal, with no renewal that clears it; the latch only lifts when the tombstone is reaped.
+func (m *Mesh) checkSelfRevoked() {
+	_, revoked := (*m.revoked.Load())[m.cfg.Self.PublicKey]
+	if was := m.selfRevoked.Swap(revoked); revoked && !was {
+		slog.Warn("this node's key has been revoked by an operator anti-grant; peers will drop it; halting self DNS; terminal until the grant horizon")
 	}
 }
 

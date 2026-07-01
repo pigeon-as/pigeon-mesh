@@ -112,12 +112,16 @@ func (m *Mesh) serveStatus(ctx context.Context) {
 	}
 }
 
+// maxRequest bounds a socket line; large enough for a revoke verb plus a base64 anti-grant, still a DoS floor.
+const maxRequest = 4 << 10
+
 func (m *Mesh) handleStatus(conn net.Conn) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 
-	req, _ := bufio.NewReader(io.LimitReader(conn, 64)).ReadString('\n')
-	switch strings.TrimSpace(req) {
+	req, _ := bufio.NewReader(io.LimitReader(conn, maxRequest)).ReadString('\n')
+	verb, arg, _ := strings.Cut(strings.TrimSpace(req), " ")
+	switch verb {
 	case "status", "":
 		data, err := json.Marshal(m.status())
 		if err != nil {
@@ -132,8 +136,14 @@ func (m *Mesh) handleStatus(conn net.Conn) {
 			return
 		}
 		conn.Write([]byte("ok\n"))
+	case "revoke":
+		if err := m.applyRevoke(arg); err != nil {
+			fmt.Fprintf(conn, "error: %v\n", err)
+			return
+		}
+		conn.Write([]byte("ok\n"))
 	default:
-		fmt.Fprintf(conn, "error: unknown request %q\n", strings.TrimSpace(req))
+		fmt.Fprintf(conn, "error: unknown request %q\n", verb)
 	}
 }
 
@@ -197,6 +207,10 @@ func (m *Mesh) status() Status {
 	if err := selfSignatureError(*m.selfGrant.Load(), now); err != nil {
 		selfPV.Status = "rejected"
 		rejected[m.cfg.Self.PublicKey] = err.Error()
+	}
+	if _, ok := (*m.revoked.Load())[m.cfg.Self.PublicKey]; ok {
+		selfPV.Status = "rejected"
+		rejected[m.cfg.Self.PublicKey] = errRevoked.Error()
 	}
 	if ge := m.selfGrantExpiry(); ge > 0 {
 		selfPV.GrantExpiry = &ge

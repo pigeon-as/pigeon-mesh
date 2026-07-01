@@ -15,7 +15,7 @@ You need a WireGuard interface and an operator signing key (`pigeon-mesh keygen 
 signer.key`, once per mesh). Sign a node's key, then run it:
 
 ```sh
-pigeon-mesh sign --key signer.key "$(wg show wg0 public-key)" > node.sig
+pigeon-mesh sign --key signer.key --ttl 720h "$(wg show wg0 public-key)" > node.sig
 pigeon-mesh --interface wg0 --endpoint 203.0.113.1:51820 --signature node.sig
 ```
 
@@ -59,13 +59,32 @@ rotate: add the new key, re-sign, then remove the old (`SIGHUP` reloads). Withou
 signer fine, but following a signer rotation needs `--signers @file`, reloaded in the
 same `SIGHUP`.
 
-A peer is admitted only if its grant verifies against the trusted key, is bound to
-its WireGuard key, and is unexpired. Grants are re-checked continuously, so expiry or
-rotation drops admitted peers too. A node checks its own grant at startup and won't run
-on a bad one. Renew before it expires by overwriting the `--signature` file and sending
-`SIGHUP`: the node re-advertises the new grant over gossip with no restart and no tunnel
-drop (the WireGuard key is unchanged). A grant that does lapse drops the node from DNS,
-and signature-checking peers tear down its tunnels within seconds.
+Every grant carries an expiry (`sign --ttl`, required), so a node is admitted only if
+its grant verifies against the trusted key, is bound to its WireGuard key, and is
+unexpired. Grants are re-checked continuously, so expiry or rotation drops admitted
+peers too. A node checks its own grant at startup and won't run on a bad one. Renew
+before it expires by overwriting the `--signature` file and sending `SIGHUP`: the node
+re-advertises the new grant over gossip with no restart and no tunnel drop (the
+WireGuard key is unchanged). A grant that does lapse drops the node from DNS, and
+signature-checking peers tear down its tunnels within seconds.
+
+## Revocation
+
+Expiry is passive: a compromised key stays admitted until its grant lapses. To evict one
+now, sign an anti-grant over its key, inject it into gossip, and append it to the
+`--revoked` file (both matter: gossip is fast, the file is the durable floor):
+
+```sh
+pigeon-mesh sign-revocation --key signer.key --grant node.sig "<node-pubkey>" |
+  tee -a revoked.txt | pigeon-mesh revoke
+```
+
+The anti-grant is operator-signed, so a node holding the revoked key cannot refute it;
+every node re-verifies it and drops the node within seconds. Its reap horizon is the
+grant's own expiry. Gossip is fail-open until it converges, so the `--revoked @file`
+(reloaded on `SIGHUP`) is the completeness floor, not optional. Any signer may revoke any
+node. For an instant cutoff, rotate the signer or sever the node; revoke is the graceful,
+targeted tool.
 
 ## Names
 
@@ -84,9 +103,9 @@ zone to it.
   address. A route two members both claim is installed for neither and shown in
   `status`.
 - **Routes:** a node may advertise extra routes (an exit `0.0.0.0/0`, a subnet via
-  `--allowed-ips`) only if its grant authorizes them (`sign --route <cidr>`, which
-  needs `--ttl`); an unauthorized route is dropped and shown in `status`. Each node
-  then chooses which authorized routes to install with [`--peer-policy`](#peer-policy).
+  `--allowed-ips`) only if its grant authorizes them (`sign --route <cidr>`); an
+  unauthorized route is dropped and shown in `status`. Each node then chooses which
+  authorized routes to install with [`--peer-policy`](#peer-policy).
 
 ## Peer policy
 
@@ -119,8 +138,8 @@ In scope: `peer.key`, `peer.endpoint`, `peer.address` (the peer's identity `/128
 ```
 
 Blocking is local route installation, not membership: a blocked peer keeps its grant,
-stays in gossip, and is removed mesh-wide only by unsigning it or letting the grant
-expire. Because gossip rides inside the tunnels, blocking a peer's `/128` also severs
+stays in gossip, and is removed mesh-wide only by [revoking](#revocation) it or letting
+its grant expire. Because gossip rides inside the tunnels, blocking a peer's `/128` also severs
 this node's gossip path to it; a policy that installs nothing for any peer isolates
 this node, and the daemon warns.
 
