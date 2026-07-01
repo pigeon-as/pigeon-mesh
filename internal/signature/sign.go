@@ -144,7 +144,7 @@ func parse(b []byte) (signedClaims, error) {
 // expiry, and unexpired. Routes are decoded only after the signature passes, so an unauthenticated
 // reader never obtains them.
 func Verify(signers []ed25519.PublicKey, pubkey string, blob []byte, now time.Time) (Grant, error) {
-	c, err := verifySig(signers, blob, domain, now)
+	c, err := verifySig(signers, blob, domain, now, true)
 	if err != nil {
 		return Grant{}, err
 	}
@@ -165,20 +165,22 @@ func Verify(signers []ed25519.PublicKey, pubkey string, blob []byte, now time.Ti
 	return Grant{Sub: c.Sub, NotAfter: c.NotAfter, Routes: routes}, nil
 }
 
-// VerifyRevocation returns the revoked node key and reap horizon from an anti-grant. NotAfter is
-// data (the horizon), not a reject: a revocation past horizon still propagates until every node
-// reaps it, so it cannot be dropped on receive.
+// VerifyRevocation returns the revoked node key and reap horizon from an anti-grant. A revocation is a
+// terminal fact, accepted on receipt regardless of the receiver's clock: NotBefore is not enforced (a
+// time-behind or clock-skewed node must still honor it, else it fails open), and NotAfter is the reap
+// horizon, not a reject (a past-horizon revocation still propagates until every node reaps it).
 func VerifyRevocation(signers []ed25519.PublicKey, blob []byte, now time.Time) (sub []byte, horizon int64, err error) {
-	c, err := verifySig(signers, blob, revocationDomain, now)
+	c, err := verifySig(signers, blob, revocationDomain, now, false)
 	if err != nil {
 		return nil, 0, err
 	}
 	return c.Sub, c.NotAfter, nil
 }
 
-// verifySig checks domain, signer-set membership, signature, and not-before, returning the
-// authenticated claims. The distinct domain stops a grant blob replaying as a revocation.
-func verifySig(signers []ed25519.PublicKey, blob []byte, dom string, now time.Time) (claims, error) {
+// verifySig checks domain, signer-set membership, and signature, returning the authenticated claims. The
+// distinct domain stops a grant blob replaying as a revocation. NotBefore is enforced only for grants
+// (enforceNotBefore); a revocation carries no valid-from window since it applies the moment it is seen.
+func verifySig(signers []ed25519.PublicKey, blob []byte, dom string, now time.Time, enforceNotBefore bool) (claims, error) {
 	s, err := parse(blob)
 	if err != nil {
 		return claims{}, err
@@ -203,7 +205,7 @@ func verifySig(signers []ed25519.PublicKey, blob []byte, dom string, now time.Ti
 	if len(s.Sig) != ed25519.SignatureSize || !ed25519.Verify(signer, body, s.Sig) {
 		return claims{}, errors.New("bad signature")
 	}
-	if now.Unix() < s.Claims.NotBefore {
+	if enforceNotBefore && now.Unix() < s.Claims.NotBefore {
 		return claims{}, errors.New("signature not yet valid")
 	}
 	return s.Claims, nil

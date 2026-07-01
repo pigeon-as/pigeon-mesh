@@ -201,10 +201,23 @@ func TestRevocation_Rejections(t *testing.T) {
 	tampered[len(tampered)-1] ^= 0xff
 	_, _, err = VerifyRevocation([]ed25519.PublicKey{pub}, tampered, now)
 	must.ErrorContains(t, err, "bad signature")
+}
 
+func TestRevocation_ClockIndependent(t *testing.T) {
+	// A revocation is terminal and applies on receipt: NotBefore is never a reject, so a node whose clock
+	// lags the operator (benign skew or an NTP-spoofing attacker) still honors it. Grants keep NotBefore.
+	priv, pub, sub := newSigner(t)
+	now := time.Now()
 	future := mint(t, priv, claims{Sub: sub, NotBefore: now.Add(time.Hour).Unix(), NotAfter: now.Add(2 * time.Hour).Unix()}, revocationDomain)
-	_, _, err = VerifyRevocation([]ed25519.PublicKey{pub}, future, now)
-	must.ErrorContains(t, err, "not yet valid")
+	gotSub, horizon, err := VerifyRevocation([]ed25519.PublicKey{pub}, future, now)
+	must.NoError(t, err, must.Sprint("a revocation verifies even when the receiver's clock is behind its NotBefore"))
+	must.True(t, bytes.Equal(sub, gotSub))
+	must.EqOp(t, now.Add(2*time.Hour).Unix(), horizon)
+
+	// A grant with the same future NotBefore is still correctly rejected: only revocations skip the gate.
+	grant := mint(t, priv, claims{Sub: sub, NotBefore: now.Add(time.Hour).Unix(), NotAfter: now.Add(2 * time.Hour).Unix()}, domain)
+	_, err = Verify([]ed25519.PublicKey{pub}, testKey, grant, now)
+	must.ErrorContains(t, err, "not yet valid", must.Sprint("a grant still honors NotBefore"))
 }
 
 func TestSignRevocation_RequiresHorizon(t *testing.T) {

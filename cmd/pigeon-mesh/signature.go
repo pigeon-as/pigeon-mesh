@@ -99,7 +99,6 @@ func runSignRevocation(args []string) int {
 	fs := flag.NewFlagSet("sign-revocation", flag.ExitOnError)
 	keyFile := fs.String("key", "", "signing key file from 'keygen'")
 	grantFile := fs.String("grant", "", "the operator-signed grant being revoked (required); its expiry is the reap horizon")
-	skew := fs.Duration("not-before-skew", time.Minute, "tolerance before now to absorb clock skew")
 	fs.Parse(args)
 
 	node := fs.Arg(0)
@@ -138,8 +137,8 @@ func runSignRevocation(args []string) int {
 		fmt.Fprintln(os.Stderr, "the --grant carries no expiry; cannot bound the revocation")
 		return 1
 	}
-	now := time.Now()
-	blob, err := signature.SignRevocation(priv, sub, now.Add(-*skew).Unix(), horizon)
+	// notBefore is 0: a revocation carries no valid-from window, it applies the moment any node sees it.
+	blob, err := signature.SignRevocation(priv, sub, 0, horizon)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
