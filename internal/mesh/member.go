@@ -26,7 +26,8 @@ type member struct {
 	admitErr           error // nil = admitted
 	refusedRoutes      []string
 	unauthorizedRoutes []string
-	grantExpiry        int64 // unix seconds; 0 = none
+	grantExpiry        int64  // unix seconds; 0 = none
+	name               string // operator-signed DNS name from the grant
 	failed             bool
 	leaveTime          time.Time
 }
@@ -53,7 +54,7 @@ func admit(p Peer, name string, signers []ed25519.PublicKey, revoked map[string]
 	}
 	kept, refused := policyFilter(p, authorized, addr, policy)
 	pc.routes = kept
-	return member{addr: addr, wgPeer: pc, refusedRoutes: refused, unauthorizedRoutes: unauthorized, grantExpiry: grant.NotAfter}
+	return member{addr: addr, wgPeer: pc, refusedRoutes: refused, unauthorizedRoutes: unauthorized, grantExpiry: grant.NotAfter, name: grant.Name}
 }
 
 // identity /128 is self-certified (exempt from grant routes); other routes must be contained in a grant route.

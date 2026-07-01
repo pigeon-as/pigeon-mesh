@@ -127,6 +127,54 @@ func TestRunSignRevocation_Rejects(t *testing.T) {
 	must.EqOp(t, 1, runSignRevocation([]string{"--key", keyPath, "--grant", grantPath, otherNode}), must.Sprint("grant subject mismatch"))
 }
 
+func loadSignerPriv(t *testing.T, path string) ed25519.PrivateKey {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	must.NoError(t, err)
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(data)))
+	must.NoError(t, err)
+	return ed25519.PrivateKey(raw)
+}
+
+func captureIO(t *testing.T, stdin string, fn func()) string {
+	t.Helper()
+	oldIn := os.Stdin
+	r, w, err := os.Pipe()
+	must.NoError(t, err)
+	os.Stdin = r
+	go func() { io.WriteString(w, stdin); w.Close() }()
+	out := captureStdout(t, fn)
+	os.Stdin = oldIn
+	return out
+}
+
+func TestRunSign_Detached(t *testing.T) {
+	keyPath, signerPub, node := writeSignerKey(t)
+	pub := base64.StdEncoding.EncodeToString(signerPub)
+
+	// --pubkey emits the to-be-signed body; an external signer (here the raw key) signs it as-is.
+	tbs := strings.TrimSpace(captureStdout(t, func() {
+		must.EqOp(t, 0, runSign([]string{"--pubkey", pub, "--ttl", "1h", "--name", "alpha", node}))
+	}))
+	body, err := base64.StdEncoding.DecodeString(tbs)
+	must.NoError(t, err)
+	sig := base64.StdEncoding.EncodeToString(ed25519.Sign(loadSignerPriv(t, keyPath), body))
+
+	// --signature wraps the signature (body on stdin) into a grant that verifies like a local one.
+	out := strings.TrimSpace(captureIO(t, tbs, func() {
+		must.EqOp(t, 0, runSign([]string{"--signature", sig}))
+	}))
+	raw, err := base64.StdEncoding.DecodeString(out)
+	must.NoError(t, err)
+	g, err := signature.Verify([]ed25519.PublicKey{signerPub}, node, raw, time.Now())
+	must.NoError(t, err)
+	must.EqOp(t, "alpha", g.Name, must.Sprint("the signed name survives the detached flow"))
+
+	// exactly one of --key / --pubkey is required.
+	must.EqOp(t, 2, runSign([]string{"--ttl", "1h", node}), must.Sprint("neither --key nor --pubkey is a usage error"))
+	must.EqOp(t, 2, runSign([]string{"--key", keyPath, "--pubkey", pub, "--ttl", "1h", node}), must.Sprint("both is a usage error"))
+}
+
 func TestRunSign_Rejects(t *testing.T) {
 	keyPath, _, node := writeSignerKey(t)
 	must.EqOp(t, 2, runSign([]string{"--key", keyPath, "--ttl", "-1s", node}), must.Sprint("negative ttl"))

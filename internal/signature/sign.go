@@ -25,12 +25,14 @@ type claims struct {
 	NotBefore int64    `cbor:"4,keyasint"`
 	NotAfter  int64    `cbor:"5,keyasint"`
 	Routes    [][]byte `cbor:"6,keyasint,omitempty"` // transit CIDRs as Prefix.MarshalBinary
+	Name      string   `cbor:"7,keyasint,omitempty"` // operator-attested DNS name
 }
 
 type Grant struct {
 	Sub      []byte
 	NotAfter int64
 	Routes   []netip.Prefix
+	Name     string
 }
 
 type signedClaims struct {
@@ -65,7 +67,7 @@ func mustDec() cbor.DecMode {
 }
 
 // Every grant carries an expiry; both passive de-authorization and the revocation reap horizon are bounded by it.
-func Sign(key ed25519.PrivateKey, sub []byte, notBefore, notAfter int64, routes ...netip.Prefix) ([]byte, error) {
+func Sign(key ed25519.PrivateKey, sub []byte, notBefore, notAfter int64, name string, routes ...netip.Prefix) ([]byte, error) {
 	if notAfter == 0 {
 		return nil, errors.New("a grant must carry an expiry")
 	}
@@ -73,7 +75,7 @@ func Sign(key ed25519.PrivateKey, sub []byte, notBefore, notAfter int64, routes 
 	if err != nil {
 		return nil, err
 	}
-	return signClaims(key, claims{Sub: sub, NotBefore: notBefore, NotAfter: notAfter, Routes: encRoutes}, domain)
+	return signClaims(key, claims{Sub: sub, NotBefore: notBefore, NotAfter: notAfter, Routes: encRoutes, Name: name}, domain)
 }
 
 // SignRevocation signs an anti-grant: a terminal statement that the grant for sub is dead. notAfter is
@@ -84,6 +86,46 @@ func SignRevocation(key ed25519.PrivateKey, sub []byte, notAfter int64) ([]byte,
 		return nil, errors.New("a revocation must carry a reap horizon")
 	}
 	return signClaims(key, claims{Sub: sub, NotAfter: notAfter}, revocationDomain)
+}
+
+// SigningBody builds a grant's to-be-signed body for an external signer (e.g. Vault Transit) that holds
+// pubkey. The bytes are signed as-is with pure ed25519; pass the signature to Attach. This is the seam
+// for sign-as-a-service: the operator key never has to leave the vault.
+func SigningBody(pubkey ed25519.PublicKey, sub []byte, notBefore, notAfter int64, name string, routes ...netip.Prefix) ([]byte, error) {
+	if notAfter == 0 {
+		return nil, errors.New("a grant must carry an expiry")
+	}
+	encRoutes, err := encodeRoutes(routes)
+	if err != nil {
+		return nil, err
+	}
+	c := claims{Ctx: domain, Sub: sub, KeyID: pubkey, NotBefore: notBefore, NotAfter: notAfter, Routes: encRoutes, Name: name}
+	return enc.Marshal(c)
+}
+
+// RevocationSigningBody is SigningBody for an anti-grant: the to-be-signed body an external signer signs.
+func RevocationSigningBody(pubkey ed25519.PublicKey, sub []byte, notAfter int64) ([]byte, error) {
+	if notAfter == 0 {
+		return nil, errors.New("a revocation must carry a reap horizon")
+	}
+	return enc.Marshal(claims{Ctx: revocationDomain, Sub: sub, KeyID: pubkey, NotAfter: notAfter})
+}
+
+// Attach wraps an external signature over a SigningBody into the finished blob, after checking the
+// signature verifies against the signer key named in the body. Domain-agnostic: it completes a grant or
+// a revocation alike, since the body carries its own domain.
+func Attach(body, sig []byte) ([]byte, error) {
+	var c claims
+	if err := dec.Unmarshal(body, &c); err != nil {
+		return nil, fmt.Errorf("decode signing body: %w", err)
+	}
+	if len(c.KeyID) != ed25519.PublicKeySize {
+		return nil, errors.New("signing body carries no signer key")
+	}
+	if len(sig) != ed25519.SignatureSize || !ed25519.Verify(ed25519.PublicKey(c.KeyID), body, sig) {
+		return nil, errors.New("signature does not verify against the signing body")
+	}
+	return enc.Marshal(signedClaims{Claims: c, Sig: sig})
 }
 
 // Canonical (masked, deduped, bytewise-sorted) so the signed body is stable regardless of input order.
@@ -166,7 +208,7 @@ func Verify(signers []ed25519.PublicKey, pubkey string, blob []byte, now time.Ti
 	if err != nil {
 		return Grant{}, err
 	}
-	return Grant{Sub: c.Sub, NotAfter: c.NotAfter, Routes: routes}, nil
+	return Grant{Sub: c.Sub, NotAfter: c.NotAfter, Routes: routes, Name: c.Name}, nil
 }
 
 // VerifyRevocation returns the revoked node key and reap horizon from an anti-grant. A revocation is a
@@ -222,6 +264,16 @@ func NotAfter(blob []byte) int64 {
 		return 0
 	}
 	return s.Claims.NotAfter
+}
+
+// The grant's signed DNS name; "" if absent or unparseable. Unverified accessor: a node reads its own
+// already-verified grant, and peers get the name from Verify.
+func Name(blob []byte) string {
+	s, err := parse(blob)
+	if err != nil {
+		return ""
+	}
+	return s.Claims.Name
 }
 
 // The grant's subject (the node key it authorizes); unverified, used by sign-revocation to derive the

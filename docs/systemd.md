@@ -68,17 +68,15 @@ WantedBy=multi-user.target
 
 ## Provisioning
 
-Where the offline operator key lives, mint the key and sign the grant:
+On the node, generate its WireGuard key (it never leaves), sign its grant, and seal both
+into the credential store:
 
 ```sh
 umask 077
 wg genkey | tee wg0.key | wg pubkey > wg0.pub
-pigeon-mesh sign --key operator.key "$(cat wg0.pub)" > node.grant   # transit: add --route CIDR --ttl DUR before the pubkey
-```
-
-On the node, seal both into the credential store (sealing binds to it):
-
-```sh
+pigeon-mesh sign --key operator.key --ttl 720h --name "$(hostname)" "$(cat wg0.pub)" > node.grant
 systemd-creds encrypt --name=network.wireguard.private.50-wg0 wg0.key /etc/credstore.encrypted/network.wireguard.private.50-wg0
 systemd-creds encrypt --name=pigeon-grant node.grant /etc/credstore.encrypted/pigeon-grant
 ```
+
+Keep `operator.key` in a vault and pipe it in rather than on disk ([OpenBao/Vault](openbao-vault.md)).

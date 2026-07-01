@@ -16,7 +16,6 @@ import (
 	"time"
 
 	sockaddr "github.com/hashicorp/go-sockaddr/template"
-	"github.com/pigeon-as/pigeon-mesh/internal/dns"
 	"github.com/pigeon-as/pigeon-mesh/internal/mesh"
 	"github.com/pigeon-as/pigeon-mesh/internal/sdnotify"
 	"github.com/pigeon-as/pigeon-mesh/internal/signature"
@@ -151,16 +150,6 @@ func main() {
 	if err != nil {
 		slog.Error("tag", "err", err)
 		os.Exit(2)
-	}
-	if _, ok := tags["name"]; !ok {
-		if h, herr := os.Hostname(); herr == nil {
-			if label := dns.SanitizeLabel(h); label != "" {
-				if tags == nil {
-					tags = mesh.Tags{}
-				}
-				tags["name"] = label
-			}
-		}
 	}
 
 	sig, err := signature.LoadSignature(*signatureFile)

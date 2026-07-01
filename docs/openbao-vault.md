@@ -1,28 +1,36 @@
 # Operator key custody with OpenBao/Vault
 
-pigeon-mesh reads `--key` from a file, and a file can be a pipe, so OpenBao/Vault composes
-with it directly.
+pigeon-mesh either signs with a local `--key`, or hands the to-be-signed bytes to an
+external signer with `--pubkey`/`--signature`. The second lets OpenBao/Vault Transit sign,
+so the operator key is generated in the vault and never leaves it.
 
 ## Generate the key
 
 ```sh
 bao secrets enable transit
-bao write -f transit/keys/mesh type=ed25519 exportable=true
-bao read -format=json transit/keys/mesh | jq -r '.data.keys[].public_key'
+bao write -f transit/keys/mesh type=ed25519
+pubkey=$(bao read -format=json transit/keys/mesh | jq -r '.data.keys[].public_key')
 ```
 
-The public key is your `--signers` value.
+`$pubkey` is your `--signers` value. The private key is not `exportable`, so it only ever
+signs inside the vault.
 
-## Sign and revoke
+## Sign a node
+
+Emit the unsigned grant, have Transit sign it, and complete it with the signature:
 
 ```sh
-pigeon-mesh sign \
-  --key <(bao read -format=json transit/export/signing-key/mesh/latest | jq -r '.data.keys[]') \
-  --ttl 720h "$(wg show wg0 public-key)" > node.sig
-
-pigeon-mesh sign-revocation \
-  --key <(bao read -format=json transit/export/signing-key/mesh/latest | jq -r '.data.keys[]') \
-  --grant node.sig "<node-pubkey>" | tee -a revoked.txt | pigeon-mesh revoke
+unsigned=$(pigeon-mesh sign --pubkey "$pubkey" --ttl 720h --name "$(hostname)" "$(wg show wg0 public-key)")
+sig=$(bao write -field=signature transit/sign/mesh input="$unsigned" | sed 's/^vault:v1://')
+echo "$unsigned" | pigeon-mesh sign --signature "$sig" > node.sig
 ```
 
-Scope the signing box's token to `transit/export/signing-key/mesh`.
+## Revoke a node
+
+```sh
+unsigned=$(pigeon-mesh sign-revocation --pubkey "$pubkey" --grant node.sig "<node-pubkey>")
+sig=$(bao write -field=signature transit/sign/mesh input="$unsigned" | sed 's/^vault:v1://')
+echo "$unsigned" | pigeon-mesh sign-revocation --signature "$sig" | tee -a revoked.txt | pigeon-mesh revoke
+```
+
+Scope the signing box's token to `transit/sign/mesh`.

@@ -8,6 +8,7 @@ import (
 	"slices"
 
 	"github.com/pigeon-as/pigeon-mesh/internal/dns"
+	"github.com/pigeon-as/pigeon-mesh/internal/signature"
 )
 
 func (m *Mesh) serveDNS(ctx context.Context) {
@@ -27,14 +28,14 @@ func (m *Mesh) dnsRecords() map[string]netip.Addr {
 	} else if _, revoked := (*m.revoked.Load())[m.cfg.Self.PublicKey]; revoked {
 		self = netip.Addr{}
 	}
-	return buildDNSRecords(members, contested, self, m.cfg.Self.Tags)
+	return buildDNSRecords(members, contested, self, signature.Name(*m.selfGrant.Load()))
 }
 
-func buildDNSRecords(members map[string]member, contested map[string][]string, self netip.Addr, selfTags Tags) map[string]netip.Addr {
+func buildDNSRecords(members map[string]member, contested map[string][]string, self netip.Addr, selfName string) map[string]netip.Addr {
 	records := make(map[string]netip.Addr, len(members)+1)
 	collided := make(map[string]bool)
-	add := func(addr netip.Addr, tags Tags) {
-		label := dns.SanitizeLabel(tags["name"])
+	add := func(addr netip.Addr, name string) {
+		label := dns.SanitizeLabel(name)
 		if label == "" || collided[label] || !addr.IsValid() {
 			return
 		}
@@ -45,7 +46,7 @@ func buildDNSRecords(members map[string]member, contested map[string][]string, s
 		}
 		records[label] = addr
 	}
-	add(self, selfTags)
+	add(self, selfName)
 	for _, e := range members {
 		if !e.addr.IsValid() {
 			continue
@@ -58,7 +59,7 @@ func buildDNSRecords(members map[string]member, contested map[string][]string, s
 		if _, c := contested[host]; c {
 			continue
 		}
-		add(e.addr, e.peer.Tags)
+		add(e.addr, e.name)
 	}
 	return records
 }

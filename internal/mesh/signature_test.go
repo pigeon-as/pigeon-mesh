@@ -33,7 +33,7 @@ func TestSelfReject(t *testing.T) {
 	priv, _, sub := mkSig(t)
 	now := time.Unix(1_000_000, 0)
 	mk := func(notAfter int64) []byte {
-		blob, err := signature.Sign(priv, sub, now.Add(-time.Hour).Unix(), notAfter)
+		blob, err := signature.Sign(priv, sub, now.Add(-time.Hour).Unix(), notAfter, "")
 		must.NoError(t, err)
 		return blob
 	}
@@ -45,7 +45,7 @@ func TestSelfReject(t *testing.T) {
 
 func TestReloadSignersFromFile(t *testing.T) {
 	priv, pub, sub := mkSig(t)
-	blob, err := signature.Sign(priv, sub, time.Now().Add(-time.Hour).Unix(), time.Now().Add(time.Hour).Unix())
+	blob, err := signature.Sign(priv, sub, time.Now().Add(-time.Hour).Unix(), time.Now().Add(time.Hour).Unix(), "")
 	must.NoError(t, err)
 	otherPub, _, err := ed25519.GenerateKey(nil)
 	must.NoError(t, err)
@@ -91,12 +91,12 @@ func TestApplySelfGrant(t *testing.T) {
 	m.cfg = Config{Self: self}
 	m.selfAddr = derived
 	storeConfig(m, []ed25519.PublicKey{pub}, nil)
-	old, err := signature.Sign(priv, sub, now.Add(-time.Hour).Unix(), now.Add(time.Minute).Unix())
+	old, err := signature.Sign(priv, sub, now.Add(-time.Hour).Unix(), now.Add(time.Minute).Unix(), "")
 	must.NoError(t, err)
 	m.selfGrant.Store(&old)
 	m.selfExpired.Store(true)
 
-	renewed, err := signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix())
+	renewed, err := signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), "")
 	must.NoError(t, err)
 	must.NoError(t, m.applySelfGrant(renewed))
 	must.Eq(t, renewed, *m.selfGrant.Load(), must.Sprint("the renewed grant is now the live one"))
@@ -105,14 +105,14 @@ func TestApplySelfGrant(t *testing.T) {
 	must.NoError(t, decodeMeta(*m.meta.Load(), &adv))
 	must.Eq(t, renewed, adv.Signature, must.Sprint("the advertisement carries the renewed grant"))
 
-	expired, err := signature.Sign(priv, sub, now.Add(-time.Hour).Unix(), now.Add(-time.Minute).Unix())
+	expired, err := signature.Sign(priv, sub, now.Add(-time.Hour).Unix(), now.Add(-time.Minute).Unix(), "")
 	must.NoError(t, err)
 	must.Error(t, m.applySelfGrant(expired), must.Sprint("an expired grant is rejected"))
 	must.Eq(t, renewed, *m.selfGrant.Load(), must.Sprint("a rejected grant leaves the running one in place"))
 
 	// Verify also pins the grant to our own key
 	otherPriv, _, _ := mkSig(t)
-	rogue, err := signature.Sign(otherPriv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix())
+	rogue, err := signature.Sign(otherPriv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), "")
 	must.NoError(t, err)
 	must.Error(t, m.applySelfGrant(rogue), must.Sprint("a grant from an untrusted signer is rejected"))
 }
@@ -129,11 +129,11 @@ func TestApplySelfGrant_RejectsUnauthorizedSelfRoute(t *testing.T) {
 	m.selfAddr = derived
 	storeConfig(m, []ed25519.PublicKey{pub}, nil)
 
-	routeless, err := signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix())
+	routeless, err := signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), "")
 	must.NoError(t, err)
 	must.ErrorContains(t, m.applySelfGrant(routeless), "does not authorize", must.Sprint("a node advertising a route its grant lacks fails fast"))
 
-	scoped, err := signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), netip.MustParsePrefix("10.0.0.0/8"))
+	scoped, err := signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), "", netip.MustParsePrefix("10.0.0.0/8"))
 	must.NoError(t, err)
 	must.NoError(t, m.applySelfGrant(scoped), must.Sprint("a correctly-scoped grant boots"))
 }

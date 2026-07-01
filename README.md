@@ -15,7 +15,7 @@ You need a WireGuard interface and an operator signing key (`pigeon-mesh keygen 
 signer.key`, once per mesh). Sign a node's key, then run it:
 
 ```sh
-pigeon-mesh sign --key signer.key --ttl 720h "$(wg show wg0 public-key)" > node.sig
+pigeon-mesh sign --key signer.key --ttl 720h --name "$(hostname)" "$(wg show wg0 public-key)" > node.sig
 pigeon-mesh --interface wg0 --endpoint 203.0.113.1:51820 --signature node.sig
 ```
 
@@ -88,11 +88,11 @@ targeted tool.
 
 ## Names
 
-`--dns mesh.internal` serves AAAA records so peers resolve by name. A node's name is
-its hostname, or set `--tag name=alpha` (`--tag name=` opts out). `<name>.<zone>`
-resolves to that peer's key-derived `/128`. It binds port 53 on the overlay address
-(needs root or `CAP_NET_BIND_SERVICE`) and programs systemd-resolved to route the
-zone to it.
+`--dns mesh.internal` serves AAAA records so peers resolve by name. A node's name is the
+operator-signed `sign --name` in its grant, so a peer cannot spoof another's name; a node
+signed without one has no record. `<name>.<zone>` resolves to that peer's key-derived
+`/128`. It binds port 53 on the overlay address (needs root or `CAP_NET_BIND_SERVICE`) and
+programs systemd-resolved to route the zone to it.
 
 ## Trust model
 
