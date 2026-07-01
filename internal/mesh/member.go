@@ -284,7 +284,7 @@ func (m *Mesh) checkSelfExpiry(now time.Time) {
 	}
 }
 
-// A node honors its own operator anti-grant: it halts self-advertisement (peers drop it regardless). Unlike
+// A node honors its own operator anti-grant: it halts self DNS (peers drop it regardless via admit). Unlike
 // expiry this is terminal, with no renewal that clears it; the latch only lifts when the tombstone is reaped.
 func (m *Mesh) checkSelfRevoked() {
 	_, revoked := (*m.revoked.Load())[m.cfg.Self.PublicKey]

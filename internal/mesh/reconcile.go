@@ -131,8 +131,13 @@ func (m *Mesh) reconcile() error {
 			desired[name] = e.wgPeer
 		}
 	}
+	rev := *m.revoked.Load()
 	for name := range m.kernelPeers {
-		// Keep a kernel peer until it gossips; store() drops gossiped ones.
+		// Keep a kernel peer until it gossips; store() drops gossiped ones. Skip revoked keys: a
+		// not-yet-gossiped seed never reaches admit(), so this is the only place revocation cuts it.
+		if _, ok := rev[name]; ok {
+			continue
+		}
 		if _, ok := desired[name]; ok {
 			continue
 		}
@@ -185,11 +190,12 @@ func (m *Mesh) adoptKernelPeers() error {
 		return err
 	}
 	adopted := make(map[string]wgPeer, len(peers))
+	revoked := *m.revoked.Load()
 	var routes []wgtypes.PeerConfig
 	for _, p := range peers {
 		name := p.PublicKey.String()
 		w := wgPeer{key: name}
-		if m.cfg.Prefix.IsValid() && !hasHostRoute(p.AllowedIPs) {
+		if _, isRevoked := revoked[name]; !isRevoked && m.cfg.Prefix.IsValid() && !hasHostRoute(p.AllowedIPs) {
 			if addr, derr := DeriveAddr(name, m.cfg.Prefix); derr == nil {
 				w.routes = []string{HostRoute(addr).String()}
 				routes = append(routes, wgtypes.PeerConfig{

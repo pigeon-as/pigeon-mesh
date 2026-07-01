@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pigeon-as/pigeon-mesh/internal/dns"
 	"github.com/pigeon-as/pigeon-mesh/internal/signature"
 )
 
@@ -61,6 +62,10 @@ func runSign(args []string) int {
 	fs.Parse(args)
 
 	if *sig != "" {
+		if *keyFile != "" || *pubkey != "" || *ttl != 0 || *name != "" || len(routeFlags) > 0 {
+			fmt.Fprintln(os.Stderr, "sign: --signature only completes a --pubkey body read from stdin; it takes no --key/--pubkey/--ttl/--name/--route")
+			return 2
+		}
 		return runAttach(*sig)
 	}
 	node := fs.Arg(0)
@@ -70,6 +75,10 @@ func runSign(args []string) int {
 	}
 	if *ttl <= 0 {
 		fmt.Fprintln(os.Stderr, "sign: --ttl is required and must be positive (every grant carries an expiry)")
+		return 2
+	}
+	if *name != "" && dns.SanitizeLabel(*name) == "" {
+		fmt.Fprintf(os.Stderr, "sign: --name %q is not a usable DNS label (a-z 0-9 and -, <=63 chars, no leading/trailing -)\n", *name)
 		return 2
 	}
 	routes := make([]netip.Prefix, 0, len(routeFlags))

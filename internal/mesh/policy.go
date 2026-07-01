@@ -87,7 +87,7 @@ func policyFilter(peer Peer, routes []string, identity netip.Addr, policy *PeerP
 	for _, cidr := range routes {
 		ok, err := policy.accept(peer, cidr, address)
 		if err != nil {
-			slog.Debug("peer-policy eval", "peer", peer.PublicKey, "route", cidr, "err", err)
+			slog.Warn("peer-policy eval error; route refused", "peer", peer.PublicKey, "route", cidr, "err", err)
 			refused = append(refused, cidr)
 			continue
 		}
