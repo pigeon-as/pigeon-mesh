@@ -217,4 +217,3 @@ func TestNotAfter(t *testing.T) {
 	must.EqOp(t, int64(0), NotAfter([]byte{0, 1, 2}), must.Sprint("garbage is not read as expiry"))
 	must.EqOp(t, int64(0), NotAfter(nil))
 }
-

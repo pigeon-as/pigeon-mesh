@@ -148,11 +148,14 @@ rather than loosening the socket permissions.
 
 A joining node is visible cluster-wide within seconds, and a failed one is detected
 in a few seconds on the `lan` profile or ~30 s on the `wan` default. Both grow only
-logarithmically with cluster size, so it should stay responsive into the thousands.
+logarithmically with cluster size, so it should stay responsive into the thousands. A detected node is held
+for `--reconnect-timeout` (10m) before its tunnel drops, and a daemon restart keeps its tunnels up, so only
+gossip membership reconverges.
 
 ## Limitations
 
-Tags and advertised routes are limited to ~20 entries combined.
+A node's advertised routes and tags share a 512-byte gossip budget, roughly 15 routes or 35 short tags past
+its signed grant; a node over the cap fails to start.
 
 ## Build
 

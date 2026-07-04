@@ -79,6 +79,12 @@ func TestReloadSignersFromFile(t *testing.T) {
 	must.Error(t, err)
 	must.EqOp(t, prev, m.signers.Load(), must.Sprint("a failed signer reload does not swap the signer set"))
 	must.NoError(t, m.members[testKey].admitErr, must.Sprint("the member stays admitted under the retained signer"))
+
+	// A no-op reload (same key set) must keep the pointer identity so admit's grant memoization survives it.
+	stable := m.signers.Load()
+	_, err = m.ReloadSignersFromFile(writeTemp(t, base64.StdEncoding.EncodeToString(pub)))
+	must.NoError(t, err)
+	must.EqOp(t, stable, m.signers.Load(), must.Sprint("reloading an unchanged signer set keeps the pointer stable (grant memoization)"))
 }
 
 func TestApplySelfGrant(t *testing.T) {

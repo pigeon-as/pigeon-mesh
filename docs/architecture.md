@@ -20,11 +20,11 @@ Peers discover each other over HashiCorp memberlist running inside the WireGuard
 
 ## Route programming
 
-A reconcile loop diffs the desired peer set against the kernel and applies the delta with wgctrl. A route claimed by more than one peer is installed for none and logged, and two nodes sharing a key never pick a winner. Not electing a winner is deliberate: guessing an owner could install a spoofed route. Automatic failover among contested claimants is a conscious non-goal.
+A reconcile loop diffs the desired peer set against the kernel and applies the delta with wgctrl. Only an exact-prefix collision is a contest: WireGuard routes overlapping prefixes by longest-prefix match, so a broad route and a more-specific one coexist and an identity `/128` is never swallowed. A prefix claimed by more than one node (this node's own routes included) is installed for none and logged, and two nodes sharing a key never pick a winner. Not electing a winner is deliberate: guessing an owner could install a spoofed route. Automatic failover among contested claimants is a conscious non-goal.
 
 ## Failed peers
 
-A peer that fails is held for `--reconnect-timeout` (default 10m) before it is reaped, so brief partitions and restarts do not tear down tunnels. A graceful `leave` removes the node at once.
+A peer that fails is held for `--reconnect-timeout` (default 10m) before it is reaped, so brief partitions and restarts do not tear down tunnels. A graceful `leave` removes the node at once, tearing down only the peers the daemon itself added and never the operator's seed peers. That self-vs-operator distinction is recorded in a `/run` file so it survives a daemon restart; `/run` clears on reboot, exactly as the kernel WireGuard peers it shadows do.
 
 ## Transit routes
 

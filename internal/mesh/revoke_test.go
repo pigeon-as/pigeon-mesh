@@ -18,7 +18,7 @@ func TestAdmit_Revoked(t *testing.T) {
 	signers, ownRoute, grant := signedFixture(t, now)
 	peer := Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute}, Signature: grant}
 	// A valid grant is still rejected: the denylist gate sits before verifyGrant, so it overrides admission.
-	r := admit(peer, testKey, signers, map[string]struct{}{testKey: {}}, testPrefix, nil, now)
+	r := admit(member{}, peer, testKey, &signers, map[string]struct{}{testKey: {}}, testPrefix, nil, now)
 	must.ErrorIs(t, r.admitErr, errRevoked)
 	must.SliceEmpty(t, r.wgPeer.routes, must.Sprint("a revoked peer installs nothing, identity /128 included"))
 }

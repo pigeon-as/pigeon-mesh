@@ -163,12 +163,19 @@ func main() {
 		Signature:           sig,
 	}
 
+	// The daemon-added-peers record lives next to the socket under /run, so it clears on reboot exactly as
+	// the kernel WireGuard peers do; only an in-session restart needs it to keep leave's teardown correct.
+	sockForState := *socket
+	if sockForState == "" {
+		sockForState = mesh.DefaultSocketPath
+	}
 	cfg := mesh.Config{
 		Iface:            *iface,
 		GossipPort:       *gossipPort,
 		BindAddr:         ip.String(),
 		Profile:          *profile,
 		SocketPath:       *socket,
+		StatePath:        strings.TrimSuffix(sockForState, ".sock") + ".peers",
 		Self:             self,
 		Prefix:           overlayPrefix,
 		DNSZone:          *dnsZone,

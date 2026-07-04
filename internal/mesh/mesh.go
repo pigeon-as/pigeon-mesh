@@ -28,6 +28,9 @@ const (
 	joinBackoffMax = 4 * time.Second
 
 	routeReassertDebounce = 250 * time.Millisecond
+	// Rate-limits triggered reconciles: a convergence wave (join storm, mass restart) fires many triggers,
+	// and each reconcile does an O(N) netlink peer dump, so coalesce them into at most one run per window.
+	reconcileDebounce = 250 * time.Millisecond
 
 	kernelSettle = 30 * time.Second
 
@@ -40,6 +43,7 @@ type Config struct {
 	BindAddr         string
 	Profile          string
 	SocketPath       string
+	StatePath        string // /run file recording daemon-added peers, so leave stays correct across a restart
 	Self             Peer
 	Prefix           netip.Prefix
 	Policy           *PeerPolicy
@@ -95,7 +99,7 @@ func New(cfg Config) (*Mesh, error) {
 		return nil, err
 	}
 	if len(meta) > memberlist.MetaMaxSize {
-		return nil, fmt.Errorf("encoded self meta %d bytes exceeds limit %d", len(meta), memberlist.MetaMaxSize)
+		return nil, fmt.Errorf("this node's gossip metadata is %d bytes, over the %d-byte limit; trim advertised routes (--allowed-ips), tags (--tag), or the signed name", len(meta), memberlist.MetaMaxSize)
 	}
 
 	// Floor to 2 probe cycles: reaping sooner tears down a tunnel a brief partition/restart would restore.
@@ -152,7 +156,9 @@ func New(cfg Config) (*Mesh, error) {
 	mc.Events = d
 	mc.Conflict = d
 	mc.Logger = newMemberlistLogger()
-	// Name+gossip addr both key-derived: a same-key restart reclaims its name free; only bites a restart on a different --gossip-port.
+	// Name+addr key-derived and port fixed, so a same-key restart returns UNCHANGED: it never uses reclaim
+	// (memberlist gates that on a changed addr/port) and, if it was marked dead, reconverges by refutation.
+	// This 30s only bounds a restart that changes --gossip-port.
 	mc.DeadNodeReclaimTime = 30 * time.Second
 
 	// Must seed kernelPeers before Create: a remote join landing first makes setMember's delete a no-op,
@@ -237,7 +243,9 @@ func (m *Mesh) Run(ctx context.Context) error {
 
 	var retry <-chan time.Time
 	var readyOnce sync.Once
+	var lastReconcile time.Time
 	reconcile := func() {
+		lastReconcile = time.Now()
 		err := m.reconcile()
 		if err == nil {
 			readyOnce.Do(func() { close(m.ready) }) // signal systemd READY only once the kernel is programmed
@@ -245,6 +253,8 @@ func (m *Mesh) Run(ctx context.Context) error {
 		retry = retryAfter(err)
 	}
 	reconcile()
+	// A pending debounce timer coalesces a burst of triggers into one run per reconcileDebounce window.
+	var debounce <-chan time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -253,6 +263,15 @@ func (m *Mesh) Run(ctx context.Context) error {
 			leaving = true
 			return nil
 		case <-m.reconcileCh:
+			if debounce == nil {
+				if d := debounceDelay(lastReconcile, time.Now(), reconcileDebounce); d > 0 {
+					debounce = time.After(d)
+				} else {
+					reconcile()
+				}
+			}
+		case <-debounce:
+			debounce = nil
 			reconcile()
 		case <-ticker.C:
 			reconcile()
@@ -260,6 +279,15 @@ func (m *Mesh) Run(ctx context.Context) error {
 			reconcile()
 		}
 	}
+}
+
+// debounceDelay returns how long to wait before the next triggered reconcile so runs stay at least
+// interval apart, or 0 to run now when interval has already elapsed since the last run.
+func debounceDelay(lastRun, now time.Time, interval time.Duration) time.Duration {
+	if elapsed := now.Sub(lastRun); elapsed < interval {
+		return interval - elapsed
+	}
+	return 0
 }
 
 // Ready is closed after the first successful reconcile; sdnotify waits on it before signaling READY.

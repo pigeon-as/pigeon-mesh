@@ -49,7 +49,7 @@ func TestMesh_New_OversizedMeta(t *testing.T) {
 			AllowedIPs: manyAllowed,
 		},
 	})
-	must.ErrorContains(t, err, "exceeds limit")
+	must.ErrorContains(t, err, "over the 512-byte limit")
 }
 
 func encodedMeta(t *testing.T, pubkey, hostRouteCIDR string) []byte {
@@ -106,4 +106,13 @@ func TestReloadPolicyFromFile(t *testing.T) {
 	// missing file: error, policy untouched.
 	must.Error(t, m.ReloadPolicyFromFile(filepath.Join(t.TempDir(), "nope")))
 	must.NotNil(t, m.policy.Load())
+}
+
+func TestDebounceDelay(t *testing.T) {
+	base := time.Unix(1000, 0)
+	const interval = 250 * time.Millisecond
+	must.EqOp(t, 150*time.Millisecond, debounceDelay(base, base.Add(100*time.Millisecond), interval), must.Sprint("mid-window: wait the remainder"))
+	must.EqOp(t, time.Duration(0), debounceDelay(base, base.Add(interval), interval), must.Sprint("at the boundary: run now"))
+	must.EqOp(t, time.Duration(0), debounceDelay(base, base.Add(time.Second), interval), must.Sprint("past the window: run now"))
+	must.EqOp(t, time.Duration(0), debounceDelay(time.Time{}, base, interval), must.Sprint("no prior run: run now"))
 }

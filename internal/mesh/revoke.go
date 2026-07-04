@@ -55,5 +55,6 @@ func (m *Mesh) ReloadRevokedFromFile(path string) (int, error) {
 	}
 	m.revoked.Store(&set)
 	m.reevaluate(time.Now())
+	m.reseedUnrevokedKernelPeers() // restore the /128 for a boot-time seed just removed from the denylist
 	return len(set), nil
 }
