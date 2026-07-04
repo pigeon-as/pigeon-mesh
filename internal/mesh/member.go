@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -49,6 +50,9 @@ func admit(prev member, p Peer, name string, signersPtr *[]ed25519.PublicKey, re
 	if !ok {
 		g, err := verifyGrant(p, name, *signersPtr, now)
 		if err != nil {
+			if errors.Is(err, signature.ErrExpired) {
+				return identityOnly(name, p, prefix) // soft expiry: keep the self-certified /128, drop transit
+			}
 			return member{admitErr: err}
 		}
 		grant = g
@@ -79,6 +83,23 @@ func reuseGrant(prev member, sig []byte, signersPtr *[]ed25519.PublicKey, now ti
 		return signature.Grant{}, false // expired since last verify; re-verify to produce the proper error
 	}
 	return signature.Grant{NotAfter: prev.grantExpiry, Name: prev.name, Routes: prev.grantRoutes}, true
+}
+
+// identityOnly is the soft-expiry verdict: the grant lapsed, but the overlay address is self-certified, so
+// keep the identity /128 (the tunnel and in-band gossip renewal survive) and install no transit routes. A
+// renewed grant re-admits the peer with full routes; only revocation (--revoked) removes the /128. Every
+// reference (nebula/tailscale/spire) hard-tears-down on expiry only because renewal is out-of-band; pigeon's
+// renewal rides inside the tunnel, so a hard teardown would sever the very path the renewal travels over.
+func identityOnly(name string, p Peer, prefix netip.Prefix) member {
+	addr, err := validateOverlayAddr(name, p, prefix)
+	if err != nil {
+		return member{admitErr: err} // cannot even certify the identity: install nothing
+	}
+	return member{
+		admitErr: errSignatureExpired,
+		addr:     addr,
+		wgPeer:   wgPeer{key: name, endpoint: p.Endpoint, routes: []string{HostRoute(addr).String()}, keepalive: p.PersistentKeepalive},
+	}
 }
 
 // identity /128 is self-certified (exempt from grant routes); other routes must be contained in a grant route.
@@ -126,6 +147,10 @@ func CheckSelfRoutes(allowedIPs []string, identity netip.Addr, grantRoutes []net
 // Computes the verdict under m.mu (serialized against reevaluate), so no peer is accepted under stale trust.
 func (m *Mesh) setMember(n *memberlist.Node) {
 	if n.Name == m.cfg.Self.PublicKey || len(n.Meta) == 0 {
+		return
+	}
+	if !canonicalKey(n.Name) {
+		slog.Warn("peer name is not a canonical WireGuard key; ignoring", "node", n.Name)
 		return
 	}
 	if len(n.Meta) > memberlist.MetaMaxSize {
@@ -269,9 +294,13 @@ func (m *Mesh) expireGrants(now time.Time) (changed bool) {
 		if !e.admitted() || e.grantExpiry == 0 || ts < e.grantExpiry {
 			continue
 		}
-		e.admitErr, e.wgPeer, e.refusedRoutes, e.unauthorizedRoutes = errSignatureExpired, wgPeer{}, nil, nil
+		// Soft expiry: keep the self-certified identity /128 (tunnel + in-band renewal survive), drop only
+		// the grant-authorized transit routes. A renewal re-admits the peer with its full route set.
+		e.admitErr = errSignatureExpired
+		e.wgPeer = wgPeer{key: name, endpoint: e.peer.Endpoint, routes: []string{HostRoute(e.addr).String()}, keepalive: e.peer.PersistentKeepalive}
+		e.refusedRoutes, e.unauthorizedRoutes = nil, nil
 		m.members[name] = e
-		slog.Warn("peer grant expired; not installed", "pubkey", name)
+		slog.Warn("peer grant expired; keeping identity /128, dropping transit routes", "pubkey", name)
 		changed = true
 	}
 	m.mu.Unlock()

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/netip"
 	"sync"
 	"sync/atomic"
@@ -61,13 +62,14 @@ type Mesh struct {
 	selfAddr   netip.Addr
 	memberlist *memberlist.Memberlist
 
-	mu          sync.RWMutex // guards the membership maps below
-	members     map[string]member
-	applied     map[string]wgPeer
-	kernelPeers map[string]bool     // kernel peers awaiting first gossip; dropped once they gossip
-	seedPeers   map[string]bool     // operator-provisioned kernel peers at startup; never torn down on leave (immutable after adoptKernelPeers)
-	contested   map[string][]string // claimed by >1 peer, installed for none
-	isolated    bool                // isolation warn-once latch
+	mu             sync.RWMutex // guards the membership maps below
+	members        map[string]member
+	applied        map[string]wgPeer
+	kernelPeers    map[string]bool        // kernel peers awaiting first gossip; dropped once they gossip
+	seedPeers      map[string]bool        // operator-provisioned kernel peers at startup; never torn down on leave (immutable after adoptKernelPeers)
+	seedAllowedIPs map[string][]net.IPNet // each seed's operator-set allowed-ips at adopt, restored on graceful leave
+	contested      map[string][]string    // claimed by >1 peer, installed for none
+	isolated       bool                   // isolation warn-once latch
 
 	signers atomic.Pointer[[]ed25519.PublicKey] // swapped whole on SIGHUP for lock-free reads
 	policy  atomic.Pointer[PeerPolicy]
@@ -116,16 +118,17 @@ func New(cfg Config) (*Mesh, error) {
 		return nil, fmt.Errorf("bind addr %q: %w", cfg.BindAddr, err)
 	}
 	m := &Mesh{
-		cfg:         cfg,
-		selfAddr:    selfAddr,
-		members:     map[string]member{},
-		applied:     map[string]wgPeer{},
-		kernelPeers: map[string]bool{},
-		seedPeers:   map[string]bool{},
-		contested:   map[string][]string{},
-		reconcileCh: make(chan struct{}, 1),
-		leave:       make(chan struct{}, 1),
-		ready:       make(chan struct{}),
+		cfg:            cfg,
+		selfAddr:       selfAddr,
+		members:        map[string]member{},
+		applied:        map[string]wgPeer{},
+		kernelPeers:    map[string]bool{},
+		seedPeers:      map[string]bool{},
+		seedAllowedIPs: map[string][]net.IPNet{},
+		contested:      map[string][]string{},
+		reconcileCh:    make(chan struct{}, 1),
+		leave:          make(chan struct{}, 1),
+		ready:          make(chan struct{}),
 	}
 	m.meta.Store(&meta)
 	grant := cfg.Self.Signature
@@ -213,17 +216,17 @@ func (m *Mesh) Run(ctx context.Context) error {
 	}()
 
 	runCtx, cancel := context.WithCancel(ctx)
-	var resolverWG sync.WaitGroup
+	// Goroutines that touch the overlay addr/route the leave teardown removes: await them after cancel so a
+	// mid-iteration SetRoute (guard) or resolver bind can't race the DelRoute/DelAddr below.
+	var teardownWG sync.WaitGroup
 	defer func() {
 		cancel()
-		resolverWG.Wait()
+		teardownWG.Wait()
 	}()
 
 	go m.serveStatus(runCtx)
-	go m.guardOverlayRoute(runCtx)
-	resolverWG.Go(func() {
-		m.serveDNS(runCtx)
-	})
+	teardownWG.Go(func() { m.guardOverlayRoute(runCtx) })
+	teardownWG.Go(func() { m.serveDNS(runCtx) })
 
 	// Async: a synchronous join would block Run on a cold seed tunnel.
 	go m.retryJoin(runCtx)

@@ -136,6 +136,11 @@ func (m *Mesh) reconcile() error {
 	admitted := 0
 	for name, e := range m.members {
 		if !e.admitted() {
+			// A soft-expired grant keeps only its identity /128 (tunnel + in-band renewal survive); other
+			// rejections install nothing. Not counted as admitted for the isolation check below.
+			if len(e.wgPeer.routes) > 0 {
+				desired[name] = e.wgPeer
+			}
 			continue
 		}
 		admitted++
@@ -181,8 +186,16 @@ func (m *Mesh) reconcile() error {
 	}
 
 	m.mu.Lock()
-	if len(changes) > 0 {
-		m.applied = effective
+	// Apply the diff to m.applied rather than replacing it wholesale with the pre-Apply snapshot: a
+	// concurrent writer during the lock-free WG.Apply above (reseedUnrevokedKernelPeers on un-revoke) adds
+	// an entry that is absent from `effective`, and a blind replace would silently drop it.
+	for _, c := range changes {
+		name := c.PublicKey.String()
+		if c.Remove {
+			delete(m.applied, name)
+		} else {
+			m.applied[name] = effective[name]
+		}
 	}
 	var newlyContested []string
 	for route := range contested {
@@ -215,10 +228,12 @@ func (m *Mesh) adoptKernelPeers() error {
 		return err
 	}
 	adopted := make(map[string]wgPeer, len(peers))
+	original := make(map[string][]net.IPNet, len(peers)) // operator's allowed-ips before we touch them, for leave
 	revoked := *m.revoked.Load()
 	var routes []wgtypes.PeerConfig
 	for _, p := range peers {
 		name := p.PublicKey.String()
+		original[name] = p.AllowedIPs
 		w := wgPeer{key: name}
 		if _, isRevoked := revoked[name]; !isRevoked {
 			if route, pc, ok := m.overlaySeed(p); ok {
@@ -240,6 +255,7 @@ func (m *Mesh) adoptKernelPeers() error {
 	managed := loadManaged(m.cfg.StatePath)
 	m.mu.Lock()
 	m.applied = adopted
+	m.seedAllowedIPs = original
 	for name := range adopted {
 		m.kernelPeers[name] = true
 		if !managed[name] {
@@ -378,11 +394,14 @@ func (m *Mesh) removeAddedPeers() {
 	m.mu.RLock()
 	var rm []wgtypes.PeerConfig
 	for name := range m.applied {
-		if m.seedPeers[name] {
-			continue
-		}
 		key, err := wgtypes.ParseKey(name)
 		if err != nil {
+			continue
+		}
+		if m.seedPeers[name] {
+			// Never remove an operator seed, but undo routes the daemon expanded onto it by restoring the
+			// operator's allowed-ips snapshotted at adopt (a no-op for a seed the daemon never modified).
+			rm = append(rm, wgtypes.PeerConfig{PublicKey: key, UpdateOnly: true, ReplaceAllowedIPs: true, AllowedIPs: m.seedAllowedIPs[name]})
 			continue
 		}
 		rm = append(rm, wgtypes.PeerConfig{PublicKey: key, Remove: true})

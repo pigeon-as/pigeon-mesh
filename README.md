@@ -65,8 +65,9 @@ unexpired. Grants are re-checked continuously, so expiry or rotation drops admit
 peers too. A node checks its own grant at startup and won't run on a bad one. Renew
 before it expires by overwriting the `--signature` file and sending `SIGHUP`: the node
 re-advertises the new grant over gossip with no restart and no tunnel drop (the
-WireGuard key is unchanged). A grant that does lapse drops the node from DNS, and
-signature-checking peers tear down its tunnels within seconds.
+WireGuard key is unchanged). A grant that does lapse drops the node from DNS and its transit
+routes, but peers keep its self-certified `/128` so the tunnel stays up and it re-admits itself
+the moment it renews. Only [revocation](#revocation) removes a peer outright.
 
 ## Revocation
 

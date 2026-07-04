@@ -26,6 +26,15 @@ func TestEncodeDecodeMeta_RoundTrip(t *testing.T) {
 	must.EqOp(t, in.PersistentKeepalive, out.PersistentKeepalive)
 }
 
+func TestCanonicalKey(t *testing.T) {
+	must.True(t, canonicalKey(testKey), must.Sprint("a canonical 32-byte key passes"))
+	// testKey is 43 'A' + '='; swapping the last data char to 'B' sets nonzero trailing bits: it still
+	// decodes to 32 bytes under non-strict base64 but is not the canonical form.
+	must.False(t, canonicalKey(testKey[:42]+"B="), must.Sprint("a non-canonical variant is rejected"))
+	must.False(t, canonicalKey("not-base64!"), must.Sprint("non-base64 is rejected"))
+	must.False(t, canonicalKey("AAAA"), must.Sprint("a non-32-byte key is rejected"))
+}
+
 func TestCanonicalizeAllowedIPs_MasksHostBits(t *testing.T) {
 	ips := []string{"fdcc::dead/64", "fdcc::1/128", "192.168.1.5/24"}
 	canonicalizeAllowedIPs(ips)

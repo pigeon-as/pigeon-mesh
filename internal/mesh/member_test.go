@@ -276,17 +276,27 @@ func TestSetMember_ReannounceClearsFailed(t *testing.T) {
 func TestExpireGrants(t *testing.T) {
 	m := newTestMesh()
 	now := time.Now()
+	derived, err := DeriveAddr(testKey, testPrefix)
+	must.NoError(t, err)
+	identity := HostRoute(derived).String()
 	m.members["accepted-noexpiry"] = member{grantExpiry: 0}
 	m.members["accepted-valid"] = member{grantExpiry: now.Add(time.Hour).Unix()}
-	m.members["accepted-expired"] = member{grantExpiry: now.Add(-time.Second).Unix(), refusedRoutes: []string{"192.168.0.0/16"}, unauthorizedRoutes: []string{"10.0.0.0/8"}}
+	m.members["accepted-expired"] = member{
+		addr:          derived,
+		peer:          Peer{Endpoint: "203.0.113.1:51820"},
+		grantExpiry:   now.Add(-time.Second).Unix(),
+		wgPeer:        wgPeer{key: "accepted-expired", routes: []string{identity, "10.0.0.0/8"}},
+		refusedRoutes: []string{"192.168.0.0/16"}, unauthorizedRoutes: []string{"10.0.0.0/8"},
+	}
 	m.members["already-rejected"] = member{admitErr: errors.New("no signature")}
-	m.members["failed-expired"] = member{failed: true, grantExpiry: now.Add(-time.Hour).Unix()}
+	m.members["failed-expired"] = member{addr: derived, failed: true, grantExpiry: now.Add(-time.Hour).Unix()}
 
 	must.True(t, m.expireGrants(now), must.Sprint("an expiry reports a change, so maintain can trigger a reconcile"))
 
 	must.NoError(t, m.members["accepted-noexpiry"].admitErr, must.Sprint("a member with no expiry stays admitted"))
 	must.NoError(t, m.members["accepted-valid"].admitErr, must.Sprint("a member with a future expiry stays admitted"))
 	must.EqOp(t, "signature expired", m.members["accepted-expired"].admitErr.Error())
+	must.Eq(t, []string{identity}, m.members["accepted-expired"].wgPeer.routes, must.Sprint("soft expiry keeps the identity /128 and drops transit routes"))
 	must.SliceEmpty(t, m.members["accepted-expired"].unauthorizedRoutes, must.Sprint("expiry clears the unauthorized-route register"))
 	must.SliceEmpty(t, m.members["accepted-expired"].refusedRoutes, must.Sprint("expiry clears the refused-route register"))
 	must.EqOp(t, "no signature", m.members["already-rejected"].admitErr.Error())
@@ -360,7 +370,6 @@ func TestAdmit(t *testing.T) {
 	}{
 		{name: "valid signature and derived route accepted", signers: signers, peer: prefixPeer(validSig), wantAddr: true, wantExpiry: true},
 		{name: "unsigned peer rejected", signers: signers, peer: prefixPeer(nil), wantReject: "no signature"},
-		{name: "expired signature rejected", signers: signers, peer: prefixPeer(expiredSig), wantReject: "expired"},
 		{name: "unknown signer rejected", signers: []ed25519.PublicKey{otherPub}, peer: prefixPeer(validSig), wantReject: "unknown signer"},
 		{name: "non-derived route rejected", signers: signers, peer: prefixPeer(validSig, "fdcc::dead/128"), wantReject: "derives"},
 		{name: "malformed endpoint rejected", signers: signers, peer: Peer{PublicKey: testKey, AllowedIPs: []string{ownRoute}, Signature: validSig}, wantReject: "invalid peer config"},
@@ -379,6 +388,13 @@ func TestAdmit(t *testing.T) {
 			must.EqOp(t, tc.wantExpiry, r.grantExpiry != 0)
 		})
 	}
+
+	// Soft expiry (DS1): an expired grant keeps the self-certified identity /128 so the tunnel and in-band
+	// gossip renewal survive, but drops transit routes; only revocation removes the peer.
+	exp := admit(member{}, prefixPeer(expiredSig, ownRoute, "10.0.0.0/8"), testKey, &signers, nil, prefix, nil, now)
+	must.StrContains(t, exp.admitErr.Error(), "expired")
+	must.True(t, exp.addr.IsValid(), must.Sprint("identity is still self-certified on expiry"))
+	must.Eq(t, []string{HostRoute(exp.addr).String()}, exp.wgPeer.routes, must.Sprint("expiry keeps only the identity /128, no transit"))
 }
 
 func TestAdmit_PolicyFiltersRoutes(t *testing.T) {

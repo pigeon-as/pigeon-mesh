@@ -15,6 +15,10 @@ import (
 
 const domain = "wg-mesh-signature-v1"
 
+// ErrExpired is returned by Verify when a grant is past its NotAfter, so callers can treat expiry (soft,
+// renewable) differently from other verification failures (untrusted signer, malformed).
+var ErrExpired = errors.New("signature expired")
+
 type claims struct {
 	Ctx       string   `cbor:"1,keyasint"`
 	Sub       []byte   `cbor:"2,keyasint"`
@@ -194,7 +198,7 @@ func Verify(signers []ed25519.PublicKey, pubkey string, blob []byte, now time.Ti
 		return Grant{}, errors.New("grant must carry an expiry")
 	}
 	if now.Unix() >= c.NotAfter {
-		return Grant{}, errors.New("signature expired")
+		return Grant{}, ErrExpired
 	}
 	routes, err := decodeRoutes(c.Routes)
 	if err != nil {

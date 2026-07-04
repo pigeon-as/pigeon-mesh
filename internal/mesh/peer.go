@@ -2,6 +2,8 @@ package mesh
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
@@ -12,6 +14,14 @@ import (
 	"github.com/hashicorp/go-msgpack/v2/codec"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
+
+// canonicalKey reports whether name is the canonical base64 encoding of a 32-byte WireGuard key. Non-strict
+// base64 would decode a non-canonical variant to the same bytes yet track it under a different string,
+// churning reconcile against the kernel's canonical form; requiring canonical form at intake matches --revoked.
+func canonicalKey(name string) bool {
+	raw, err := base64.StdEncoding.Strict().DecodeString(name)
+	return err == nil && len(raw) == ed25519.PublicKeySize
+}
 
 // PublicKey is identity, not encoded; it is the node name, filled in on decode.
 type Peer struct {
