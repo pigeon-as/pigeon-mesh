@@ -5,7 +5,9 @@ package mesh
 import (
 	"crypto/ed25519"
 	"errors"
+	"fmt"
 	"net/netip"
+	"slices"
 	"testing"
 	"time"
 
@@ -22,7 +24,7 @@ func newTestMesh() *Mesh {
 		contested:   map[string][]string{},
 		reconcileCh: make(chan struct{}, 1),
 	}
-	revoked := map[string]revocation{}
+	revoked := map[string]struct{}{}
 	m.revoked.Store(&revoked)
 	return m
 }
@@ -56,7 +58,7 @@ func storeConfig(m *Mesh, signers []ed25519.PublicKey, policy *PeerPolicy) {
 	m.signers.Store(&signers)
 	m.policy.Store(policy)
 	if m.revoked.Load() == nil {
-		revoked := map[string]revocation{}
+		revoked := map[string]struct{}{}
 		m.revoked.Store(&revoked)
 	}
 }
@@ -133,6 +135,32 @@ func TestReevaluate_LooserPolicyRestoresRoute(t *testing.T) {
 	must.Eq(t, []string{ownRoute, "10.0.0.0/8"}, got.wgPeer.routes, must.Sprint("a removed policy restores the full route set"))
 	must.SliceEmpty(t, got.refusedRoutes)
 	must.True(t, reconcileTriggered(m.reconcileCh))
+}
+
+func TestReevaluate_NamePropagatesOnReadmit(t *testing.T) {
+	// A peer first seen while rejected carries no name; when a SIGHUP re-admits it, reevaluate must
+	// install the grant's DNS name so it enters the zone without waiting for a re-gossip.
+	now := time.Unix(1_000_000, 0)
+	priv, pub, sub := mkSig(t)
+	derived, err := DeriveAddr(testKey, testPrefix)
+	must.NoError(t, err)
+	ownRoute := HostRoute(derived).String()
+	grant, err := signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), "web01")
+	must.NoError(t, err)
+
+	m := newTestMesh()
+	m.cfg = Config{Prefix: testPrefix}
+	storeConfig(m, []ed25519.PublicKey{pub}, nil)
+	// Stored as if previously rejected: no name, no routes, an admit error.
+	m.members[testKey] = member{
+		peer:     Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute}, Signature: grant},
+		admitErr: errors.New("unknown signer"),
+		meta:     []byte("m"),
+	}
+	m.reevaluate(now)
+	got := m.members[testKey]
+	must.True(t, got.admitted(), must.Sprint("the peer re-admits under the now-trusted signer"))
+	must.EqOp(t, "web01", got.name, must.Sprint("the grant's DNS name is installed on re-admit, not left stale"))
 }
 
 func TestReevaluate_RejectReasonRefreshes(t *testing.T) {
@@ -340,7 +368,7 @@ func TestAdmit(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			r := admit(tc.peer, testKey, tc.signers, nil, prefix, nil, now)
+			r := admit(member{}, tc.peer, testKey, &tc.signers, nil, prefix, nil, now)
 			if tc.wantReject == "" {
 				must.NoError(t, r.admitErr)
 			} else {
@@ -360,14 +388,14 @@ func TestAdmit_PolicyFiltersRoutes(t *testing.T) {
 	must.NoError(t, err)
 	p := Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute, "10.1.0.0/16", "192.168.0.0/16"}, Signature: grant}
 
-	r := admit(p, testKey, signers, nil, testPrefix, pol, now)
+	r := admit(member{}, p, testKey, &signers, nil, testPrefix, pol, now)
 	must.NoError(t, r.admitErr)
 	must.True(t, r.addr.IsValid())
 	must.Eq(t, []string{ownRoute, "10.1.0.0/16"}, r.wgPeer.routes, must.Sprint("identity kept by matching peer.address; 10/8 subnet accepted"))
 	must.Eq(t, []string{"192.168.0.0/16"}, r.refusedRoutes)
 
 	// nil policy keeps everything
-	r = admit(p, testKey, signers, nil, testPrefix, nil, now)
+	r = admit(member{}, p, testKey, &signers, nil, testPrefix, nil, now)
 	must.Eq(t, p.AllowedIPs, r.wgPeer.routes)
 	must.SliceEmpty(t, r.refusedRoutes)
 }
@@ -378,7 +406,7 @@ func TestAdmit_AuthorizesRoutes(t *testing.T) {
 	signers, ownRoute, grant := signedFixture(t, now, netip.MustParsePrefix("10.0.0.0/8"))
 	p := Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute, "10.1.0.0/16", "192.168.0.0/16"}, Signature: grant}
 
-	r := admit(p, testKey, signers, nil, testPrefix, nil, now)
+	r := admit(member{}, p, testKey, &signers, nil, testPrefix, nil, now)
 	must.True(t, r.admitted(), must.Sprint("an unauthorized extra route does not reject the peer"))
 	must.Eq(t, []string{ownRoute, "10.1.0.0/16"}, r.wgPeer.routes, must.Sprint("identity /128 and the 10/8 sub-prefix install"))
 	must.Eq(t, []string{"192.168.0.0/16"}, r.unauthorizedRoutes, must.Sprint("a route outside the grant is dropped as unauthorized"))
@@ -389,17 +417,113 @@ func TestAdmit_BroadGrantAuthorizesSubprefixes(t *testing.T) {
 	// a 0.0.0.0/0 grant authorizes the default and any sub-prefix by containment.
 	signers, ownRoute, grant := signedFixture(t, now, netip.MustParsePrefix("0.0.0.0/0"))
 	p := Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute, "0.0.0.0/0", "10.0.0.0/8"}, Signature: grant}
-	r := admit(p, testKey, signers, nil, testPrefix, nil, now)
+	r := admit(member{}, p, testKey, &signers, nil, testPrefix, nil, now)
 	must.Eq(t, []string{ownRoute, "0.0.0.0/0", "10.0.0.0/8"}, r.wgPeer.routes, must.Sprint("a default-route grant authorizes the default and any sub-prefix"))
 	must.SliceEmpty(t, r.unauthorizedRoutes)
 }
 
-// Guards store() -> delete(m.kernelPeers): once a peer gossips it must leave the kernel-peers set, else
+// TestNodeMetaHeadroom pins how much room the 512-byte NodeMeta cap leaves for advertised routes and tags
+// once a realistic named, route-authorizing grant is packed in, so a regression that bloats the encoding
+// (or the documented operator limit drifting from reality) fails here. The numbers are logged with -v.
+func TestNodeMetaHeadroom(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	priv, _, sub := mkSig(t)
+	// A grant with a hostname-length name and two authorized transit routes (identity + an exit).
+	grant, err := signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(720*time.Hour).Unix(),
+		"node-worstcase.example.internal", netip.MustParsePrefix("10.0.0.0/16"), netip.MustParsePrefix("0.0.0.0/0"))
+	must.NoError(t, err)
+	derived, err := DeriveAddr(testKey, testPrefix)
+	must.NoError(t, err)
+	base := Peer{Endpoint: "203.0.113.1:51820", AllowedIPs: []string{HostRoute(derived).String()}, Signature: grant}
+	bmeta, err := encodeMeta(base)
+	must.NoError(t, err)
+	t.Logf("baseline NodeMeta (named 2-route grant + identity /128) = %d / %d bytes", len(bmeta), memberlist.MetaMaxSize)
+
+	fits := func(p Peer) bool {
+		m, err := encodeMeta(p)
+		must.NoError(t, err)
+		return len(m) <= memberlist.MetaMaxSize
+	}
+
+	// Extra advertised /24 routes that still fit.
+	routes := 0
+	for {
+		p := base
+		p.AllowedIPs = slices.Clone(base.AllowedIPs)
+		for i := 0; i <= routes; i++ {
+			p.AllowedIPs = append(p.AllowedIPs, fmt.Sprintf("10.%d.%d.0/24", i/256, i%256))
+		}
+		if !fits(p) {
+			break
+		}
+		routes++
+	}
+	t.Logf("extra advertised /24 routes beyond the baseline that fit: %d", routes)
+
+	// Short tags (k=v) that still fit.
+	tags := 0
+	for {
+		p := base
+		p.Tags = Tags{}
+		for i := 0; i <= tags; i++ {
+			p.Tags[fmt.Sprintf("k%d", i)] = "v"
+		}
+		if !fits(p) {
+			break
+		}
+		tags++
+	}
+	t.Logf("short tags beyond the baseline that fit: %d", tags)
+
+	must.True(t, routes >= 10, must.Sprintf("NodeMeta headroom shrank: only %d extra /24 routes fit past a named 2-route grant (was ~17)", routes))
+}
+
+func TestReuseGrant(t *testing.T) {
+	sig := []byte("signature-bytes")
+	ptr := &[]ed25519.PublicKey{}
+	now := time.Unix(1000, 0)
+	base := member{
+		peer:          Peer{Signature: sig},
+		grantExpiry:   now.Add(time.Hour).Unix(),
+		name:          "alpha",
+		grantRoutes:   []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")},
+		verifiedUnder: ptr,
+	}
+
+	g, ok := reuseGrant(base, sig, ptr, now)
+	must.True(t, ok, must.Sprint("same signer pointer + signature + unexpired reuses the verified grant, skipping ed25519"))
+	must.EqOp(t, "alpha", g.Name)
+	must.Eq(t, base.grantRoutes, g.Routes)
+
+	_, ok = reuseGrant(base, []byte("different"), ptr, now)
+	must.False(t, ok, must.Sprint("a changed signature forces a fresh verify"))
+
+	_, ok = reuseGrant(base, sig, &[]ed25519.PublicKey{}, now)
+	must.False(t, ok, must.Sprint("a different signer-set pointer (rotation) forces a fresh verify"))
+
+	rejected := base
+	rejected.admitErr = errRevoked
+	_, ok = reuseGrant(rejected, sig, ptr, now)
+	must.False(t, ok, must.Sprint("a previously-rejected member has no cached grant to reuse"))
+
+	_, ok = reuseGrant(base, sig, ptr, time.Unix(base.grantExpiry, 0))
+	must.False(t, ok, must.Sprint("an expired grant forces a fresh verify for the proper error"))
+}
+
+// Guards setMember -> delete(m.kernelPeers): once a peer gossips it must leave the kernel-peers set, else
 // reconcile folds it back from applied and never removes it (e2e missed this).
-func TestStoreDropsKernelPeers(t *testing.T) {
+func TestSetMemberDropsKernelPeers(t *testing.T) {
+	now := time.Now()
+	signers, ownRoute, grant := signedFixture(t, now)
 	m := newTestMesh()
-	m.kernelPeers["seed"] = true
-	m.store("seed", member{})
-	must.MapNotContainsKey(t, m.kernelPeers, "seed", must.Sprint("a peer that gossips leaves the kernel-peers set, so a later reject/leave removes it instead of folding it back"))
-	must.MapContainsKey(t, m.members, "seed", must.Sprint("the gossiped peer is now a member"))
+	m.cfg = Config{Prefix: testPrefix}
+	storeConfig(m, signers, nil)
+	m.kernelPeers[testKey] = true
+
+	meta, err := encodeMeta(Peer{Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute}, Signature: grant})
+	must.NoError(t, err)
+	m.setMember(&memberlist.Node{Name: testKey, Meta: meta})
+
+	must.MapNotContainsKey(t, m.kernelPeers, testKey, must.Sprint("a peer that gossips leaves the kernel-peers set, so a later reject/leave removes it instead of folding it back"))
+	must.MapContainsKey(t, m.members, testKey, must.Sprint("the gossiped peer is now a member"))
 }

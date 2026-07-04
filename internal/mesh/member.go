@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/memberlist"
+	"github.com/pigeon-as/pigeon-mesh/internal/signature"
 )
 
 type member struct {
@@ -26,21 +27,31 @@ type member struct {
 	admitErr           error // nil = admitted
 	refusedRoutes      []string
 	unauthorizedRoutes []string
-	grantExpiry        int64  // unix seconds; 0 = none
-	name               string // operator-signed DNS name from the grant
+	grantExpiry        int64                // unix seconds; 0 = none
+	name               string               // operator-signed DNS name from the grant
+	grantRoutes        []netip.Prefix       // authorized transit routes from the verified grant, cached for reuse
+	verifiedUnder      *[]ed25519.PublicKey // signer set the grant was verified under; nil until verified
 	failed             bool
 	leaveTime          time.Time
 }
 
 func (m member) admitted() bool { return m.admitErr == nil }
 
-func admit(p Peer, name string, signers []ed25519.PublicKey, revoked map[string]revocation, prefix netip.Prefix, policy *PeerPolicy, now time.Time) member {
+// admit computes the admission verdict for peer p. It reuses prev's already-verified grant when the signer
+// set (signersPtr identity) and signature are unchanged, skipping the ed25519 + CBOR verify; a SIGHUP that
+// swaps the signer set changes the pointer and forces a fresh verify. The overlay address is always
+// re-derived because it is self-certified, not signed. Runs under m.mu.
+func admit(prev member, p Peer, name string, signersPtr *[]ed25519.PublicKey, revoked map[string]struct{}, prefix netip.Prefix, policy *PeerPolicy, now time.Time) member {
 	if _, ok := revoked[name]; ok {
 		return member{admitErr: errRevoked}
 	}
-	grant, err := verifyGrant(p, name, signers, now)
-	if err != nil {
-		return member{admitErr: err}
+	grant, ok := reuseGrant(prev, p.Signature, signersPtr, now)
+	if !ok {
+		g, err := verifyGrant(p, name, *signersPtr, now)
+		if err != nil {
+			return member{admitErr: err}
+		}
+		grant = g
 	}
 	addr, err := validateOverlayAddr(name, p, prefix)
 	if err != nil {
@@ -54,7 +65,20 @@ func admit(p Peer, name string, signers []ed25519.PublicKey, revoked map[string]
 	}
 	kept, refused := policyFilter(p, authorized, addr, policy)
 	pc.routes = kept
-	return member{addr: addr, wgPeer: pc, refusedRoutes: refused, unauthorizedRoutes: unauthorized, grantExpiry: grant.NotAfter, name: grant.Name}
+	return member{addr: addr, wgPeer: pc, refusedRoutes: refused, unauthorizedRoutes: unauthorized, grantExpiry: grant.NotAfter, name: grant.Name, grantRoutes: grant.Routes, verifiedUnder: signersPtr}
+}
+
+// reuseGrant returns prev's verified grant when the signer set and signature are unchanged, so a re-verify
+// would yield identical claims; only expiry (the sole time-dependent input) is re-checked against now. A
+// signer rotation swaps m.signers's pointer, which fails the identity check and forces a fresh verify.
+func reuseGrant(prev member, sig []byte, signersPtr *[]ed25519.PublicKey, now time.Time) (signature.Grant, bool) {
+	if prev.verifiedUnder != signersPtr || !prev.admitted() || !bytes.Equal(prev.peer.Signature, sig) {
+		return signature.Grant{}, false
+	}
+	if prev.grantExpiry != 0 && now.Unix() >= prev.grantExpiry {
+		return signature.Grant{}, false // expired since last verify; re-verify to produce the proper error
+	}
+	return signature.Grant{NotAfter: prev.grantExpiry, Name: prev.name, Routes: prev.grantRoutes}, true
 }
 
 // identity /128 is self-certified (exempt from grant routes); other routes must be contained in a grant route.
@@ -99,7 +123,7 @@ func CheckSelfRoutes(allowedIPs []string, identity netip.Addr, grantRoutes []net
 	return nil
 }
 
-// Re-resolves if a SIGHUP swapped signers/policy under us, so no peer is accepted under stale trust.
+// Computes the verdict under m.mu (serialized against reevaluate), so no peer is accepted under stale trust.
 func (m *Mesh) setMember(n *memberlist.Node) {
 	if n.Name == m.cfg.Self.PublicKey || len(n.Meta) == 0 {
 		return
@@ -116,13 +140,13 @@ func (m *Mesh) setMember(n *memberlist.Node) {
 		slog.Warn("decode peer", "node", n.Name, "err", err)
 		return
 	}
-	sig, pol, rev := m.signers.Load(), m.policy.Load(), m.revoked.Load()
-	cur := admit(p, n.Name, *sig, *rev, m.cfg.Prefix, pol, time.Now())
-	if m.signers.Load() != sig || m.policy.Load() != pol || m.revoked.Load() != rev {
-		cur = admit(p, n.Name, *m.signers.Load(), *m.revoked.Load(), m.cfg.Prefix, m.policy.Load(), time.Now())
-	}
+	m.mu.Lock()
+	old := m.members[n.Name]
+	cur := admit(old, p, n.Name, m.signers.Load(), *m.revoked.Load(), m.cfg.Prefix, m.policy.Load(), time.Now())
 	cur.meta, cur.peer = bytes.Clone(n.Meta), p
-	old := m.store(n.Name, cur)
+	m.members[n.Name] = cur
+	delete(m.kernelPeers, n.Name) // it has gossiped; its fate is now membership
+	m.mu.Unlock()
 	if old.admitted() && !cur.admitted() {
 		slog.Warn("peer rejected", "pubkey", n.Name, "reason", cur.admitErr.Error())
 	}
@@ -188,24 +212,15 @@ func (m *Mesh) unchanged(name string, meta []byte) bool {
 	return ok && !e.failed && bytes.Equal(e.meta, meta)
 }
 
-// Drops it from kernelPeers: it has gossiped, so its fate is now membership.
-func (m *Mesh) store(name string, cur member) (old member) {
-	m.mu.Lock()
-	old = m.members[name]
-	m.members[name] = cur
-	delete(m.kernelPeers, name)
-	m.mu.Unlock()
-	return old
-}
-
 // Re-stores every verdict unconditionally (rare O(members) pass); must run even when the config is now
 // empty, else removing a policy would never restore refused routes.
 func (m *Mesh) reevaluate(now time.Time) {
-	signers, policy, revoked := *m.signers.Load(), m.policy.Load(), *m.revoked.Load()
 	m.mu.Lock()
+	// Load trust under m.mu (like setMember) so a racing SIGHUP swap cannot be re-stamped by a stale pass.
+	signersPtr, policy, revoked := m.signers.Load(), m.policy.Load(), *m.revoked.Load()
 	changed := false
 	for name, e := range m.members {
-		nv := admit(e.peer, name, signers, revoked, m.cfg.Prefix, policy, now)
+		nv := admit(e, e.peer, name, signersPtr, revoked, m.cfg.Prefix, policy, now)
 		if e.admitted() && !nv.admitted() {
 			slog.Warn("peer rejected", "pubkey", name, "reason", nv.admitErr.Error())
 		}
@@ -219,7 +234,7 @@ func (m *Mesh) reevaluate(now time.Time) {
 		if !e.wgPeer.equal(nv.wgPeer) {
 			changed = true
 		}
-		e.addr, e.wgPeer, e.admitErr, e.refusedRoutes, e.unauthorizedRoutes, e.grantExpiry = nv.addr, nv.wgPeer, nv.admitErr, nv.refusedRoutes, nv.unauthorizedRoutes, nv.grantExpiry
+		e.addr, e.wgPeer, e.admitErr, e.refusedRoutes, e.unauthorizedRoutes, e.grantExpiry, e.name, e.grantRoutes, e.verifiedUnder = nv.addr, nv.wgPeer, nv.admitErr, nv.refusedRoutes, nv.unauthorizedRoutes, nv.grantExpiry, nv.name, nv.grantRoutes, nv.verifiedUnder
 		m.members[name] = e
 	}
 	m.mu.Unlock()
@@ -239,8 +254,7 @@ func (m *Mesh) maintain(ctx context.Context) {
 			now := time.Now()
 			m.checkSelfExpiry(now)
 			m.checkSelfRevoked()
-			expired, dead, reaped := m.expireGrants(now), m.reapDead(now), m.reapRevocations(now)
-			if expired || dead || reaped {
+			if expired, dead := m.expireGrants(now), m.reapDead(now); expired || dead {
 				m.triggerReconcile()
 			}
 		}
@@ -284,12 +298,12 @@ func (m *Mesh) checkSelfExpiry(now time.Time) {
 	}
 }
 
-// A node honors its own operator anti-grant: it halts self DNS (peers drop it regardless via admit). Unlike
-// expiry this is terminal, with no renewal that clears it; the latch only lifts when the tombstone is reaped.
+// A node honors its own key being on the --revoked denylist: it halts self DNS (peers drop it via admit).
+// The latch lifts if the key is later removed from the denylist (a config edit + SIGHUP).
 func (m *Mesh) checkSelfRevoked() {
 	_, revoked := (*m.revoked.Load())[m.cfg.Self.PublicKey]
 	if was := m.selfRevoked.Swap(revoked); revoked && !was {
-		slog.Warn("this node's key has been revoked by an operator anti-grant; peers will drop it; halting self DNS; terminal until the grant horizon")
+		slog.Warn("this node's key is on the --revoked denylist; peers will drop it; halting self DNS until it is removed from the denylist")
 	}
 }
 

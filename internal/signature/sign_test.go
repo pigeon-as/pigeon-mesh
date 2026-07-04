@@ -22,12 +22,26 @@ func newSigner(t *testing.T) (ed25519.PrivateKey, ed25519.PublicKey, []byte) {
 	return priv, pub, sub
 }
 
-// mint hand-signs arbitrary claims under a chosen domain, for crafting blobs Sign/SignRevocation would refuse.
+// mint hand-signs arbitrary claims under a chosen domain, for crafting blobs Sign would refuse.
 func mint(t *testing.T, priv ed25519.PrivateKey, c claims, dom string) []byte {
 	t.Helper()
 	blob, err := signClaims(priv, c, dom)
 	must.NoError(t, err)
 	return blob
+}
+
+func TestAttach_RejectsNonCanonicalBody(t *testing.T) {
+	priv, pub, sub := newSigner(t)
+	body, err := SigningBody(pub, sub, time.Now().Add(-time.Minute).Unix(), time.Now().Add(time.Hour).Unix(), "web01")
+	must.NoError(t, err)
+	if _, err := Attach(body, ed25519.Sign(priv, body)); err != nil {
+		t.Fatalf("a canonical SigningBody must attach: %v", err)
+	}
+	// A body with trailing bytes is non-canonical; Attach must reject it at the source rather than let
+	// it fail far away at every daemon's Verify.
+	mangled := append(append([]byte{}, body...), 0x00)
+	_, err = Attach(mangled, ed25519.Sign(priv, mangled))
+	must.Error(t, err, must.Sprint("a non-canonical body is rejected at attach time"))
 }
 
 func TestSignerKey(t *testing.T) {
@@ -105,8 +119,8 @@ func TestVerify_Rejections(t *testing.T) {
 	_, err = Verify(signers, base64.StdEncoding.EncodeToString(otherPub), mint(t, priv, good(), domain), now)
 	must.ErrorContains(t, err, "not for this node key")
 
-	// a grant minted under the revocation domain must not verify as a grant
-	_, err = Verify(signers, testKey, mint(t, priv, good(), revocationDomain), now)
+	// a grant minted under a different domain must not verify as a grant
+	_, err = Verify(signers, testKey, mint(t, priv, good(), "wg-mesh-other-v1"), now)
 	must.ErrorContains(t, err, "wrong signature domain")
 }
 
@@ -177,16 +191,6 @@ func TestDetachedSigning(t *testing.T) {
 	otherPriv, _, _ := newSigner(t)
 	_, err = Attach(body, ed25519.Sign(otherPriv, body))
 	must.ErrorContains(t, err, "does not verify")
-
-	// a revocation body completes the same way.
-	rbody, err := RevocationSigningBody(pub, sub, now.Add(time.Hour).Unix())
-	must.NoError(t, err)
-	rev, err := Attach(rbody, ed25519.Sign(priv, rbody))
-	must.NoError(t, err)
-	gotSub, horizon, err := VerifyRevocation([]ed25519.PublicKey{pub}, rev)
-	must.NoError(t, err)
-	must.True(t, bytes.Equal(sub, gotSub))
-	must.EqOp(t, now.Add(time.Hour).Unix(), horizon)
 }
 
 func TestVerifyRoutes_TamperBreaksSignature(t *testing.T) {
@@ -212,86 +216,4 @@ func TestNotAfter(t *testing.T) {
 	must.EqOp(t, int64(2_000), NotAfter(blob))
 	must.EqOp(t, int64(0), NotAfter([]byte{0, 1, 2}), must.Sprint("garbage is not read as expiry"))
 	must.EqOp(t, int64(0), NotAfter(nil))
-}
-
-func TestRevocation_RoundTrip(t *testing.T) {
-	priv, pub, sub := newSigner(t)
-	now := time.Now()
-	horizon := now.Add(time.Hour).Unix()
-	blob, err := SignRevocation(priv, sub, horizon)
-	must.NoError(t, err)
-	gotSub, gotHorizon, err := VerifyRevocation([]ed25519.PublicKey{pub}, blob)
-	must.NoError(t, err)
-	must.True(t, bytes.Equal(sub, gotSub), must.Sprint("revocation names the revoked node key"))
-	must.EqOp(t, horizon, gotHorizon)
-}
-
-func TestRevocation_PastHorizonStillVerifies(t *testing.T) {
-	// NotAfter is the reap horizon, not an expiry: a revocation past horizon must keep verifying so it
-	// can propagate until every node reaps it. Dropping it on receive would re-admit the revoked key.
-	priv, pub, sub := newSigner(t)
-	now := time.Now()
-	blob, err := SignRevocation(priv, sub, now.Add(-time.Hour).Unix())
-	must.NoError(t, err)
-	_, horizon, err := VerifyRevocation([]ed25519.PublicKey{pub}, blob)
-	must.NoError(t, err, must.Sprint("a past-horizon revocation still verifies"))
-	must.EqOp(t, now.Add(-time.Hour).Unix(), horizon)
-}
-
-func TestRevocation_Rejections(t *testing.T) {
-	priv, pub, sub := newSigner(t)
-	now := time.Now()
-	blob, err := SignRevocation(priv, sub, now.Add(time.Hour).Unix())
-	must.NoError(t, err)
-
-	otherPub, _, err := ed25519.GenerateKey(nil)
-	must.NoError(t, err)
-	_, _, err = VerifyRevocation([]ed25519.PublicKey{otherPub}, blob)
-	must.ErrorContains(t, err, "unknown signer")
-
-	tampered := bytes.Clone(blob)
-	tampered[len(tampered)-1] ^= 0xff
-	_, _, err = VerifyRevocation([]ed25519.PublicKey{pub}, tampered)
-	must.ErrorContains(t, err, "bad signature")
-}
-
-func TestRevocation_ClockIndependent(t *testing.T) {
-	// A revocation is terminal and applies on receipt: NotBefore is never a reject, so a node whose clock
-	// lags the operator (benign skew or an NTP-spoofing attacker) still honors it. Grants keep NotBefore.
-	priv, pub, sub := newSigner(t)
-	now := time.Now()
-	future := mint(t, priv, claims{Sub: sub, NotBefore: now.Add(time.Hour).Unix(), NotAfter: now.Add(2 * time.Hour).Unix()}, revocationDomain)
-	gotSub, horizon, err := VerifyRevocation([]ed25519.PublicKey{pub}, future)
-	must.NoError(t, err, must.Sprint("a revocation verifies even when the receiver's clock is behind its NotBefore"))
-	must.True(t, bytes.Equal(sub, gotSub))
-	must.EqOp(t, now.Add(2*time.Hour).Unix(), horizon)
-
-	// A grant with the same future NotBefore is still correctly rejected: only revocations skip the gate.
-	grant := mint(t, priv, claims{Sub: sub, NotBefore: now.Add(time.Hour).Unix(), NotAfter: now.Add(2 * time.Hour).Unix()}, domain)
-	_, err = Verify([]ed25519.PublicKey{pub}, testKey, grant, now)
-	must.ErrorContains(t, err, "not yet valid", must.Sprint("a grant still honors NotBefore"))
-}
-
-func TestSignRevocation_RequiresHorizon(t *testing.T) {
-	priv, _, sub := newSigner(t)
-	_, err := SignRevocation(priv, sub, 0)
-	must.ErrorContains(t, err, "horizon", must.Sprint("a revocation must carry a reap horizon so the tombstone is bounded"))
-}
-
-func TestDomainSeparation(t *testing.T) {
-	// The distinct domain is what stops a grant blob from replaying as a revocation of the same key,
-	// and vice versa. Without it, a valid grant for X would double as "revoke X".
-	priv, pub, sub := newSigner(t)
-	signers := []ed25519.PublicKey{pub}
-	now := time.Now()
-
-	grant, err := Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), "")
-	must.NoError(t, err)
-	revocation, err := SignRevocation(priv, sub, now.Add(time.Hour).Unix())
-	must.NoError(t, err)
-
-	_, _, err = VerifyRevocation(signers, grant)
-	must.ErrorContains(t, err, "wrong signature domain", must.Sprint("a grant blob does not verify as a revocation"))
-	_, err = Verify(signers, testKey, revocation, now)
-	must.ErrorContains(t, err, "wrong signature domain", must.Sprint("a revocation blob does not verify as a grant"))
 }

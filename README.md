@@ -70,21 +70,10 @@ signature-checking peers tear down its tunnels within seconds.
 
 ## Revocation
 
-Expiry is passive: a compromised key stays admitted until its grant lapses. To evict one
-now, sign an anti-grant over its key, inject it into gossip, and append it to the
-`--revoked` file (both matter: gossip is fast, the file is the durable floor):
-
-```sh
-pigeon-mesh sign-revocation --key signer.key --grant node.sig "<node-pubkey>" |
-  tee -a revoked.txt | pigeon-mesh revoke
-```
-
-The anti-grant is operator-signed, so a node holding the revoked key cannot refute it;
-every node re-verifies it and drops the node within seconds. Its reap horizon is the
-grant's own expiry. Gossip is fail-open until it converges, so the `--revoked @file`
-(reloaded on `SIGHUP`) is the completeness floor, not optional. Any signer may revoke any
-node. For an instant cutoff, rotate the signer or sever the node; revoke is the graceful,
-targeted tool.
+A grant expires passively, so a compromised key stays admitted until it lapses. To evict
+one sooner, add its public key to the `--revoked` file, one key per line, and `SIGHUP`: a
+listed key is refused at admission and an admitted peer is dropped on reload. Remove the
+line and `SIGHUP` to re-admit. Like `--signers` and `--peer-policy`, it is a per-node file.
 
 ## Names
 
@@ -151,15 +140,22 @@ conflicts) over a unix socket (`--socket`, default `/run/pigeon-mesh.sock`). `wg
 it at once. A node that fails or restarts is held through `--reconnect-timeout`, then
 reaped.
 
+The socket is root-only (0600) by design and access to it includes the `leave` verb, so
+to expose status to a monitoring user run `pigeon-mesh status --json` via sudo or a relay
+rather than loosening the socket permissions.
+
 ## Performance
 
 A joining node is visible cluster-wide within seconds, and a failed one is detected
 in a few seconds on the `lan` profile or ~30 s on the `wan` default. Both grow only
-logarithmically with cluster size, so it should stay responsive into the thousands.
+logarithmically with cluster size, so it should stay responsive into the thousands. A detected node is held
+for `--reconnect-timeout` (10m) before its tunnel drops, and a daemon restart keeps its tunnels up, so only
+gossip membership reconverges.
 
 ## Limitations
 
-Tags and advertised routes are limited to ~20 entries combined.
+A node's advertised routes and tags share a 512-byte gossip budget, roughly 15 routes or 35 short tags past
+its signed grant; a node over the cap fails to start.
 
 ## Build
 
