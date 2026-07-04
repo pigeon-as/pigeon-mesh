@@ -27,14 +27,12 @@ echo "$unsigned" | pigeon-mesh sign --signature "$signature" > node.sig
 
 ## Revoke a node
 
-```sh
-unsigned=$(pigeon-mesh sign-revocation --pubkey "$signers" --grant node.sig "<node-pubkey>")
-signature=$(bao write -field=signature transit/sign/mesh input="$unsigned" | sed 's/^vault:v1://')
-echo "$unsigned" | pigeon-mesh sign-revocation --signature "$signature" | tee -a revoked.txt | pigeon-mesh revoke
-```
+Revocation needs no signing: it is just the node's public key on the `--revoked` denylist. With the
+Vault Agent template below, put it in a KV list and every node renders it; remove the entry to re-admit:
 
-Use the node's longest-lived grant: the anti-grant reaps at that grant's expiry, and a grant that
-outlives it would re-admit the key.
+```sh
+bao kv put kv/mesh/revoked/<node-name> pubkey="<node-wg-pubkey>"
+```
 
 ## Automate with Vault Agent
 
@@ -50,17 +48,10 @@ template {
 template {
   destination = "/etc/pigeon-mesh/revoked"
   command     = "pkill -HUP pigeon-mesh"
-  contents    = "{{ range secrets \"kv/metadata/mesh/revoked\" }}{{ with secret (printf \"kv/data/mesh/revoked/%s\" .) }}{{ .Data.data.antigrant }}\n{{ end }}{{ end }}"
+  contents    = "{{ range secrets \"kv/metadata/mesh/revoked\" }}{{ with secret (printf \"kv/data/mesh/revoked/%s\" .) }}{{ .Data.data.pubkey }}\n{{ end }}{{ end }}"
 }
 ```
 
 Point the daemon at them with `--signers @/etc/pigeon-mesh/signers --revoked @/etc/pigeon-mesh/revoked`.
-Rotate with `bao write -f transit/keys/mesh/rotate` (both keys verify until you `trim`). Revoke
-fleet-wide by storing the anti-grant, which every agent renders into `--revoked`:
-
-```sh
-unsigned=$(pigeon-mesh sign-revocation --pubkey "$signers" --grant node.sig "<node-pubkey>")
-signature=$(bao write -field=signature transit/sign/mesh input="$unsigned" | sed 's/^vault:v1://')
-antigrant=$(echo "$unsigned" | pigeon-mesh sign-revocation --signature "$signature")
-bao kv put kv/mesh/revoked/<node-name> antigrant="$antigrant"
-```
+Rotate the signer with `bao write -f transit/keys/mesh/rotate` (grants signed by either key verify until
+you `trim`), and revoke a node fleet-wide with the `bao kv put` above.

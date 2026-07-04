@@ -123,6 +123,20 @@ func TestDropContestedRoutes_SelfClaimWins(t *testing.T) {
 	}
 }
 
+func TestDropContestedRoutes_SelfMoreSpecific(t *testing.T) {
+	// A peer route more specific than one of our own served routes is dropped (it would LPM-steal our
+	// traffic); a peer supernet is not dropped, so exit-node / aggregate topologies stay valid.
+	selfRoutes := []string{"10.1.2.0/24"}
+	peers := map[string]wgPeer{
+		"carver": {key: "carver", routes: []string{"10.1.2.0/25"}}, // more specific: dropped
+		"exit":   {key: "exit", routes: []string{"0.0.0.0/0"}},     // supernet: kept
+	}
+	effective, conflicts := dropContestedRoutes(peers, selfRoutes)
+	must.MapEmpty(t, conflicts, must.Sprint("a self-collision is not a peer-vs-peer contest"))
+	must.MapNotContainsKey(t, effective, "carver", must.Sprint("a peer carve-out of our served route is dropped"))
+	must.Eq(t, []string{"0.0.0.0/0"}, effective["exit"].routes, must.Sprint("a peer supernet / exit route is not dropped"))
+}
+
 func TestStaleKernelPeers(t *testing.T) {
 	m := &Mesh{kernelPeers: map[string]bool{"seedA": true, "seedB": true}}
 

@@ -3,7 +3,6 @@
 package main
 
 import (
-	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
 	"flag"
@@ -127,7 +126,7 @@ func runSign(args []string) int {
 }
 
 // runAttach completes a detached signing: it wraps the base64 signature over a to-be-signed body read
-// from stdin into the finished grant or anti-grant. Shared by sign and sign-revocation.
+// from stdin into the finished grant. Used by sign --signature.
 func runAttach(sigB64 string) int {
 	sig, err := base64.StdEncoding.DecodeString(strings.TrimSpace(sigB64))
 	if err != nil {
@@ -159,77 +158,6 @@ func parsePubkey(b64 string) (ed25519.PublicKey, error) {
 		return nil, fmt.Errorf("--pubkey must be a base64 32-byte ed25519 public key")
 	}
 	return ed25519.PublicKey(raw), nil
-}
-
-func runSignRevocation(args []string) int {
-	fs := flag.NewFlagSet("sign-revocation", flag.ExitOnError)
-	keyFile := fs.String("key", "", "signing key file from 'keygen' (local signing)")
-	pubkey := fs.String("pubkey", "", "external signer's base64 public key instead of --key: prints the to-be-signed anti-grant body, then complete it with --signature")
-	sig := fs.String("signature", "", "base64 signature over a to-be-signed body read from stdin: prints the finished anti-grant")
-	grantFile := fs.String("grant", "", "the operator-signed grant being revoked (required); its expiry is the reap horizon")
-	fs.Parse(args)
-
-	if *sig != "" {
-		return runAttach(*sig)
-	}
-	node := fs.Arg(0)
-	if *grantFile == "" || node == "" || fs.NArg() != 1 || (*keyFile == "") == (*pubkey == "") {
-		fmt.Fprintln(os.Stderr, "usage: pigeon-mesh sign-revocation (--key <key> | --pubkey <b64>) --grant <grant-file> <node-wg-pubkey>")
-		return 2
-	}
-	sub, err := base64.StdEncoding.DecodeString(strings.TrimSpace(node))
-	if err != nil || len(sub) != 32 {
-		fmt.Fprintln(os.Stderr, "node must be a base64 32-byte WireGuard public key")
-		return 1
-	}
-	grant, err := signature.LoadSignature(*grantFile)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "grant file:", err)
-		return 1
-	}
-	// Horizon = the grant's own expiry, never operator-chosen: reaping while the grant still verifies
-	// would re-admit the key. Cross-check the grant's subject against <node> to catch a wrong --grant.
-	gsub, err := signature.Subject(grant)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "grant file:", err)
-		return 1
-	}
-	if !bytes.Equal(gsub, sub) {
-		fmt.Fprintln(os.Stderr, "the --grant is not for this node key")
-		return 1
-	}
-	horizon := signature.NotAfter(grant)
-	if horizon == 0 {
-		fmt.Fprintln(os.Stderr, "the --grant carries no expiry; cannot bound the revocation")
-		return 1
-	}
-
-	if *pubkey != "" {
-		pub, err := parsePubkey(*pubkey)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return 1
-		}
-		body, err := signature.RevocationSigningBody(pub, sub, horizon)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return 1
-		}
-		fmt.Println(base64.StdEncoding.EncodeToString(body))
-		return 0
-	}
-	priv, err := loadSigningKey(*keyFile)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
-	blob, err := signature.SignRevocation(priv, sub, horizon)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
-	fmt.Println(base64.StdEncoding.EncodeToString(blob))
-	return 0
 }
 
 func loadSigningKey(path string) (ed25519.PrivateKey, error) {

@@ -112,7 +112,7 @@ func (m *Mesh) serveStatus(ctx context.Context) {
 	}
 }
 
-// maxRequest bounds a socket line; large enough for a revoke verb plus a base64 anti-grant, still a DoS floor.
+// maxRequest bounds a socket line: only status and leave verbs, so a small DoS floor.
 const maxRequest = 4 << 10
 
 func (m *Mesh) handleStatus(conn net.Conn) {
@@ -120,7 +120,7 @@ func (m *Mesh) handleStatus(conn net.Conn) {
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 
 	req, _ := bufio.NewReader(io.LimitReader(conn, maxRequest)).ReadString('\n')
-	verb, arg, _ := strings.Cut(strings.TrimSpace(req), " ")
+	verb, _, _ := strings.Cut(strings.TrimSpace(req), " ")
 	switch verb {
 	case "status", "":
 		data, err := json.Marshal(m.status())
@@ -132,12 +132,6 @@ func (m *Mesh) handleStatus(conn net.Conn) {
 	case "leave":
 		_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
 		if err := m.requestLeave(5 * time.Second); err != nil {
-			fmt.Fprintf(conn, "error: %v\n", err)
-			return
-		}
-		conn.Write([]byte("ok\n"))
-	case "revoke":
-		if err := m.applyRevoke(arg); err != nil {
 			fmt.Fprintf(conn, "error: %v\n", err)
 			return
 		}

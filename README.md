@@ -70,21 +70,10 @@ signature-checking peers tear down its tunnels within seconds.
 
 ## Revocation
 
-Expiry is passive: a compromised key stays admitted until its grant lapses. To evict one
-now, sign an anti-grant over its key, inject it into gossip, and append it to the
-`--revoked` file (both matter: gossip is fast, the file is the durable floor):
-
-```sh
-pigeon-mesh sign-revocation --key signer.key --grant node.sig "<node-pubkey>" |
-  tee -a revoked.txt | pigeon-mesh revoke
-```
-
-The anti-grant is operator-signed, so a node holding the revoked key cannot refute it;
-every node re-verifies it and drops the node within seconds. Its reap horizon is the
-grant's own expiry. Gossip is fail-open until it converges, so the `--revoked @file`
-(reloaded on `SIGHUP`) is the completeness floor, not optional. Any signer may revoke any
-node. For an instant cutoff, rotate the signer or sever the node; revoke is the graceful,
-targeted tool.
+A grant expires passively, so a compromised key stays admitted until it lapses. To evict
+one sooner, add its public key to the `--revoked` file, one key per line, and `SIGHUP`: a
+listed key is refused at admission and an admitted peer is dropped on reload. Remove the
+line and `SIGHUP` to re-admit. Like `--signers` and `--peer-policy`, it is a per-node file.
 
 ## Names
 
@@ -150,6 +139,10 @@ conflicts) over a unix socket (`--socket`, default `/run/pigeon-mesh.sock`). `wg
 <iface>` shows the kernel peers. `pigeon-mesh leave` departs gracefully and peers drop
 it at once. A node that fails or restarts is held through `--reconnect-timeout`, then
 reaped.
+
+The socket is root-only (0600) by design and access to it includes the `leave` verb, so
+to expose status to a monitoring user run `pigeon-mesh status --json` via sudo or a relay
+rather than loosening the socket permissions.
 
 ## Performance
 

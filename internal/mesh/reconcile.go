@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"maps"
 	"net"
+	"net/netip"
 	"slices"
 	"time"
 
@@ -25,12 +26,29 @@ func (m *Mesh) peersInKernel() (map[string]bool, error) {
 	return set, nil
 }
 
-// dropContestedRoutes drops routes claimed by >1 peer (installed for none; returned as contested)
-// and any selfRoutes this node serves (so a peer cannot take our traffic; a self-collision is not reported).
+// dropContestedRoutes drops routes claimed by >1 peer (installed for none; returned as contested) and
+// any peer route that falls inside a route this node itself serves (so a peer cannot take our traffic;
+// a self-collision is not reported). The self check is directional: a peer route equal to or more
+// specific than one of ours is dropped, but a peer supernet (exit route, aggregate) is not, so
+// exit-node and supernet-override topologies still work.
 func dropContestedRoutes(peers map[string]wgPeer, selfRoutes []string) (map[string]wgPeer, map[string][]string) {
-	self := make(map[string]bool, len(selfRoutes))
+	selfPfx := make([]netip.Prefix, 0, len(selfRoutes))
 	for _, ip := range selfRoutes {
-		self[ip] = true
+		if p, err := netip.ParsePrefix(ip); err == nil {
+			selfPfx = append(selfPfx, p)
+		}
+	}
+	selfServes := func(ip string) bool {
+		r, err := netip.ParsePrefix(ip)
+		if err != nil {
+			return true // malformed: fail closed
+		}
+		for _, s := range selfPfx {
+			if r.Bits() >= s.Bits() && s.Contains(r.Addr()) {
+				return true
+			}
+		}
+		return false
 	}
 	claimants := make(map[string][]string)
 	for name, w := range peers {
@@ -48,7 +66,7 @@ func dropContestedRoutes(peers map[string]wgPeer, selfRoutes []string) (map[stri
 			}
 			slices.Sort(owners)
 			contested[ip] = owners
-		case self[ip]:
+		case selfServes(ip):
 			selfHit = true
 		}
 	}
@@ -58,7 +76,7 @@ func dropContestedRoutes(peers map[string]wgPeer, selfRoutes []string) (map[stri
 	effective := make(map[string]wgPeer, len(peers))
 	for name, w := range peers {
 		kept := slices.DeleteFunc(slices.Clone(w.routes), func(ip string) bool {
-			return contested[ip] != nil || self[ip]
+			return contested[ip] != nil || selfServes(ip)
 		})
 		if len(kept) == 0 {
 			continue
@@ -216,9 +234,34 @@ func (m *Mesh) adoptKernelPeers() error {
 	m.applied = adopted
 	for name := range adopted {
 		m.kernelPeers[name] = true
+		m.seedPeers[name] = true // operator-provisioned; never torn down on leave
 	}
 	m.mu.Unlock()
 	return nil
+}
+
+// removeAddedPeers removes, on graceful leave, the kernel peers the daemon itself installed (gossip-
+// discovered), leaving every operator-provisioned seed peer in place. pigeon-mesh is a guest on the
+// operator's interface, so it cleans up its own additions but never the operator's kernel config.
+func (m *Mesh) removeAddedPeers() {
+	m.mu.RLock()
+	var rm []wgtypes.PeerConfig
+	for name := range m.applied {
+		if m.seedPeers[name] {
+			continue
+		}
+		key, err := wgtypes.ParseKey(name)
+		if err != nil {
+			continue
+		}
+		rm = append(rm, wgtypes.PeerConfig{PublicKey: key, Remove: true})
+	}
+	m.mu.RUnlock()
+	if len(rm) > 0 {
+		if err := m.cfg.WG.Apply(m.cfg.Iface, rm); err != nil {
+			slog.Warn("remove daemon-added peers on leave", "err", err)
+		}
+	}
 }
 
 func (m *Mesh) staleKernelPeers() []string {

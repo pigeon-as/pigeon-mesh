@@ -8,7 +8,7 @@ A node's identity is its WireGuard public key. That key is its name everywhere i
 
 ## Overlay addressing
 
-Each node derives its own overlay IPv6 address from the sha512 of its public key under a ULA prefix (default `fdcc::/48`). The derivation is self-certifying: every peer's address must be the same function of its key, so no node can claim another's address and no allocator is needed.
+Each node derives its own overlay IPv6 address from the sha512 of its public key under a ULA prefix (default `fdcc::/48`). The derivation is self-certifying: every peer's address must be the same function of its key, so no node can claim another's address and no allocator is needed. The prefix must be `/64` or shorter so at least 64 bits of the digest form the host portion, keeping the addresses collision-resistant.
 
 ## Grants and trust
 
@@ -20,7 +20,7 @@ Peers discover each other over HashiCorp memberlist running inside the WireGuard
 
 ## Route programming
 
-A reconcile loop diffs the desired peer set against the kernel and applies the delta with wgctrl. A route claimed by more than one peer is installed for none and logged, and two nodes sharing a key never pick a winner.
+A reconcile loop diffs the desired peer set against the kernel and applies the delta with wgctrl. A route claimed by more than one peer is installed for none and logged, and two nodes sharing a key never pick a winner. Not electing a winner is deliberate: guessing an owner could install a spoofed route. Automatic failover among contested claimants is a conscious non-goal.
 
 ## Failed peers
 
@@ -36,7 +36,7 @@ A peer that fails is held for `--reconnect-timeout` (default 10m) before it is r
 
 ## Revocation
 
-`sign-revocation` mints an operator-signed anti-grant, and `revoke` injects it over the socket; it gossips as a grow-only set and evicts the node within seconds. A revocation has no valid-from window, so a clock-skewed node still honors it, and the `--revoked` file is the on-disk floor for nodes that miss the gossip. Each anti-grant is reaped once the revoked grant would have expired anyway.
+`--revoked` is a denylist file of node public keys, one per line. A listed key is denied at admission and a `SIGHUP` reload evicts an already-admitted peer; remove the line and `SIGHUP` to re-admit.
 
 ## DNS
 
@@ -48,11 +48,11 @@ A node's name is the operator-signed `sign --name` carried in its grant, so a pe
 
 ## Key custody
 
-`sign` and `sign-revocation` either sign locally with `--key`, or hand the to-be-signed body to an external signer with `--pubkey` and `--signature`. This lets OpenBao/Vault Transit sign with the operator key generated in the vault and never leaving it.
+`sign` either signs locally with `--key`, or hands the to-be-signed body to an external signer with `--pubkey` and `--signature`. This lets OpenBao/Vault Transit sign with the operator key generated in the vault and never leaving it.
 
 ## Operating
 
-The daemon adopts an existing WireGuard interface (`--interface`) that already holds a private key, and takes its endpoint (`--endpoint`) and its own grant (`--signature`); it assigns the overlay address itself. `status`, `leave`, and `revoke` talk to the running daemon over an owner-only Unix socket (`--socket`).
+The daemon adopts an existing WireGuard interface (`--interface`) that already holds a private key, and takes its endpoint (`--endpoint`) and its own grant (`--signature`); it assigns the overlay address itself. `status` and `leave` talk to the running daemon over an owner-only Unix socket (`--socket`).
 
 ## Reload
 

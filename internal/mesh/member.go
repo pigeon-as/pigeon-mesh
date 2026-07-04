@@ -34,7 +34,7 @@ type member struct {
 
 func (m member) admitted() bool { return m.admitErr == nil }
 
-func admit(p Peer, name string, signers []ed25519.PublicKey, revoked map[string]revocation, prefix netip.Prefix, policy *PeerPolicy, now time.Time) member {
+func admit(p Peer, name string, signers []ed25519.PublicKey, revoked map[string]struct{}, prefix netip.Prefix, policy *PeerPolicy, now time.Time) member {
 	if _, ok := revoked[name]; ok {
 		return member{admitErr: errRevoked}
 	}
@@ -99,7 +99,7 @@ func CheckSelfRoutes(allowedIPs []string, identity netip.Addr, grantRoutes []net
 	return nil
 }
 
-// Re-resolves if a SIGHUP swapped signers/policy under us, so no peer is accepted under stale trust.
+// Computes the verdict under m.mu (serialized against reevaluate), so no peer is accepted under stale trust.
 func (m *Mesh) setMember(n *memberlist.Node) {
 	if n.Name == m.cfg.Self.PublicKey || len(n.Meta) == 0 {
 		return
@@ -116,13 +116,13 @@ func (m *Mesh) setMember(n *memberlist.Node) {
 		slog.Warn("decode peer", "node", n.Name, "err", err)
 		return
 	}
-	sig, pol, rev := m.signers.Load(), m.policy.Load(), m.revoked.Load()
-	cur := admit(p, n.Name, *sig, *rev, m.cfg.Prefix, pol, time.Now())
-	if m.signers.Load() != sig || m.policy.Load() != pol || m.revoked.Load() != rev {
-		cur = admit(p, n.Name, *m.signers.Load(), *m.revoked.Load(), m.cfg.Prefix, m.policy.Load(), time.Now())
-	}
+	m.mu.Lock()
+	cur := admit(p, n.Name, *m.signers.Load(), *m.revoked.Load(), m.cfg.Prefix, m.policy.Load(), time.Now())
 	cur.meta, cur.peer = bytes.Clone(n.Meta), p
-	old := m.store(n.Name, cur)
+	old := m.members[n.Name]
+	m.members[n.Name] = cur
+	delete(m.kernelPeers, n.Name) // it has gossiped; its fate is now membership
+	m.mu.Unlock()
 	if old.admitted() && !cur.admitted() {
 		slog.Warn("peer rejected", "pubkey", n.Name, "reason", cur.admitErr.Error())
 	}
@@ -201,8 +201,9 @@ func (m *Mesh) store(name string, cur member) (old member) {
 // Re-stores every verdict unconditionally (rare O(members) pass); must run even when the config is now
 // empty, else removing a policy would never restore refused routes.
 func (m *Mesh) reevaluate(now time.Time) {
-	signers, policy, revoked := *m.signers.Load(), m.policy.Load(), *m.revoked.Load()
 	m.mu.Lock()
+	// Load trust under m.mu (like setMember) so a racing SIGHUP swap cannot be re-stamped by a stale pass.
+	signers, policy, revoked := *m.signers.Load(), m.policy.Load(), *m.revoked.Load()
 	changed := false
 	for name, e := range m.members {
 		nv := admit(e.peer, name, signers, revoked, m.cfg.Prefix, policy, now)
@@ -219,7 +220,7 @@ func (m *Mesh) reevaluate(now time.Time) {
 		if !e.wgPeer.equal(nv.wgPeer) {
 			changed = true
 		}
-		e.addr, e.wgPeer, e.admitErr, e.refusedRoutes, e.unauthorizedRoutes, e.grantExpiry = nv.addr, nv.wgPeer, nv.admitErr, nv.refusedRoutes, nv.unauthorizedRoutes, nv.grantExpiry
+		e.addr, e.wgPeer, e.admitErr, e.refusedRoutes, e.unauthorizedRoutes, e.grantExpiry, e.name = nv.addr, nv.wgPeer, nv.admitErr, nv.refusedRoutes, nv.unauthorizedRoutes, nv.grantExpiry, nv.name
 		m.members[name] = e
 	}
 	m.mu.Unlock()
@@ -239,8 +240,7 @@ func (m *Mesh) maintain(ctx context.Context) {
 			now := time.Now()
 			m.checkSelfExpiry(now)
 			m.checkSelfRevoked()
-			expired, dead, reaped := m.expireGrants(now), m.reapDead(now), m.reapRevocations(now)
-			if expired || dead || reaped {
+			if expired, dead := m.expireGrants(now), m.reapDead(now); expired || dead {
 				m.triggerReconcile()
 			}
 		}
@@ -284,12 +284,12 @@ func (m *Mesh) checkSelfExpiry(now time.Time) {
 	}
 }
 
-// A node honors its own operator anti-grant: it halts self DNS (peers drop it regardless via admit). Unlike
-// expiry this is terminal, with no renewal that clears it; the latch only lifts when the tombstone is reaped.
+// A node honors its own key being on the --revoked denylist: it halts self DNS (peers drop it via admit).
+// The latch lifts if the key is later removed from the denylist (a config edit + SIGHUP).
 func (m *Mesh) checkSelfRevoked() {
 	_, revoked := (*m.revoked.Load())[m.cfg.Self.PublicKey]
 	if was := m.selfRevoked.Swap(revoked); revoked && !was {
-		slog.Warn("this node's key has been revoked by an operator anti-grant; peers will drop it; halting self DNS; terminal until the grant horizon")
+		slog.Warn("this node's key is on the --revoked denylist; peers will drop it; halting self DNS until it is removed from the denylist")
 	}
 }
 

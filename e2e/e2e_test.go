@@ -460,11 +460,10 @@ func TestMesh_Signature(t *testing.T) {
 	must.StrNotContains(t, wgPeers(b), c.pub, must.Sprint("b re-admitted untrusted c"))
 }
 
-// A gossip-native anti-grant injected on one node revokes a third node across the whole mesh, including
-// the peer that never received the injection (b learns it only over gossip). Supersedes the old
-// signer-rotation stand-in: this exercises the real revocation path (sign-revocation + the socket revoke
-// verb + memberlist broadcast/push-pull) end to end.
-func TestMesh_SignatureRevocation(t *testing.T) {
+// A key listed in a node's --revoked denylist is denied at admission; a SIGHUP reload evicts an
+// already-admitted peer, and removing the line re-admits it. The denylist is a per-node file (no
+// gossip), so a and b are configured independently here.
+func TestMesh_RevokedDenylist(t *testing.T) {
 	skipIfNoNetns(t)
 	newBridge(t, "wgmrev-br")
 	const prefix = "fdcc::/16"
@@ -476,41 +475,46 @@ func TestMesh_SignatureRevocation(t *testing.T) {
 	signerPub, signerPriv, err := ed25519.GenerateKey(nil)
 	must.NoError(t, err)
 	signers := base64.StdEncoding.EncodeToString(signerPub)
-	keyFile := writeFile(t, base64.StdEncoding.EncodeToString(signerPriv))
 	sigA := signNode(t, signerPriv, a, time.Hour)
 	sigB := signNode(t, signerPriv, b, time.Hour)
 	sigC := signNode(t, signerPriv, c, time.Hour)
 
-	sock := filepath.Join(t.TempDir(), "a.sock")
-	startMesh(t, a, []*node{b, c}, 51820, "--prefix", prefix, "--socket", sock, "--signers", signers, "--signature", sigA)
-	startMesh(t, b, []*node{a, c}, 51820, "--prefix", prefix, "--signers", signers, "--signature", sigB)
+	dir := t.TempDir()
+	sockA, sockB := filepath.Join(dir, "a.sock"), filepath.Join(dir, "b.sock")
+	revA, revB := filepath.Join(dir, "revoked-a"), filepath.Join(dir, "revoked-b")
+	must.NoError(t, os.WriteFile(revA, nil, 0o600))
+	must.NoError(t, os.WriteFile(revB, nil, 0o600))
+	cmdA := startMesh(t, a, []*node{b, c}, 51820, "--prefix", prefix, "--socket", sockA, "--signers", signers, "--signature", sigA, "--revoked", revA)
+	cmdB := startMesh(t, b, []*node{a, c}, 51820, "--prefix", prefix, "--socket", sockB, "--signers", signers, "--signature", sigB, "--revoked", revB)
 	startMesh(t, c, []*node{a, b}, 51820, "--prefix", prefix, "--signers", signers, "--signature", sigC)
 
-	waitFor(t, "all three admit each other", 30*time.Second, func() bool {
-		return strings.Contains(wgPeers(a), c.pub) && strings.Contains(wgPeers(b), c.pub) &&
-			strings.Contains(wgPeers(a), b.pub)
+	// Gate on gossip, not the static seed peers (which are in the kernel before the daemon even starts):
+	// a and b must be fully up (status socket serving, so the SIGHUP handler is registered) and have
+	// admitted c, or an early SIGHUP would terminate a still-booting daemon under the default action.
+	statusHasC := func(sock string) bool {
+		out, err := exec.Command(meshBin, "status", "--socket", sock, "--json").Output()
+		return err == nil && strings.Contains(string(out), c.overlay)
+	}
+	waitFor(t, "a and b admit c over gossip", 30*time.Second, func() bool {
+		return statusHasC(sockA) && statusHasC(sockB)
 	})
 
-	// Operator signs an anti-grant for c (horizon = c's grant expiry) and injects it on a only.
-	antiGrant, err := exec.Command(meshBin, "sign-revocation", "--key", keyFile, "--grant", sigC, c.pub).Output()
-	must.NoError(t, err)
-	var out []byte
-	waitFor(t, "a's status socket accepts the revoke", 10*time.Second, func() bool {
-		out, err = exec.Command(meshBin, "revoke", "--socket", sock, strings.TrimSpace(string(antiGrant))).CombinedOutput()
-		return err == nil
-	})
-	must.NoError(t, err, must.Sprintf("revoke: %s", out))
-
-	// a evicts c directly; b evicts c having learned the revocation only over gossip.
-	waitFor(t, "the anti-grant gossips: a and b both evict c", 30*time.Second, func() bool {
+	// List c on both denylists and SIGHUP: each node independently evicts c from its kernel peers.
+	must.NoError(t, os.WriteFile(revA, []byte(c.pub+"\n"), 0o600))
+	must.NoError(t, os.WriteFile(revB, []byte(c.pub+"\n"), 0o600))
+	must.NoError(t, cmdA.Process.Signal(syscall.SIGHUP))
+	must.NoError(t, cmdB.Process.Signal(syscall.SIGHUP))
+	waitFor(t, "a and b evict the denied node c", 15*time.Second, func() bool {
 		return !strings.Contains(wgPeers(a), c.pub) && !strings.Contains(wgPeers(b), c.pub)
 	})
+	must.StrContains(t, wgPeers(a), b.pub, must.Sprint("denying c must not evict b"))
 
-	// Terminal and targeted: c stays out even while it keeps advertising a valid grant, and a/b keep each other.
-	time.Sleep(3 * time.Second)
-	must.StrNotContains(t, wgPeers(a), c.pub, must.Sprint("a re-admitted a revoked node"))
-	must.StrNotContains(t, wgPeers(b), c.pub, must.Sprint("b re-admitted a revoked node"))
-	must.StrContains(t, wgPeers(a), b.pub, must.Sprint("revocation of c must not evict b"))
+	// Remove the line and SIGHUP: c is re-admitted (the file is authoritative; the un-revoke flow).
+	must.NoError(t, os.WriteFile(revA, nil, 0o600))
+	must.NoError(t, cmdA.Process.Signal(syscall.SIGHUP))
+	waitFor(t, "removing the line re-admits c on a", 15*time.Second, func() bool {
+		return strings.Contains(wgPeers(a), c.pub)
+	})
 }
 
 func TestMesh_DuplicateRouteDropped(t *testing.T) {
@@ -700,17 +704,22 @@ func TestMesh_LeaveRemovesOverlayButSigtermKeepsIt(t *testing.T) {
 		newBridge(t, "wgmlv-br")
 		a := newPrefixNode(t, "wgmlv-a", "10.149.0.1", 51820, "wgmlv-br", prefix)
 		b := newPrefixNode(t, "wgmlv-b", "10.149.0.2", 51820, "wgmlv-br", prefix)
+		c := newPrefixNode(t, "wgmlv-c", "10.149.0.3", 51820, "wgmlv-br", prefix)
 		sock := filepath.Join(t.TempDir(), "a.sock")
-		startMesh(t, a, []*node{b}, 51820, "--prefix", prefix, "--socket", sock)
-		startMesh(t, b, []*node{a}, 51820, "--prefix", prefix)
+		startMesh(t, a, []*node{b}, 51820, "--prefix", prefix, "--socket", sock) // b is a's provisioned seed peer
+		startMesh(t, b, []*node{a, c}, 51820, "--prefix", prefix)
+		startMesh(t, c, []*node{b}, 51820, "--prefix", prefix)
 
-		waitFor(t, "a assigns its overlay addr and prefix route", 15*time.Second, func() bool {
-			return strings.Contains(addrShow(a), a.overlay) && strings.Contains(routeShow(a), prefix)
+		waitFor(t, "a assigns its overlay and adds the gossip-discovered peer c", 30*time.Second, func() bool {
+			return strings.Contains(addrShow(a), a.overlay) && strings.Contains(routeShow(a), prefix) &&
+				strings.Contains(wgPeers(a), c.pub)
 		})
 		run(t, meshBin, "leave", "--socket", sock)
-		waitFor(t, "leave removes the overlay addr and route", 10*time.Second, func() bool {
-			return !strings.Contains(addrShow(a), a.overlay) && !strings.Contains(routeShow(a), prefix)
+		waitFor(t, "leave removes the overlay addr/route and the daemon-added peer c", 10*time.Second, func() bool {
+			return !strings.Contains(addrShow(a), a.overlay) && !strings.Contains(routeShow(a), prefix) &&
+				!strings.Contains(wgPeers(a), c.pub)
 		})
+		must.StrContains(t, wgPeers(a), b.pub, must.Sprint("the operator-provisioned seed peer is kept on leave"))
 	})
 
 	t.Run("sigterm-keeps", func(t *testing.T) {

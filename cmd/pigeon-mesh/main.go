@@ -31,16 +31,12 @@ func main() {
 			os.Exit(runStatus(os.Args[2:]))
 		case "leave":
 			os.Exit(runLeave(os.Args[2:]))
-		case "revoke":
-			os.Exit(runRevoke(os.Args[2:]))
 		case "keygen":
 			os.Exit(runKeygen(os.Args[2:]))
 		case "pubkey":
 			os.Exit(runPubkey(os.Args[2:]))
 		case "sign":
 			os.Exit(runSign(os.Args[2:]))
-		case "sign-revocation":
-			os.Exit(runSignRevocation(os.Args[2:]))
 		}
 	}
 
@@ -58,7 +54,7 @@ func main() {
 	prefix := flag.String("prefix", "fdcc::/48", "byte-aligned IPv6 ULA prefix; the daemon derives this node's overlay address from its key (sha512) and assigns it to the interface, and requires every peer's address to be the same derivation of its key (self-certifying)")
 	signers := flag.String("signers", "", "trusted operator signer key(s) to verify peers against: a base64 key, comma-separated, or @file (SIGHUP-reloadable). Defaults to the key that signed this node's own --signature; set it explicitly only to pin multiple operators or to rotate signers")
 	signatureFile := flag.String("signature", "", "path to this node's base64 operator-signed grant (required); advertised to peers for admission (SIGHUP-reloadable for hitless renewal)")
-	revoked := flag.String("revoked", "", "path to a file of base64 anti-grants denying compromised keys at admission (SIGHUP-reloadable); the config-managed completeness floor under gossip revocation")
+	revoked := flag.String("revoked", "", "path to a denylist file of base64 node public keys, one per line; each listed key is denied at admission while present. SIGHUP reloads; remove a line to re-admit")
 	reconnectTimeout := flag.Duration("reconnect-timeout", 10*time.Minute, "grace window to keep a failed peer's tunnel before reaping it; survives restarts and brief partitions")
 	var tagFlags []string
 	flag.Func("tag", "tag for this node, repeatable as k=v", func(v string) error {
@@ -201,7 +197,7 @@ func main() {
 		cfg.Signers = []ed25519.PublicKey{signer}
 	}
 	if *revoked != "" {
-		cfg.Revoked, err = mesh.LoadRevoked(*revoked, cfg.Signers)
+		cfg.Revoked, err = mesh.LoadRevoked(*revoked)
 		if err != nil {
 			slog.Error("revoked", "err", err)
 			os.Exit(1)
@@ -225,7 +221,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	go sdnotify.Run(ctx)
+	go sdnotify.Run(ctx, m.Ready())
 	signersFile := ""
 	if path, ok := strings.CutPrefix(*signers, "@"); ok {
 		signersFile = path

@@ -22,7 +22,7 @@ func newTestMesh() *Mesh {
 		contested:   map[string][]string{},
 		reconcileCh: make(chan struct{}, 1),
 	}
-	revoked := map[string]revocation{}
+	revoked := map[string]struct{}{}
 	m.revoked.Store(&revoked)
 	return m
 }
@@ -56,7 +56,7 @@ func storeConfig(m *Mesh, signers []ed25519.PublicKey, policy *PeerPolicy) {
 	m.signers.Store(&signers)
 	m.policy.Store(policy)
 	if m.revoked.Load() == nil {
-		revoked := map[string]revocation{}
+		revoked := map[string]struct{}{}
 		m.revoked.Store(&revoked)
 	}
 }
@@ -133,6 +133,32 @@ func TestReevaluate_LooserPolicyRestoresRoute(t *testing.T) {
 	must.Eq(t, []string{ownRoute, "10.0.0.0/8"}, got.wgPeer.routes, must.Sprint("a removed policy restores the full route set"))
 	must.SliceEmpty(t, got.refusedRoutes)
 	must.True(t, reconcileTriggered(m.reconcileCh))
+}
+
+func TestReevaluate_NamePropagatesOnReadmit(t *testing.T) {
+	// A peer first seen while rejected carries no name; when a SIGHUP re-admits it, reevaluate must
+	// install the grant's DNS name so it enters the zone without waiting for a re-gossip.
+	now := time.Unix(1_000_000, 0)
+	priv, pub, sub := mkSig(t)
+	derived, err := DeriveAddr(testKey, testPrefix)
+	must.NoError(t, err)
+	ownRoute := HostRoute(derived).String()
+	grant, err := signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), "web01")
+	must.NoError(t, err)
+
+	m := newTestMesh()
+	m.cfg = Config{Prefix: testPrefix}
+	storeConfig(m, []ed25519.PublicKey{pub}, nil)
+	// Stored as if previously rejected: no name, no routes, an admit error.
+	m.members[testKey] = member{
+		peer:     Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute}, Signature: grant},
+		admitErr: errors.New("unknown signer"),
+		meta:     []byte("m"),
+	}
+	m.reevaluate(now)
+	got := m.members[testKey]
+	must.True(t, got.admitted(), must.Sprint("the peer re-admits under the now-trusted signer"))
+	must.EqOp(t, "web01", got.name, must.Sprint("the grant's DNS name is installed on re-admit, not left stale"))
 }
 
 func TestReevaluate_RejectReasonRefreshes(t *testing.T) {
