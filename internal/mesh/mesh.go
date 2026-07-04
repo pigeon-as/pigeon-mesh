@@ -28,6 +28,9 @@ const (
 	joinBackoffMax = 4 * time.Second
 
 	routeReassertDebounce = 250 * time.Millisecond
+	// Rate-limits triggered reconciles: a convergence wave (join storm, mass restart) fires many triggers,
+	// and each reconcile does an O(N) netlink peer dump, so coalesce them into at most one run per window.
+	reconcileDebounce = 250 * time.Millisecond
 
 	kernelSettle = 30 * time.Second
 
@@ -40,39 +43,43 @@ type Config struct {
 	BindAddr         string
 	Profile          string
 	SocketPath       string
+	StatePath        string // /run file recording daemon-added peers, so leave stays correct across a restart
 	Self             Peer
 	Prefix           netip.Prefix
 	Policy           *PeerPolicy
 	DNSZone          string
 	Signers          []ed25519.PublicKey
-	Revoked          map[string]revocation
+	Revoked          map[string]struct{}
 	ReconnectTimeout time.Duration
 	WG               *wg.Client
 }
 
 type Mesh struct {
-	cfg        Config // cfg/selfAddr immutable after New
+	cfg        Config // immutable after New; cfg's trust fields (Signers/Policy/Revoked/Self.Signature) are construction-only seeds, go stale on SIGHUP, read the atomics below
 	meta       atomic.Pointer[[]byte]
 	selfGrant  atomic.Pointer[[]byte]
 	selfAddr   netip.Addr
 	memberlist *memberlist.Memberlist
 
-	revocationBroadcasts *memberlist.TransmitLimitedQueue // epidemic fast-path for newly learned anti-grants
-
 	mu          sync.RWMutex // guards the membership maps below
 	members     map[string]member
 	applied     map[string]wgPeer
 	kernelPeers map[string]bool     // kernel peers awaiting first gossip; dropped once they gossip
+	seedPeers   map[string]bool     // operator-provisioned kernel peers at startup; never torn down on leave (immutable after adoptKernelPeers)
 	contested   map[string][]string // claimed by >1 peer, installed for none
 	isolated    bool                // isolation warn-once latch
 
-	signers   atomic.Pointer[[]ed25519.PublicKey] // swapped whole on SIGHUP for lock-free reads
-	policy    atomic.Pointer[PeerPolicy]
-	revoked   atomic.Pointer[map[string]revocation] // grow-only anti-grant set; copy-on-write under revokedMu
-	revokedMu sync.Mutex
+	signers atomic.Pointer[[]ed25519.PublicKey] // swapped whole on SIGHUP for lock-free reads
+	policy  atomic.Pointer[PeerPolicy]
+	revoked atomic.Pointer[map[string]struct{}] // operator denylist from --revoked; replaced whole on SIGHUP
+
+	dnsCacheMu sync.Mutex // short-TTL cache so a DNS query flood does not rebuild the record map per packet
+	dnsCache   map[string]netip.Addr
+	dnsCacheAt time.Time
 
 	reconcileCh chan struct{}
 	leave       chan struct{}
+	ready       chan struct{} // closed after the first successful reconcile; gates systemd READY
 	joinedAt    atomic.Int64
 	selfExpired atomic.Bool
 	selfRevoked atomic.Bool
@@ -92,7 +99,7 @@ func New(cfg Config) (*Mesh, error) {
 		return nil, err
 	}
 	if len(meta) > memberlist.MetaMaxSize {
-		return nil, fmt.Errorf("encoded self meta %d bytes exceeds limit %d", len(meta), memberlist.MetaMaxSize)
+		return nil, fmt.Errorf("this node's gossip metadata is %d bytes, over the %d-byte limit; trim advertised routes (--allowed-ips), tags (--tag), or the signed name", len(meta), memberlist.MetaMaxSize)
 	}
 
 	// Floor to 2 probe cycles: reaping sooner tears down a tunnel a brief partition/restart would restore.
@@ -114,9 +121,11 @@ func New(cfg Config) (*Mesh, error) {
 		members:     map[string]member{},
 		applied:     map[string]wgPeer{},
 		kernelPeers: map[string]bool{},
+		seedPeers:   map[string]bool{},
 		contested:   map[string][]string{},
 		reconcileCh: make(chan struct{}, 1),
 		leave:       make(chan struct{}, 1),
+		ready:       make(chan struct{}),
 	}
 	m.meta.Store(&meta)
 	grant := cfg.Self.Signature
@@ -126,7 +135,7 @@ func New(cfg Config) (*Mesh, error) {
 	m.policy.Store(cfg.Policy)
 	revoked := cfg.Revoked
 	if revoked == nil {
-		revoked = map[string]revocation{}
+		revoked = map[string]struct{}{}
 	}
 	m.revoked.Store(&revoked)
 
@@ -147,22 +156,12 @@ func New(cfg Config) (*Mesh, error) {
 	mc.Events = d
 	mc.Conflict = d
 	mc.Logger = newMemberlistLogger()
-	// Name+gossip addr both key-derived: a same-key restart reclaims its name free; only bites a restart on a different --gossip-port.
+	// Name+addr key-derived and port fixed, so a same-key restart returns UNCHANGED: it never uses reclaim
+	// (memberlist gates that on a changed addr/port) and, if it was marked dead, reconverges by refutation.
+	// This 30s only bounds a restart that changes --gossip-port.
 	mc.DeadNodeReclaimTime = 30 * time.Second
 
-	// Set before Create: memberlist's scheduled gossip can call the delegate's GetBroadcasts at once.
-	// NumNodes uses the live cluster size (>=1 self) so the retransmit count is never floored to zero.
-	m.revocationBroadcasts = &memberlist.TransmitLimitedQueue{
-		NumNodes: func() int {
-			if m.memberlist == nil {
-				return 1
-			}
-			return m.memberlist.NumMembers()
-		},
-		RetransmitMult: mc.RetransmitMult,
-	}
-
-	// Must seed kernelPeers before Create: a remote join landing first makes store()'s delete a no-op,
+	// Must seed kernelPeers before Create: a remote join landing first makes setMember's delete a no-op,
 	// leaving the peer un-removable on graceful leave. After the profile switch so an invalid profile returns untouched.
 	if err := m.adoptKernelPeers(); err != nil {
 		slog.Warn("adopt kernel peers; departed peers may persist this run", "err", err)
@@ -199,9 +198,11 @@ func (m *Mesh) Run(ctx context.Context) error {
 		if err := m.shutdownMemberlist(); err != nil {
 			slog.Warn("memberlist shutdown", "err", err)
 		}
-		// Graceful leave only: undo the overlay addr+route we assigned (interface not ours).
-		// After runCtx cancel so the route monitor won't re-assert it.
+		// Graceful leave only: undo what we added (interface not ours). Remove the kernel peers the daemon
+		// installed (gossip-discovered), never the operator-provisioned seed peers, then undo the overlay
+		// addr+route we assigned. After runCtx cancel so the route monitor won't re-assert it.
 		if leaving {
+			m.removeAddedPeers()
 			if err := m.cfg.WG.DelRoute(m.cfg.Iface, m.cfg.Prefix); err != nil {
 				slog.Warn("remove overlay route on leave", "err", err)
 			}
@@ -240,7 +241,20 @@ func (m *Mesh) Run(ctx context.Context) error {
 		return nil
 	}
 
-	retry := retryAfter(m.reconcile())
+	var retry <-chan time.Time
+	var readyOnce sync.Once
+	var lastReconcile time.Time
+	reconcile := func() {
+		lastReconcile = time.Now()
+		err := m.reconcile()
+		if err == nil {
+			readyOnce.Do(func() { close(m.ready) }) // signal systemd READY only once the kernel is programmed
+		}
+		retry = retryAfter(err)
+	}
+	reconcile()
+	// A pending debounce timer coalesces a burst of triggers into one run per reconcileDebounce window.
+	var debounce <-chan time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -249,14 +263,35 @@ func (m *Mesh) Run(ctx context.Context) error {
 			leaving = true
 			return nil
 		case <-m.reconcileCh:
-			retry = retryAfter(m.reconcile())
+			if debounce == nil {
+				if d := debounceDelay(lastReconcile, time.Now(), reconcileDebounce); d > 0 {
+					debounce = time.After(d)
+				} else {
+					reconcile()
+				}
+			}
+		case <-debounce:
+			debounce = nil
+			reconcile()
 		case <-ticker.C:
-			retry = retryAfter(m.reconcile())
+			reconcile()
 		case <-retry:
-			retry = retryAfter(m.reconcile())
+			reconcile()
 		}
 	}
 }
+
+// debounceDelay returns how long to wait before the next triggered reconcile so runs stay at least
+// interval apart, or 0 to run now when interval has already elapsed since the last run.
+func debounceDelay(lastRun, now time.Time, interval time.Duration) time.Duration {
+	if elapsed := now.Sub(lastRun); elapsed < interval {
+		return interval - elapsed
+	}
+	return 0
+}
+
+// Ready is closed after the first successful reconcile; sdnotify waits on it before signaling READY.
+func (m *Mesh) Ready() <-chan struct{} { return m.ready }
 
 func (m *Mesh) requestLeave(timeout time.Duration) error {
 	m.shutdownMu.Lock()

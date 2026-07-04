@@ -82,51 +82,6 @@ func TestRunSign_Routes(t *testing.T) {
 	must.EqOp(t, 1, runSign([]string{"--key", keyPath, "--ttl", "1h", "--route", "not-a-cidr", node}), must.Sprint("a malformed --route exits 1"))
 }
 
-func signGrant(t *testing.T, keyPath, node, ttl string) string {
-	t.Helper()
-	out := captureStdout(t, func() {
-		must.EqOp(t, 0, runSign([]string{"--key", keyPath, "--ttl", ttl, node}))
-	})
-	path := filepath.Join(t.TempDir(), "grant")
-	must.NoError(t, os.WriteFile(path, []byte(strings.TrimSpace(out)), 0o600))
-	return path
-}
-
-func TestRunSignRevocation(t *testing.T) {
-	keyPath, signerPub, node := writeSignerKey(t)
-	grantPath := signGrant(t, keyPath, node, "2h")
-	grantRaw, err := os.ReadFile(grantPath)
-	must.NoError(t, err)
-	grantBlob, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(grantRaw)))
-	must.NoError(t, err)
-
-	out := captureStdout(t, func() {
-		must.EqOp(t, 0, runSignRevocation([]string{"--key", keyPath, "--grant", grantPath, node}))
-	})
-	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(out))
-	must.NoError(t, err)
-
-	sub, horizon, err := signature.VerifyRevocation([]ed25519.PublicKey{signerPub}, raw)
-	must.NoError(t, err)
-	nodeRaw, _ := base64.StdEncoding.DecodeString(node)
-	must.Eq(t, nodeRaw, sub, must.Sprint("the anti-grant revokes the node named in the grant"))
-	// the reap horizon is the revoked grant's own expiry, never operator-chosen.
-	must.EqOp(t, signature.NotAfter(grantBlob), horizon, must.Sprint("horizon == grant expiry"))
-}
-
-func TestRunSignRevocation_Rejects(t *testing.T) {
-	keyPath, _, node := writeSignerKey(t)
-	grantPath := signGrant(t, keyPath, node, "1h")
-
-	must.EqOp(t, 2, runSignRevocation([]string{"--key", keyPath, node}), must.Sprint("missing --grant"))
-	must.EqOp(t, 2, runSignRevocation([]string{"--key", keyPath, "--grant", grantPath}), must.Sprint("missing node arg"))
-	must.EqOp(t, 1, runSignRevocation([]string{"--key", keyPath, "--grant", grantPath, "not-base64!"}), must.Sprint("node not base64"))
-
-	// a --grant for a different node is refused: the subject cross-check catches a wrong grant file.
-	otherNode := base64.StdEncoding.EncodeToString(append([]byte{8}, make([]byte, 31)...))
-	must.EqOp(t, 1, runSignRevocation([]string{"--key", keyPath, "--grant", grantPath, otherNode}), must.Sprint("grant subject mismatch"))
-}
-
 func loadSignerPriv(t *testing.T, path string) ed25519.PrivateKey {
 	t.Helper()
 	data, err := os.ReadFile(path)

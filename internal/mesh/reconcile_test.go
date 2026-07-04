@@ -97,7 +97,7 @@ func TestDropContestedRoutes(t *testing.T) {
 		"c": {key: "c", routes: []string{"fd00::c/128", "fd00::b/128"}},
 	}
 
-	effective, conflicts := dropContestedRoutes(peers, nil)
+	effective, conflicts := dropContestedRoutes(peers, "self", nil)
 
 	must.Eq(t, []string{"fd00::a/128"}, effective["a"].routes)
 	must.Eq(t, []string{"fd00::c/128"}, effective["c"].routes, must.Sprint("c keeps its unconflicting route"))
@@ -106,21 +106,38 @@ func TestDropContestedRoutes(t *testing.T) {
 	must.Eq(t, []string{"b", "c"}, conflicts["fd00::b/128"], must.Sprint("conflicting route lists both claimants, sorted"))
 }
 
-func TestDropContestedRoutes_SelfClaimWins(t *testing.T) {
+func TestDropContestedRoutes_SelfCollisionSurfaced(t *testing.T) {
+	// A peer claiming the EXACT route this node serves is contested like any peer-vs-peer collision:
+	// dropped for the peer AND surfaced (self listed as a claimant), never silently self-wins.
 	selfRoutes := []string{"fd00::1/128"}
 	peers := map[string]wgPeer{
 		"impostor": {key: "impostor", routes: []string{"fd00::1/128"}},
 		"honest":   {key: "honest", routes: []string{"fd00::9/128"}},
 	}
 
-	effective, conflicts := dropContestedRoutes(peers, selfRoutes)
+	effective, conflicts := dropContestedRoutes(peers, "self", selfRoutes)
 
 	must.MapNotContainsKey(t, effective, "impostor", must.Sprint("a peer claiming a route we serve loses it"))
 	must.Eq(t, []string{"fd00::9/128"}, effective["honest"].routes, must.Sprint("an unrelated peer is unaffected"))
-	must.MapEmpty(t, conflicts, must.Sprint("a self-collision is not a peer-vs-peer contest, so it is not reported"))
-	for _, w := range effective {
-		must.SliceNotContains(t, w.routes, "fd00::1/128", must.Sprint("the self route is never installed for a peer"))
+	must.Eq(t, []string{"impostor", "self"}, conflicts["fd00::1/128"], must.Sprint("a self collision is surfaced with self as a claimant, not silent"))
+}
+
+func TestDropContestedRoutes_OverlapKept(t *testing.T) {
+	// Overlap is NOT a conflict (reference model: WireGuard/Tailscale/Nebula). WireGuard's LPM trie routes a
+	// more-specific peer route and a broader one correctly, so neither is dropped; only an exact-prefix
+	// collision contests. A broad self route never suppresses a peer's more-specific route, and a peer's
+	// identity /128 is never swallowed by a self aggregate. Guards against regressing to F01's containment.
+	selfRoutes := []string{"10.1.2.0/24", "fdcc::/48"}
+	peers := map[string]wgPeer{
+		"specific": {key: "specific", routes: []string{"10.1.2.0/25"}},    // more specific than our /24: kept
+		"exit":     {key: "exit", routes: []string{"0.0.0.0/0"}},          // broader: kept
+		"identity": {key: "identity", routes: []string{"fdcc::abcd/128"}}, // inside our /48 aggregate: kept
 	}
+	effective, conflicts := dropContestedRoutes(peers, "self", selfRoutes)
+	must.MapEmpty(t, conflicts, must.Sprint("overlap without an exact-prefix collision is not contested"))
+	must.Eq(t, []string{"10.1.2.0/25"}, effective["specific"].routes, must.Sprint("a more-specific peer route is kept (LPM), not dropped"))
+	must.Eq(t, []string{"0.0.0.0/0"}, effective["exit"].routes, must.Sprint("a broader/exit peer route is kept"))
+	must.Eq(t, []string{"fdcc::abcd/128"}, effective["identity"].routes, must.Sprint("a peer /128 inside our aggregate is never swallowed"))
 }
 
 func TestStaleKernelPeers(t *testing.T) {
@@ -134,6 +151,6 @@ func TestStaleKernelPeers(t *testing.T) {
 	m.joinedAt.Store(time.Now().Add(-2 * kernelSettle).UnixNano())
 	must.Eq(t, []string{"seedA", "seedB"}, m.staleKernelPeers(), must.Sprint("after the settle window, never-gossiped kernel peers are stale, sorted"))
 
-	delete(m.kernelPeers, "seedA") // seedA gossiped, so store() dropped it from the set
+	delete(m.kernelPeers, "seedA") // seedA gossiped, so setMember dropped it from the set
 	must.Eq(t, []string{"seedB"}, m.staleKernelPeers(), must.Sprint("a kernel peer that gossiped is no longer stale"))
 }

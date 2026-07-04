@@ -13,10 +13,7 @@ import (
 	"github.com/fxamacker/cbor/v2"
 )
 
-const (
-	domain           = "wg-mesh-signature-v1"
-	revocationDomain = "wg-mesh-revocation-v1"
-)
+const domain = "wg-mesh-signature-v1"
 
 type claims struct {
 	Ctx       string   `cbor:"1,keyasint"`
@@ -66,7 +63,7 @@ func mustDec() cbor.DecMode {
 	return dm
 }
 
-// Every grant carries an expiry; both passive de-authorization and the revocation reap horizon are bounded by it.
+// Every grant carries an expiry so passive de-authorization is bounded without an explicit denylist entry.
 func Sign(key ed25519.PrivateKey, sub []byte, notBefore, notAfter int64, name string, routes ...netip.Prefix) ([]byte, error) {
 	if notAfter == 0 {
 		return nil, errors.New("a grant must carry an expiry")
@@ -76,16 +73,6 @@ func Sign(key ed25519.PrivateKey, sub []byte, notBefore, notAfter int64, name st
 		return nil, err
 	}
 	return signClaims(key, claims{Sub: sub, NotBefore: notBefore, NotAfter: notAfter, Routes: encRoutes, Name: name}, domain)
-}
-
-// SignRevocation signs an anti-grant: a terminal statement that the grant for sub is dead. notAfter is
-// the reap horizon (the revoked grant's expiry); required so the tombstone is bounded. A revocation has
-// no valid-from window: it applies the moment any node sees it, so it carries no NotBefore.
-func SignRevocation(key ed25519.PrivateKey, sub []byte, notAfter int64) ([]byte, error) {
-	if notAfter == 0 {
-		return nil, errors.New("a revocation must carry a reap horizon")
-	}
-	return signClaims(key, claims{Sub: sub, NotAfter: notAfter}, revocationDomain)
 }
 
 // SigningBody builds a grant's to-be-signed body for an external signer (e.g. Vault Transit) that holds
@@ -103,17 +90,8 @@ func SigningBody(pubkey ed25519.PublicKey, sub []byte, notBefore, notAfter int64
 	return enc.Marshal(c)
 }
 
-// RevocationSigningBody is SigningBody for an anti-grant: the to-be-signed body an external signer signs.
-func RevocationSigningBody(pubkey ed25519.PublicKey, sub []byte, notAfter int64) ([]byte, error) {
-	if notAfter == 0 {
-		return nil, errors.New("a revocation must carry a reap horizon")
-	}
-	return enc.Marshal(claims{Ctx: revocationDomain, Sub: sub, KeyID: pubkey, NotAfter: notAfter})
-}
-
-// Attach wraps an external signature over a SigningBody into the finished blob, after checking the
-// signature verifies against the signer key named in the body. Domain-agnostic: it completes a grant or
-// a revocation alike, since the body carries its own domain.
+// Attach wraps an external signature over a SigningBody into the finished grant, after checking the body
+// is canonical and the signature verifies against the signer key named in it.
 func Attach(body, sig []byte) ([]byte, error) {
 	var c claims
 	if err := dec.Unmarshal(body, &c); err != nil {
@@ -121,6 +99,15 @@ func Attach(body, sig []byte) ([]byte, error) {
 	}
 	if len(c.KeyID) != ed25519.PublicKeySize {
 		return nil, errors.New("signing body carries no signer key")
+	}
+	// The daemon verifies the canonical re-encoding of decoded claims, so a non-canonical body would sign
+	// here yet fail at every daemon. Reject it now, at the source, rather than far from the cause.
+	canon, err := enc.Marshal(c)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(canon, body) {
+		return nil, errors.New("signing body is not canonical; regenerate it with sign --pubkey")
 	}
 	if len(sig) != ed25519.SignatureSize || !ed25519.Verify(ed25519.PublicKey(c.KeyID), body, sig) {
 		return nil, errors.New("signature does not verify against the signing body")
@@ -175,10 +162,15 @@ func signClaims(key ed25519.PrivateKey, c claims, dom string) ([]byte, error) {
 	return enc.Marshal(signedClaims{Claims: c, Sig: ed25519.Sign(key, body)})
 }
 
+// ErrMalformed marks a blob that could not be decoded at all, distinct from one that decodes but does
+// not verify (unknown signer or bad signature). Callers can fail closed on the former (corruption) and
+// tolerate the latter (an inert, untrusted blob).
+var ErrMalformed = errors.New("malformed signature blob")
+
 func parse(b []byte) (signedClaims, error) {
 	var s signedClaims
 	if err := dec.Unmarshal(b, &s); err != nil {
-		return signedClaims{}, fmt.Errorf("decode signature: %w", err)
+		return signedClaims{}, fmt.Errorf("%w: %w", ErrMalformed, err)
 	}
 	return s, nil
 }
@@ -211,21 +203,8 @@ func Verify(signers []ed25519.PublicKey, pubkey string, blob []byte, now time.Ti
 	return Grant{Sub: c.Sub, NotAfter: c.NotAfter, Routes: routes, Name: c.Name}, nil
 }
 
-// VerifyRevocation returns the revoked node key and reap horizon from an anti-grant. A revocation is a
-// terminal fact with no time gate: it verifies on signature and domain alone, so a clock-skewed or
-// time-behind node still honors it (else revocation fails open), and NotAfter is the reap horizon,
-// returned as data, never a reject.
-func VerifyRevocation(signers []ed25519.PublicKey, blob []byte) (sub []byte, horizon int64, err error) {
-	c, err := verifySig(signers, blob, revocationDomain)
-	if err != nil {
-		return nil, 0, err
-	}
-	return c.Sub, c.NotAfter, nil
-}
-
-// verifySig checks domain, signer-set membership, and signature, returning the authenticated claims. The
-// distinct domain stops a grant blob replaying as a revocation. Time policy is the caller's: Verify gates
-// a grant on NotBefore/NotAfter; a revocation is a terminal fact with no time gate.
+// verifySig checks domain, signer-set membership, and signature, returning the authenticated claims.
+// Time policy is the caller's: Verify gates a grant on NotBefore/NotAfter.
 func verifySig(signers []ed25519.PublicKey, blob []byte, dom string) (claims, error) {
 	s, err := parse(blob)
 	if err != nil {
@@ -274,19 +253,6 @@ func Name(blob []byte) string {
 		return ""
 	}
 	return s.Claims.Name
-}
-
-// The grant's subject (the node key it authorizes); unverified, used by sign-revocation to derive the
-// anti-grant's subject and reap horizon, which it then re-signs under the operator's own key.
-func Subject(blob []byte) ([]byte, error) {
-	s, err := parse(blob)
-	if err != nil {
-		return nil, err
-	}
-	if len(s.Claims.Sub) != ed25519.PublicKeySize {
-		return nil, errors.New("grant has no subject key")
-	}
-	return s.Claims.Sub, nil
 }
 
 // The grant's claimed (unverified) signer key; caller must still Verify.

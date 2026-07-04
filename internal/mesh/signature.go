@@ -3,6 +3,7 @@
 package mesh
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"errors"
 	"fmt"
@@ -41,9 +42,25 @@ func (m *Mesh) ReloadSignersFromFile(path string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	m.signers.Store(&keys)
+	// Keep the pointer stable when the set is unchanged, so admit's grant memoization survives a no-op
+	// reload; a SIGHUP reloads every trust file though usually only one changed.
+	if !signersEqual(*m.signers.Load(), keys) {
+		m.signers.Store(&keys)
+	}
 	m.reevaluate(time.Now())
 	return len(keys), nil
+}
+
+func signersEqual(a, b []ed25519.PublicKey) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !bytes.Equal(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // identity pinned: Verify binds the grant to our own key.

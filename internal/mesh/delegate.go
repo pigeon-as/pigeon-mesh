@@ -16,18 +16,13 @@ var (
 
 func (d *delegate) NodeMeta(int) []byte { return *d.mesh.meta.Load() }
 
-func (d *delegate) NotifyMsg(buf []byte) { d.mesh.handleRevocationMsg(buf) }
+func (*delegate) NotifyMsg([]byte) {}
 
-func (d *delegate) GetBroadcasts(overhead, limit int) [][]byte {
-	if d.mesh.revocationBroadcasts == nil {
-		return nil
-	}
-	return d.mesh.revocationBroadcasts.GetBroadcasts(overhead, limit)
-}
+func (*delegate) GetBroadcasts(int, int) [][]byte { return nil }
 
-func (d *delegate) LocalState(bool) []byte { return d.mesh.revocationState() }
+func (*delegate) LocalState(bool) []byte { return nil }
 
-func (d *delegate) MergeRemoteState(buf []byte, _ bool) { d.mesh.mergeRevocationState(buf) }
+func (*delegate) MergeRemoteState([]byte, bool) {}
 
 func (d *delegate) NotifyJoin(n *memberlist.Node) { d.mesh.setMember(n) }
 
