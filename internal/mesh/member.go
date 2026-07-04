@@ -188,16 +188,6 @@ func (m *Mesh) unchanged(name string, meta []byte) bool {
 	return ok && !e.failed && bytes.Equal(e.meta, meta)
 }
 
-// Drops it from kernelPeers: it has gossiped, so its fate is now membership.
-func (m *Mesh) store(name string, cur member) (old member) {
-	m.mu.Lock()
-	old = m.members[name]
-	m.members[name] = cur
-	delete(m.kernelPeers, name)
-	m.mu.Unlock()
-	return old
-}
-
 // Re-stores every verdict unconditionally (rare O(members) pass); must run even when the config is now
 // empty, else removing a policy would never restore refused routes.
 func (m *Mesh) reevaluate(now time.Time) {

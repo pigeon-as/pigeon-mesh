@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,6 +43,13 @@ func TestLoadRevoked(t *testing.T) {
 	must.NoError(t, os.WriteFile(short, []byte(base64.StdEncoding.EncodeToString([]byte("short"))+"\n"), 0o600))
 	_, err = LoadRevoked(short)
 	must.ErrorContains(t, err, "32-byte", must.Sprint("a non-32-byte key fails the load"))
+
+	// A non-canonical encoding (nonzero trailing bits) loose-decodes to 32 bytes but is not the canonical
+	// node-name form admit matches on, so it would load yet never deny; strict decoding rejects it (N1).
+	noncanon := filepath.Join(dir, "noncanon")
+	must.NoError(t, os.WriteFile(noncanon, []byte(strings.Repeat("A", 42)+"B=\n"), 0o600))
+	_, err = LoadRevoked(noncanon)
+	must.Error(t, err, must.Sprint("a non-canonical base64 key fails the load instead of silently not denying"))
 }
 
 func TestReloadRevokedFromFile_ReadmitsOnRemove(t *testing.T) {

@@ -24,8 +24,9 @@ func LoadRevoked(path string) (map[string]struct{}, error) {
 	return parseRevoked(strings.Split(string(data), "\n"))
 }
 
-// parseRevoked is strict: a malformed line fails the whole load, so a mistake in the trusted denylist is
-// surfaced rather than silently leaving a key admitted.
+// parseRevoked is strict: a malformed OR non-canonical line fails the whole load. Non-canonical matters
+// because admit matches on the canonical node-name encoding, so a loosely-decodable variant would load
+// yet never deny; Strict() rejects it loudly instead of silently leaving the key admitted.
 func parseRevoked(lines []string) (map[string]struct{}, error) {
 	out := map[string]struct{}{}
 	for _, line := range lines {
@@ -33,7 +34,7 @@ func parseRevoked(lines []string) (map[string]struct{}, error) {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		raw, err := base64.StdEncoding.DecodeString(line)
+		raw, err := base64.StdEncoding.Strict().DecodeString(line)
 		if err != nil {
 			return nil, fmt.Errorf("revoked %q: %w", line, err)
 		}

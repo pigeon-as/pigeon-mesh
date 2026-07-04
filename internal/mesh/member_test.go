@@ -420,12 +420,20 @@ func TestAdmit_BroadGrantAuthorizesSubprefixes(t *testing.T) {
 	must.SliceEmpty(t, r.unauthorizedRoutes)
 }
 
-// Guards store() -> delete(m.kernelPeers): once a peer gossips it must leave the kernel-peers set, else
+// Guards setMember -> delete(m.kernelPeers): once a peer gossips it must leave the kernel-peers set, else
 // reconcile folds it back from applied and never removes it (e2e missed this).
-func TestStoreDropsKernelPeers(t *testing.T) {
+func TestSetMemberDropsKernelPeers(t *testing.T) {
+	now := time.Now()
+	signers, ownRoute, grant := signedFixture(t, now)
 	m := newTestMesh()
-	m.kernelPeers["seed"] = true
-	m.store("seed", member{})
-	must.MapNotContainsKey(t, m.kernelPeers, "seed", must.Sprint("a peer that gossips leaves the kernel-peers set, so a later reject/leave removes it instead of folding it back"))
-	must.MapContainsKey(t, m.members, "seed", must.Sprint("the gossiped peer is now a member"))
+	m.cfg = Config{Prefix: testPrefix}
+	storeConfig(m, signers, nil)
+	m.kernelPeers[testKey] = true
+
+	meta, err := encodeMeta(Peer{Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute}, Signature: grant})
+	must.NoError(t, err)
+	m.setMember(&memberlist.Node{Name: testKey, Meta: meta})
+
+	must.MapNotContainsKey(t, m.kernelPeers, testKey, must.Sprint("a peer that gossips leaves the kernel-peers set, so a later reject/leave removes it instead of folding it back"))
+	must.MapContainsKey(t, m.members, testKey, must.Sprint("the gossiped peer is now a member"))
 }

@@ -151,7 +151,7 @@ func (m *Mesh) reconcile() error {
 	}
 	rev := *m.revoked.Load()
 	for name := range m.kernelPeers {
-		// Keep a kernel peer until it gossips; store() drops gossiped ones. Skip revoked keys: a
+		// Keep a kernel peer until it gossips; setMember drops gossiped ones. Skip revoked keys: a
 		// not-yet-gossiped seed never reaches admit(), so this is the only place revocation cuts it.
 		if _, ok := rev[name]; ok {
 			continue

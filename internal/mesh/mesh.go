@@ -155,7 +155,7 @@ func New(cfg Config) (*Mesh, error) {
 	// Name+gossip addr both key-derived: a same-key restart reclaims its name free; only bites a restart on a different --gossip-port.
 	mc.DeadNodeReclaimTime = 30 * time.Second
 
-	// Must seed kernelPeers before Create: a remote join landing first makes store()'s delete a no-op,
+	// Must seed kernelPeers before Create: a remote join landing first makes setMember's delete a no-op,
 	// leaving the peer un-removable on graceful leave. After the profile switch so an invalid profile returns untouched.
 	if err := m.adoptKernelPeers(); err != nil {
 		slog.Warn("adopt kernel peers; departed peers may persist this run", "err", err)

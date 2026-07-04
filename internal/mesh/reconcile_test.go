@@ -148,6 +148,6 @@ func TestStaleKernelPeers(t *testing.T) {
 	m.joinedAt.Store(time.Now().Add(-2 * kernelSettle).UnixNano())
 	must.Eq(t, []string{"seedA", "seedB"}, m.staleKernelPeers(), must.Sprint("after the settle window, never-gossiped kernel peers are stale, sorted"))
 
-	delete(m.kernelPeers, "seedA") // seedA gossiped, so store() dropped it from the set
+	delete(m.kernelPeers, "seedA") // seedA gossiped, so setMember dropped it from the set
 	must.Eq(t, []string{"seedB"}, m.staleKernelPeers(), must.Sprint("a kernel peer that gossiped is no longer stale"))
 }
