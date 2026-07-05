@@ -45,7 +45,7 @@ func main() {
 	iface := flag.String("interface", "", "existing WireGuard interface (required); kernel peers need a /128 or /32 first in AllowedIPs")
 	endpoint := flag.String("endpoint", "", "this node's Endpoint as host:port; hostnames resolved at startup; go-sockaddr templates evaluated (required)")
 	allowedIPs := flag.String("allowed-ips", "", "additional AllowedIPs this node advertises to peers beyond its auto overlay /128, comma-separated")
-	peerPolicy := flag.String("peer-policy", "", "expr predicate accept(peer, route) bool, evaluated per advertised CIDR including a peer's identity /128 (no exemption); true installs the route, false drops it (empty accepts all). Block a peer with 'peer.key != \"K=\"', a route with 'route != \"C\"'; reachability-only is 'route == peer.address'. In scope: peer (.key/.endpoint/.address/.allowedips), route, cidrSubset(outer,inner). Inline or @file (SIGHUP-reloadable)")
+	peerPolicy := flag.String("peer-policy", "", "expr predicate accept(peer, route) bool, evaluated per advertised CIDR including a peer's identity /128 (no exemption); true installs the route, false drops it (empty accepts all). Block a peer with 'peer.key != \"K=\"', a route with 'route != \"C\"'; reachability-only is 'route == peer.address'. In scope: peer (.key/.endpoint/.address/.allowedips/.tags, where .tags are operator-signed), route, cidrSubset(outer,inner). Inline or @file (SIGHUP-reloadable)")
 	gossipPort := flag.Int("gossip-port", 7946, "port to listen on for gossip (TCP and UDP)")
 	persistentKeepalive := flag.Int("persistent-keepalive", 0, "PersistentKeepalive interval in seconds advertised to peers (0 disables)")
 	profile := flag.String("profile", "wan", "memberlist timing profile: lan, wan, or local")
@@ -56,7 +56,8 @@ func main() {
 	signatureFile := flag.String("signature", "", "path to this node's base64 operator-signed grant (required); advertised to peers for admission (SIGHUP-reloadable for hitless renewal)")
 	revoked := flag.String("revoked", "", "path to a denylist file of base64 node public keys, one per line; each listed key is denied at admission while present. SIGHUP reloads; remove a line to re-admit")
 	reconnectTimeout := flag.Duration("reconnect-timeout", 10*time.Minute, "grace window to keep a failed peer's tunnel before reaping it; survives restarts and brief partitions")
-	firewall := flag.Bool("firewall", true, "manage a dedicated nftables table that scopes the gossip port to the wg device, so it is reachable through the tunnels but not from a local process; --firewall=false to opt out and manage nftables yourself")
+	disableFirewall := flag.Bool("disable-firewall", false, "turn pigeon's nftables firewall off entirely, including the gossip-port guard, and manage nftables yourself")
+	firewallRules := flag.String("firewall-rules", "", "expr returning a list of allow(proto, ports, cond?) rules for which overlay traffic to this node to accept; default-deny once set. e.g. '[allow(\"tcp\", 5432, peer.tags[\"role\"] == \"db\"), allow(\"tcp\", [22, 179])]'. ports is an int, a \"lo-hi\" string, or a list; peer exposes .key/.address/.endpoint/.tags (operator-signed). ICMPv6, gossip, and established flows are always allowed. Inline or @file (SIGHUP-reloadable). The gossip guard stays on unless --disable-firewall")
 	flag.Parse()
 
 	if flag.NArg() > 0 {
@@ -77,6 +78,10 @@ func main() {
 	}
 	if *signatureFile == "" {
 		slog.Error("missing required flag --signature (every node presents its own operator-signed grant)")
+		os.Exit(2)
+	}
+	if *disableFirewall && *firewallRules != "" {
+		slog.Error("--disable-firewall turns the firewall off entirely; it cannot be combined with --firewall-rules")
 		os.Exit(2)
 	}
 
@@ -152,8 +157,8 @@ func main() {
 		Signature:           sig,
 	}
 
-	// The daemon-added-peers record lives next to the socket under /run, so it clears on reboot exactly as
-	// the kernel WireGuard peers do; only an in-session restart needs it to keep leave's teardown correct.
+	// The daemon-added-peers record lives next to the socket under /run, so it clears on reboot like the
+	// kernel peers; only an in-session restart needs it for leave's teardown.
 	sockForState := *socket
 	if sockForState == "" {
 		sockForState = mesh.DefaultSocketPath
@@ -168,7 +173,7 @@ func main() {
 		Self:             self,
 		Prefix:           overlayPrefix,
 		DNSZone:          *dnsZone,
-		Firewall:         *firewall,
+		Firewall:         !*disableFirewall,
 		ReconnectTimeout: *reconnectTimeout,
 		WG:               wgc,
 	}
@@ -176,6 +181,13 @@ func main() {
 		cfg.Policy, err = mesh.ParsePeerPolicyFlag(*peerPolicy)
 		if err != nil {
 			slog.Error("peer-policy", "err", err)
+			os.Exit(2)
+		}
+	}
+	if *firewallRules != "" {
+		cfg.FirewallRules, err = mesh.ParseFirewallRulesFlag(*firewallRules)
+		if err != nil {
+			slog.Error("firewall-rules", "err", err)
 			os.Exit(2)
 		}
 	}
@@ -227,7 +239,11 @@ func main() {
 	if path, ok := strings.CutPrefix(*peerPolicy, "@"); ok {
 		policyFile = path
 	}
-	go reloadOnSIGHUP(ctx, m, *signatureFile, signersFile, policyFile, *revoked)
+	firewallFile := ""
+	if path, ok := strings.CutPrefix(*firewallRules, "@"); ok {
+		firewallFile = path
+	}
+	go reloadOnSIGHUP(ctx, m, *signatureFile, signersFile, policyFile, firewallFile, *revoked)
 
 	slog.Info("pigeon-mesh up", "interface", *iface, "endpoint", ep, "address", ip.String())
 	if err := m.Run(ctx); err != nil {
@@ -237,7 +253,7 @@ func main() {
 	slog.Info("pigeon-mesh stopped")
 }
 
-func reloadOnSIGHUP(ctx context.Context, m *mesh.Mesh, signaturePath, signersPath, policyPath, revokedPath string) {
+func reloadOnSIGHUP(ctx context.Context, m *mesh.Mesh, signaturePath, signersPath, policyPath, firewallPath, revokedPath string) {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGHUP)
 	defer signal.Stop(sig)
@@ -251,6 +267,13 @@ func reloadOnSIGHUP(ctx context.Context, m *mesh.Mesh, signaturePath, signersPat
 					slog.Error("signers reload", "err", err)
 				} else {
 					slog.Info("signers reloaded", "keys", n)
+				}
+			}
+			if firewallPath != "" {
+				if err := m.ReloadFirewallRulesFromFile(firewallPath); err != nil {
+					slog.Error("firewall-rules reload", "err", err)
+				} else {
+					slog.Info("firewall-rules reloaded")
 				}
 			}
 			if revokedPath != "" {
