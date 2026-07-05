@@ -48,32 +48,52 @@ func TestPeerPolicy_Accept(t *testing.T) {
 	must.NoError(t, err)
 
 	gw := Peer{PublicKey: "gw", AllowedIPs: []string{"10.1.2.0/24"}}
-	ok, err := pol.accept(gw, "10.1.2.0/24", "")
+	ok, err := pol.accept(gw, nil, "10.1.2.0/24", "")
 	must.NoError(t, err)
 	must.True(t, ok, must.Sprint("gw may advertise a 10/8 subnet"))
 
-	ok, err = pol.accept(Peer{PublicKey: "other"}, "10.1.2.0/24", "")
+	ok, err = pol.accept(Peer{PublicKey: "other"}, nil, "10.1.2.0/24", "")
 	must.NoError(t, err)
 	must.False(t, ok, must.Sprint("only gw may advertise 10/8"))
 
-	ok, err = pol.accept(gw, "192.168.0.0/16", "")
+	ok, err = pol.accept(gw, nil, "192.168.0.0/16", "")
 	must.NoError(t, err)
 	must.False(t, ok, must.Sprint("gw's non-10/8 route is refused"))
 
 	pol2, err := ParsePeerPolicy(`len(peer.allowedips) <= 2`)
 	must.NoError(t, err)
-	ok, err = pol2.accept(Peer{AllowedIPs: []string{"a", "b"}}, "a", "")
+	ok, err = pol2.accept(Peer{AllowedIPs: []string{"a", "b"}}, nil, "a", "")
 	must.NoError(t, err)
 	must.True(t, ok)
 
 	idp, err := ParsePeerPolicy(`route == peer.address`)
 	must.NoError(t, err)
-	ok, err = idp.accept(gw, "fdcc::ab/128", "fdcc::ab/128")
+	ok, err = idp.accept(gw, nil, "fdcc::ab/128", "fdcc::ab/128")
 	must.NoError(t, err)
 	must.True(t, ok, must.Sprint("route == peer.address holds for the identity /128"))
-	ok, err = idp.accept(gw, "10.1.2.0/24", "fdcc::ab/128")
+	ok, err = idp.accept(gw, nil, "10.1.2.0/24", "fdcc::ab/128")
 	must.NoError(t, err)
 	must.False(t, ok, must.Sprint("an extra route is not peer.address"))
+}
+
+func TestPeerPolicy_Tags(t *testing.T) {
+	// signed tags are verified, so a route policy can trust them: only db-role peers advertise the db subnet.
+	pol, err := ParsePeerPolicy(`peer.tags["role"] == "db" || route == peer.address`)
+	must.NoError(t, err)
+	id := netip.MustParseAddr("fdcc::1")
+	peer := Peer{PublicKey: "p", AllowedIPs: []string{"fdcc::1/128", "10.0.0.0/8"}}
+
+	kept, refused := policyFilter(peer, map[string]string{"role": "db"}, peer.AllowedIPs, id, pol)
+	must.Eq(t, peer.AllowedIPs, kept, must.Sprint("a db-tagged peer keeps its routes"))
+	must.SliceEmpty(t, refused)
+
+	kept, refused = policyFilter(peer, map[string]string{"role": "web"}, peer.AllowedIPs, id, pol)
+	must.Eq(t, []string{"fdcc::1/128"}, kept, must.Sprint("a non-db peer keeps only its identity /128"))
+	must.Eq(t, []string{"10.0.0.0/8"}, refused)
+
+	// nil tags (an untagged peer, the common grant.Tags case) must not error the eval, just miss the key.
+	kept, _ = policyFilter(peer, nil, peer.AllowedIPs, id, pol)
+	must.Eq(t, []string{"fdcc::1/128"}, kept, must.Sprint("untagged peer keeps only its identity /128"))
 }
 
 func TestPeerPolicy_WholePeerAllowedips(t *testing.T) {
@@ -83,12 +103,12 @@ func TestPeerPolicy_WholePeerAllowedips(t *testing.T) {
 	must.NoError(t, err)
 
 	ula := Peer{PublicKey: "a", AllowedIPs: []string{"fdcc::1/128", "fd12:3::/48"}}
-	kept, refused := policyFilter(ula, ula.AllowedIPs, id, pol)
+	kept, refused := policyFilter(ula, nil, ula.AllowedIPs, id, pol)
 	must.Eq(t, ula.AllowedIPs, kept, must.Sprint("all routes ULA => all kept"))
 	must.SliceEmpty(t, refused)
 
 	mixed := Peer{PublicKey: "b", AllowedIPs: []string{"fdcc::1/128", "10.0.0.0/8"}}
-	kept, refused = policyFilter(mixed, mixed.AllowedIPs, id, pol)
+	kept, refused = policyFilter(mixed, nil, mixed.AllowedIPs, id, pol)
 	must.SliceEmpty(t, kept, must.Sprint("one non-ULA route => all() is false for every route, nothing kept (no identity exemption)"))
 	must.Eq(t, []string{"fdcc::1/128", "10.0.0.0/8"}, refused)
 }
@@ -99,36 +119,36 @@ func TestPolicyFilter(t *testing.T) {
 
 	deny, err := ParsePeerPolicy(`false`)
 	must.NoError(t, err)
-	kept, refused := policyFilter(peer, peer.AllowedIPs, id, deny)
+	kept, refused := policyFilter(peer, nil, peer.AllowedIPs, id, deny)
 	must.SliceEmpty(t, kept, must.Sprint("false refuses everything, including the identity /128"))
 	must.Eq(t, peer.AllowedIPs, refused)
 
 	idOnly, err := ParsePeerPolicy(`route == peer.address`)
 	must.NoError(t, err)
-	kept, refused = policyFilter(peer, peer.AllowedIPs, id, idOnly)
+	kept, refused = policyFilter(peer, nil, peer.AllowedIPs, id, idOnly)
 	must.Eq(t, []string{"fdcc::1/128"}, kept, must.Sprint("only the identity /128 matches peer.address"))
 	must.Eq(t, []string{"0.0.0.0/0", "10.0.0.0/8"}, refused)
 
 	// reproduce the old identity exemption via an explicit predicate
 	keepID, err := ParsePeerPolicy(`route == peer.address || (peer.key == "exit" && route in ["0.0.0.0/0", "::/0"])`)
 	must.NoError(t, err)
-	kept, refused = policyFilter(peer, peer.AllowedIPs, id, keepID)
+	kept, refused = policyFilter(peer, nil, peer.AllowedIPs, id, keepID)
 	must.Eq(t, []string{"fdcc::1/128", "0.0.0.0/0"}, kept, must.Sprint("identity kept by matching peer.address; only the default extra accepted"))
 	must.Eq(t, []string{"10.0.0.0/8"}, refused)
 
 	block, err := ParsePeerPolicy(`peer.key != "exit"`)
 	must.NoError(t, err)
-	kept, refused = policyFilter(peer, peer.AllowedIPs, id, block)
+	kept, refused = policyFilter(peer, nil, peer.AllowedIPs, id, block)
 	must.SliceEmpty(t, kept, must.Sprint("peer.key != exit refuses all of exit's routes"))
 	must.Eq(t, peer.AllowedIPs, refused)
 
 	dropID, err := ParsePeerPolicy(`peer.key != "exit" || route != peer.address`)
 	must.NoError(t, err)
-	kept, refused = policyFilter(peer, peer.AllowedIPs, id, dropID)
+	kept, refused = policyFilter(peer, nil, peer.AllowedIPs, id, dropID)
 	must.Eq(t, []string{"0.0.0.0/0", "10.0.0.0/8"}, kept, must.Sprint("only the identity /128 is dropped"))
 	must.Eq(t, []string{"fdcc::1/128"}, refused)
 
-	kept, refused = policyFilter(peer, peer.AllowedIPs, id, nil)
+	kept, refused = policyFilter(peer, nil, peer.AllowedIPs, id, nil)
 	must.Eq(t, peer.AllowedIPs, kept)
 	must.SliceEmpty(t, refused)
 }
@@ -137,7 +157,7 @@ func TestPolicyFilter_MalformedCIDRRefused(t *testing.T) {
 	pol, err := ParsePeerPolicy(`cidrSubset("10.0.0.0/8", route)`)
 	must.NoError(t, err)
 	peer := Peer{PublicKey: "x", AllowedIPs: []string{"fdcc::1/128", "not-a-cidr", "10.0.0.0/8"}}
-	kept, refused := policyFilter(peer, peer.AllowedIPs, netip.MustParseAddr("fdcc::1"), pol)
+	kept, refused := policyFilter(peer, nil, peer.AllowedIPs, netip.MustParseAddr("fdcc::1"), pol)
 	must.Eq(t, []string{"10.0.0.0/8"}, kept, must.Sprint("only the 10/8 subnet matches; no identity exemption"))
 	must.Eq(t, []string{"fdcc::1/128", "not-a-cidr"}, refused, must.Sprint("the identity is refused like any non-matching route; an unparseable route fails closed, never crashes"))
 }
@@ -146,7 +166,7 @@ func TestPolicyFilter_EmptyAddressWhenNoPrefix(t *testing.T) {
 	deny, err := ParsePeerPolicy(`false`)
 	must.NoError(t, err)
 	peer := Peer{AllowedIPs: []string{"fdcc::1/128", "10.0.0.0/8"}}
-	kept, refused := policyFilter(peer, peer.AllowedIPs, netip.Addr{}, deny)
+	kept, refused := policyFilter(peer, nil, peer.AllowedIPs, netip.Addr{}, deny)
 	must.SliceEmpty(t, kept, must.Sprint("no overlay identity => nothing kept under deny-all"))
 	must.Eq(t, []string{"fdcc::1/128", "10.0.0.0/8"}, refused)
 }
@@ -155,7 +175,7 @@ func TestPolicyFilter_AddressMatchesOnlyExactHostRoute(t *testing.T) {
 	idOnly, err := ParsePeerPolicy(`route == peer.address`)
 	must.NoError(t, err)
 	peer := Peer{AllowedIPs: []string{"fdcc::1/128", "fdcc::/64"}}
-	kept, refused := policyFilter(peer, peer.AllowedIPs, netip.MustParseAddr("fdcc::1"), idOnly)
+	kept, refused := policyFilter(peer, nil, peer.AllowedIPs, netip.MustParseAddr("fdcc::1"), idOnly)
 	must.Eq(t, []string{"fdcc::1/128"}, kept, must.Sprint("route == peer.address matches only the exact /128"))
 	must.Eq(t, []string{"fdcc::/64"}, refused, must.Sprint("a covering prefix is not the identity"))
 }

@@ -15,14 +15,19 @@ import (
 
 const domain = "wg-mesh-signature-v1"
 
+// ErrExpired is returned by Verify when a grant is past its NotAfter, so callers can treat expiry (soft,
+// renewable) differently from other verification failures (untrusted signer, malformed).
+var ErrExpired = errors.New("signature expired")
+
 type claims struct {
-	Ctx       string   `cbor:"1,keyasint"`
-	Sub       []byte   `cbor:"2,keyasint"`
-	KeyID     []byte   `cbor:"3,keyasint"`
-	NotBefore int64    `cbor:"4,keyasint"`
-	NotAfter  int64    `cbor:"5,keyasint"`
-	Routes    [][]byte `cbor:"6,keyasint,omitempty"` // transit CIDRs as Prefix.MarshalBinary
-	Name      string   `cbor:"7,keyasint,omitempty"` // operator-attested DNS name
+	Ctx       string            `cbor:"1,keyasint"`
+	Sub       []byte            `cbor:"2,keyasint"`
+	KeyID     []byte            `cbor:"3,keyasint"`
+	NotBefore int64             `cbor:"4,keyasint"`
+	NotAfter  int64             `cbor:"5,keyasint"`
+	Routes    [][]byte          `cbor:"6,keyasint,omitempty"` // transit CIDRs as Prefix.MarshalBinary
+	Name      string            `cbor:"7,keyasint,omitempty"` // operator-attested DNS name
+	Tags      map[string]string `cbor:"8,keyasint,omitempty"` // operator-attested k=v labels
 }
 
 type Grant struct {
@@ -30,6 +35,7 @@ type Grant struct {
 	NotAfter int64
 	Routes   []netip.Prefix
 	Name     string
+	Tags     map[string]string
 }
 
 type signedClaims struct {
@@ -64,7 +70,7 @@ func mustDec() cbor.DecMode {
 }
 
 // Every grant carries an expiry so passive de-authorization is bounded without an explicit denylist entry.
-func Sign(key ed25519.PrivateKey, sub []byte, notBefore, notAfter int64, name string, routes ...netip.Prefix) ([]byte, error) {
+func Sign(key ed25519.PrivateKey, sub []byte, notBefore, notAfter int64, name string, tags map[string]string, routes ...netip.Prefix) ([]byte, error) {
 	if notAfter == 0 {
 		return nil, errors.New("a grant must carry an expiry")
 	}
@@ -72,13 +78,12 @@ func Sign(key ed25519.PrivateKey, sub []byte, notBefore, notAfter int64, name st
 	if err != nil {
 		return nil, err
 	}
-	return signClaims(key, claims{Sub: sub, NotBefore: notBefore, NotAfter: notAfter, Routes: encRoutes, Name: name}, domain)
+	return signClaims(key, claims{Sub: sub, NotBefore: notBefore, NotAfter: notAfter, Routes: encRoutes, Name: name, Tags: tags}, domain)
 }
 
-// SigningBody builds a grant's to-be-signed body for an external signer (e.g. Vault Transit) that holds
-// pubkey. The bytes are signed as-is with pure ed25519; pass the signature to Attach. This is the seam
-// for sign-as-a-service: the operator key never has to leave the vault.
-func SigningBody(pubkey ed25519.PublicKey, sub []byte, notBefore, notAfter int64, name string, routes ...netip.Prefix) ([]byte, error) {
+// SigningBody builds a grant's to-be-signed body for an external signer (e.g. Vault Transit) holding pubkey.
+// Sign it as-is with pure ed25519 and pass to Attach, so the operator key never leaves the vault.
+func SigningBody(pubkey ed25519.PublicKey, sub []byte, notBefore, notAfter int64, name string, tags map[string]string, routes ...netip.Prefix) ([]byte, error) {
 	if notAfter == 0 {
 		return nil, errors.New("a grant must carry an expiry")
 	}
@@ -86,7 +91,7 @@ func SigningBody(pubkey ed25519.PublicKey, sub []byte, notBefore, notAfter int64
 	if err != nil {
 		return nil, err
 	}
-	c := claims{Ctx: domain, Sub: sub, KeyID: pubkey, NotBefore: notBefore, NotAfter: notAfter, Routes: encRoutes, Name: name}
+	c := claims{Ctx: domain, Sub: sub, KeyID: pubkey, NotBefore: notBefore, NotAfter: notAfter, Routes: encRoutes, Name: name, Tags: tags}
 	return enc.Marshal(c)
 }
 
@@ -162,9 +167,8 @@ func signClaims(key ed25519.PrivateKey, c claims, dom string) ([]byte, error) {
 	return enc.Marshal(signedClaims{Claims: c, Sig: ed25519.Sign(key, body)})
 }
 
-// ErrMalformed marks a blob that could not be decoded at all, distinct from one that decodes but does
-// not verify (unknown signer or bad signature). Callers can fail closed on the former (corruption) and
-// tolerate the latter (an inert, untrusted blob).
+// ErrMalformed marks a blob that could not be decoded at all, distinct from one that decodes but does not
+// verify. Callers fail closed on the former (corruption) and tolerate the latter (an inert, untrusted blob).
 var ErrMalformed = errors.New("malformed signature blob")
 
 func parse(b []byte) (signedClaims, error) {
@@ -175,9 +179,8 @@ func parse(b []byte) (signedClaims, error) {
 	return s, nil
 }
 
-// Verify returns the grant only if signed by a trusted signer, bound to node pubkey, carrying an
-// expiry, and unexpired. Routes are decoded only after the signature passes, so an unauthenticated
-// reader never obtains them.
+// Verify returns the grant only if signed by a trusted signer, bound to pubkey, carrying an expiry, and
+// unexpired. Routes decode only after the signature passes, so an unauthenticated reader never obtains them.
 func Verify(signers []ed25519.PublicKey, pubkey string, blob []byte, now time.Time) (Grant, error) {
 	c, err := verifySig(signers, blob, domain)
 	if err != nil {
@@ -194,13 +197,13 @@ func Verify(signers []ed25519.PublicKey, pubkey string, blob []byte, now time.Ti
 		return Grant{}, errors.New("grant must carry an expiry")
 	}
 	if now.Unix() >= c.NotAfter {
-		return Grant{}, errors.New("signature expired")
+		return Grant{}, ErrExpired
 	}
 	routes, err := decodeRoutes(c.Routes)
 	if err != nil {
 		return Grant{}, err
 	}
-	return Grant{Sub: c.Sub, NotAfter: c.NotAfter, Routes: routes, Name: c.Name}, nil
+	return Grant{Sub: c.Sub, NotAfter: c.NotAfter, Routes: routes, Name: c.Name, Tags: c.Tags}, nil
 }
 
 // verifySig checks domain, signer-set membership, and signature, returning the authenticated claims.
@@ -253,6 +256,16 @@ func Name(blob []byte) string {
 		return ""
 	}
 	return s.Claims.Name
+}
+
+// GrantTags returns the grant's signed tags; nil if absent or unparseable. Unverified accessor: a node
+// reads its own already-verified grant, and peers get the tags from Verify.
+func GrantTags(blob []byte) map[string]string {
+	s, err := parse(blob)
+	if err != nil {
+		return nil
+	}
+	return s.Claims.Tags
 }
 
 // The grant's claimed (unverified) signer key; caller must still Verify.

@@ -16,7 +16,7 @@ An operator signs a grant (ed25519) that binds a node's key with a mandatory exp
 
 ## Gossip and membership
 
-Peers discover each other over HashiCorp memberlist running inside the WireGuard tunnels, seeded from the existing kernel peers. Each node gossips its endpoint, AllowedIPs, keepalive, tags, and signed grant; the gossip layer is hidden, with only `--gossip-port` and `--profile` (lan/wan/local timing) exposed.
+Peers discover each other over HashiCorp memberlist running inside the WireGuard tunnels, seeded from the existing kernel peers. Each node gossips its endpoint, AllowedIPs, keepalive, and signed grant (which carries its name, tags, and authorized routes); the gossip layer is hidden, with only `--gossip-port` and `--profile` (lan/wan/local timing) exposed.
 
 ## Route programming
 
@@ -34,6 +34,10 @@ A peer that fails is held for `--reconnect-timeout` (default 10m) before it is r
 
 `--peer-policy` is an optional `accept(peer, route)` expr predicate evaluated per advertised CIDR, including the identity `/128`. It returns true to install a route and false to drop it, fails closed on error, and is loaded inline or from an `@file` that reloads on SIGHUP.
 
+## Firewall
+
+A dedicated `ip6` nftables table, on by default, scopes the gossip port to the wg device. `--firewall-rules` adds an expr returning `allow(proto, ports, cond?)` rules: traffic to this node's overlay address is default-deny except what the rules admit, compiled per admitted peer at reconcile. ICMPv6, gossip, and established flows stay open; `--disable-firewall` removes the table.
+
 ## Revocation
 
 `--revoked` is a denylist file of node public keys, one per line. A listed key is denied at admission and a `SIGHUP` reload evicts an already-admitted peer; remove the line and `SIGHUP` to re-admit.
@@ -44,7 +48,7 @@ A peer that fails is held for `--reconnect-timeout` (default 10m) before it is r
 
 ## Names
 
-A node's name is the operator-signed `sign --name` carried in its grant, so a peer cannot spoof another's name and a node signed without one has no record. A name two nodes both claim resolves to neither. Unsigned `--tag k=v` metadata also gossips, but it is advisory.
+A node's name and tags are operator-signed in its grant (`sign --name`, `sign --tag k=v`), so a peer cannot spoof them. A node signed without a name has no record, and a name two nodes both claim resolves to neither.
 
 ## Key custody
 
@@ -56,4 +60,4 @@ The daemon adopts an existing WireGuard interface (`--interface`) that already h
 
 ## Reload
 
-SIGHUP reloads the node's own grant for hitless renewal, with no tunnel teardown, along with the `--revoked` file and the `@file` forms of `--signers` and `--peer-policy`.
+SIGHUP reloads the node's own grant for hitless renewal, with no tunnel teardown, along with the `--revoked` file and the `@file` forms of `--signers`, `--peer-policy`, and `--firewall-rules`.

@@ -19,10 +19,11 @@ import (
 type PeerPolicy struct{ program *vm.Program }
 
 type policyPeer struct {
-	Key        string   `expr:"key"`
-	Endpoint   string   `expr:"endpoint"`
-	Address    string   `expr:"address"`
-	AllowedIPs []string `expr:"allowedips"`
+	Key        string            `expr:"key"`
+	Endpoint   string            `expr:"endpoint"`
+	Address    string            `expr:"address"`
+	AllowedIPs []string          `expr:"allowedips"`
+	Tags       map[string]string `expr:"tags"` // operator-signed, verified; peer.tags["role"]
 }
 
 type policyEnv struct {
@@ -58,9 +59,9 @@ func ParsePeerPolicy(s string) (*PeerPolicy, error) {
 	return &PeerPolicy{program: program}, nil
 }
 
-func (p *PeerPolicy) accept(peer Peer, route, address string) (bool, error) {
+func (p *PeerPolicy) accept(peer Peer, tags map[string]string, route, address string) (bool, error) {
 	out, err := expr.Run(p.program, policyEnv{
-		Peer:       policyPeer{Key: peer.PublicKey, Endpoint: peer.Endpoint, Address: address, AllowedIPs: peer.AllowedIPs},
+		Peer:       policyPeer{Key: peer.PublicKey, Endpoint: peer.Endpoint, Address: address, AllowedIPs: peer.AllowedIPs, Tags: tags},
 		Route:      route,
 		CIDRSubset: cidrSubset,
 	})
@@ -76,7 +77,7 @@ func (p *PeerPolicy) accept(peer Peer, route, address string) (bool, error) {
 
 // policyFilter splits routes into kept and refused; the predicate decides every route incl the
 // identity /128 (no exemption). nil policy accepts everything; identity is exposed as peer.address.
-func policyFilter(peer Peer, routes []string, identity netip.Addr, policy *PeerPolicy) (kept, refused []string) {
+func policyFilter(peer Peer, tags map[string]string, routes []string, identity netip.Addr, policy *PeerPolicy) (kept, refused []string) {
 	if policy == nil {
 		return routes, nil
 	}
@@ -85,7 +86,7 @@ func policyFilter(peer Peer, routes []string, identity netip.Addr, policy *PeerP
 		address = HostRoute(identity).String()
 	}
 	for _, cidr := range routes {
-		ok, err := policy.accept(peer, cidr, address)
+		ok, err := policy.accept(peer, tags, cidr, address)
 		if err != nil {
 			slog.Warn("peer-policy eval error; route refused", "peer", peer.PublicKey, "route", cidr, "err", err)
 			refused = append(refused, cidr)

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/netip"
 	"sync"
 	"sync/atomic"
@@ -28,8 +29,8 @@ const (
 	joinBackoffMax = 4 * time.Second
 
 	routeReassertDebounce = 250 * time.Millisecond
-	// Rate-limits triggered reconciles: a convergence wave (join storm, mass restart) fires many triggers,
-	// and each reconcile does an O(N) netlink peer dump, so coalesce them into at most one run per window.
+	// Rate-limits triggered reconciles: a convergence wave fires many triggers and each does an O(N) netlink
+	// dump, so coalesce them to at most one run per window.
 	reconcileDebounce = 250 * time.Millisecond
 
 	kernelSettle = 30 * time.Second
@@ -48,6 +49,8 @@ type Config struct {
 	Prefix           netip.Prefix
 	Policy           *PeerPolicy
 	DNSZone          string
+	Firewall         bool            // firewall subsystem on (gossip guard always, rules if set); off only via --disable-firewall
+	FirewallRules    *FirewallPolicy // optional --firewall-rules predicate; nil = gossip guard only
 	Signers          []ed25519.PublicKey
 	Revoked          map[string]struct{}
 	ReconnectTimeout time.Duration
@@ -61,17 +64,19 @@ type Mesh struct {
 	selfAddr   netip.Addr
 	memberlist *memberlist.Memberlist
 
-	mu          sync.RWMutex // guards the membership maps below
-	members     map[string]member
-	applied     map[string]wgPeer
-	kernelPeers map[string]bool     // kernel peers awaiting first gossip; dropped once they gossip
-	seedPeers   map[string]bool     // operator-provisioned kernel peers at startup; never torn down on leave (immutable after adoptKernelPeers)
-	contested   map[string][]string // claimed by >1 peer, installed for none
-	isolated    bool                // isolation warn-once latch
+	mu             sync.RWMutex // guards the membership maps below
+	members        map[string]member
+	applied        map[string]wgPeer
+	kernelPeers    map[string]bool        // kernel peers awaiting first gossip; dropped once they gossip
+	seedPeers      map[string]bool        // operator-provisioned kernel peers at startup; never torn down on leave (immutable after adoptKernelPeers)
+	seedAllowedIPs map[string][]net.IPNet // each seed's operator-set allowed-ips at adopt, restored on graceful leave
+	contested      map[string][]string    // claimed by >1 peer, installed for none
+	isolated       bool                   // isolation warn-once latch
 
-	signers atomic.Pointer[[]ed25519.PublicKey] // swapped whole on SIGHUP for lock-free reads
-	policy  atomic.Pointer[PeerPolicy]
-	revoked atomic.Pointer[map[string]struct{}] // operator denylist from --revoked; replaced whole on SIGHUP
+	signers       atomic.Pointer[[]ed25519.PublicKey] // swapped whole on SIGHUP for lock-free reads
+	policy        atomic.Pointer[PeerPolicy]
+	revoked       atomic.Pointer[map[string]struct{}] // operator denylist from --revoked; replaced whole on SIGHUP
+	firewallRules atomic.Pointer[FirewallPolicy]      // --firewall-rules predicate; replaced whole on SIGHUP
 
 	dnsCacheMu sync.Mutex // short-TTL cache so a DNS query flood does not rebuild the record map per packet
 	dnsCache   map[string]netip.Addr
@@ -85,6 +90,8 @@ type Mesh struct {
 	selfRevoked atomic.Bool
 	shutdownMu  sync.Mutex
 	shutdown    bool
+	fwApplied   string // fingerprint of the last-applied firewall table; touched only by the Run goroutine
+	fwWarned    bool   // latches the apply-failure warning so a netns without nftables doesn't spam
 }
 
 func New(cfg Config) (*Mesh, error) {
@@ -99,7 +106,7 @@ func New(cfg Config) (*Mesh, error) {
 		return nil, err
 	}
 	if len(meta) > memberlist.MetaMaxSize {
-		return nil, fmt.Errorf("this node's gossip metadata is %d bytes, over the %d-byte limit; trim advertised routes (--allowed-ips), tags (--tag), or the signed name", len(meta), memberlist.MetaMaxSize)
+		return nil, fmt.Errorf("this node's gossip metadata is %d bytes, over the %d-byte limit; trim advertised routes (--allowed-ips) or the grant's signed name, tags, and routes", len(meta), memberlist.MetaMaxSize)
 	}
 
 	// Floor to 2 probe cycles: reaping sooner tears down a tunnel a brief partition/restart would restore.
@@ -116,16 +123,17 @@ func New(cfg Config) (*Mesh, error) {
 		return nil, fmt.Errorf("bind addr %q: %w", cfg.BindAddr, err)
 	}
 	m := &Mesh{
-		cfg:         cfg,
-		selfAddr:    selfAddr,
-		members:     map[string]member{},
-		applied:     map[string]wgPeer{},
-		kernelPeers: map[string]bool{},
-		seedPeers:   map[string]bool{},
-		contested:   map[string][]string{},
-		reconcileCh: make(chan struct{}, 1),
-		leave:       make(chan struct{}, 1),
-		ready:       make(chan struct{}),
+		cfg:            cfg,
+		selfAddr:       selfAddr,
+		members:        map[string]member{},
+		applied:        map[string]wgPeer{},
+		kernelPeers:    map[string]bool{},
+		seedPeers:      map[string]bool{},
+		seedAllowedIPs: map[string][]net.IPNet{},
+		contested:      map[string][]string{},
+		reconcileCh:    make(chan struct{}, 1),
+		leave:          make(chan struct{}, 1),
+		ready:          make(chan struct{}),
 	}
 	m.meta.Store(&meta)
 	grant := cfg.Self.Signature
@@ -138,6 +146,7 @@ func New(cfg Config) (*Mesh, error) {
 		revoked = map[string]struct{}{}
 	}
 	m.revoked.Store(&revoked)
+	m.firewallRules.Store(cfg.FirewallRules)
 
 	d := &delegate{mesh: m}
 	var mc *memberlist.Config
@@ -156,9 +165,8 @@ func New(cfg Config) (*Mesh, error) {
 	mc.Events = d
 	mc.Conflict = d
 	mc.Logger = newMemberlistLogger()
-	// Name+addr key-derived and port fixed, so a same-key restart returns UNCHANGED: it never uses reclaim
-	// (memberlist gates that on a changed addr/port) and, if it was marked dead, reconverges by refutation.
-	// This 30s only bounds a restart that changes --gossip-port.
+	// Name+addr are key-derived and port fixed, so a same-key restart never uses reclaim (gated on changed
+	// addr/port) and reconverges by refutation; this 30s only bounds a restart that changes --gossip-port.
 	mc.DeadNodeReclaimTime = 30 * time.Second
 
 	// Must seed kernelPeers before Create: a remote join landing first makes setMember's delete a no-op,
@@ -198,11 +206,13 @@ func (m *Mesh) Run(ctx context.Context) error {
 		if err := m.shutdownMemberlist(); err != nil {
 			slog.Warn("memberlist shutdown", "err", err)
 		}
-		// Graceful leave only: undo what we added (interface not ours). Remove the kernel peers the daemon
-		// installed (gossip-discovered), never the operator-provisioned seed peers, then undo the overlay
-		// addr+route we assigned. After runCtx cancel so the route monitor won't re-assert it.
+		// Graceful leave only: undo what we added (the interface isn't ours). Remove daemon-installed kernel
+		// peers (never operator seeds), then undo the overlay addr+route. After runCtx cancel so the monitor won't re-assert.
 		if leaving {
 			m.removeAddedPeers()
+			if m.cfg.Firewall {
+				m.removeFirewall()
+			}
 			if err := m.cfg.WG.DelRoute(m.cfg.Iface, m.cfg.Prefix); err != nil {
 				slog.Warn("remove overlay route on leave", "err", err)
 			}
@@ -213,22 +223,27 @@ func (m *Mesh) Run(ctx context.Context) error {
 	}()
 
 	runCtx, cancel := context.WithCancel(ctx)
-	var resolverWG sync.WaitGroup
+	// Goroutines that touch the overlay addr/route await cancel before the leave teardown, so a mid-iteration
+	// SetRoute or resolver bind can't race the DelRoute/DelAddr below.
+	var teardownWG sync.WaitGroup
 	defer func() {
 		cancel()
-		resolverWG.Wait()
+		teardownWG.Wait()
 	}()
 
+	// Install the firewall: the gossip guard always, plus any --firewall-rules microsegmentation.
+	if m.cfg.Firewall {
+		m.reconcileFirewall()
+	}
+
 	go m.serveStatus(runCtx)
-	go m.guardOverlayRoute(runCtx)
-	resolverWG.Go(func() {
-		m.serveDNS(runCtx)
-	})
+	teardownWG.Go(func() { m.reassertOverlayRoute(runCtx) })
+	teardownWG.Go(func() { m.serveDNS(runCtx) })
 
 	// Async: a synchronous join would block Run on a cold seed tunnel.
 	go m.retryJoin(runCtx)
 	go m.reconnect(runCtx)
-	go m.maintain(runCtx)
+	go m.maintenanceLoop(runCtx)
 
 	ticker := time.NewTicker(reconcileInterval)
 	defer ticker.Stop()

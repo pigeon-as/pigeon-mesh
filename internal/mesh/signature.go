@@ -29,6 +29,11 @@ func (m *Mesh) selfGrantExpiry() int64 {
 	return signature.NotAfter(*m.selfGrant.Load())
 }
 
+// selfTags reads our own signed tags from the current grant (unverified read of our already-verified grant).
+func (m *Mesh) selfTags() Tags {
+	return Tags(signature.GrantTags(*m.selfGrant.Load()))
+}
+
 func selfSignatureError(grant []byte, now time.Time) error {
 	na := signature.NotAfter(grant)
 	if na != 0 && now.Unix() >= na {

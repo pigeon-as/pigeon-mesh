@@ -221,7 +221,7 @@ func grantFile(t *testing.T, pub string) string {
 	t.Helper()
 	sub, err := base64.StdEncoding.DecodeString(pub)
 	must.NoError(t, err)
-	blob, err := signature.Sign(meshSigner, sub, time.Now().Add(-time.Minute).Unix(), time.Now().Add(6*time.Hour).Unix(), "")
+	blob, err := signature.Sign(meshSigner, sub, time.Now().Add(-time.Minute).Unix(), time.Now().Add(6*time.Hour).Unix(), "", nil)
 	must.NoError(t, err)
 	return writeFile(t, base64.StdEncoding.EncodeToString(blob))
 }

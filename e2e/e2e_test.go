@@ -181,7 +181,7 @@ func TestMesh_DNS(t *testing.T) {
 
 	sub, err := base64.StdEncoding.DecodeString(pub)
 	must.NoError(t, err)
-	named, err := signature.Sign(meshSigner, sub, time.Now().Add(-time.Minute).Unix(), time.Now().Add(time.Hour).Unix(), name)
+	named, err := signature.Sign(meshSigner, sub, time.Now().Add(-time.Minute).Unix(), time.Now().Add(time.Hour).Unix(), name, nil)
 	must.NoError(t, err)
 	nameGrant := writeFile(t, base64.StdEncoding.EncodeToString(named))
 
@@ -404,7 +404,7 @@ func signNode(t *testing.T, signer ed25519.PrivateKey, n *node, ttl time.Duratio
 	t.Helper()
 	sub, err := base64.StdEncoding.DecodeString(n.pub)
 	must.NoError(t, err)
-	blob, err := signature.Sign(signer, sub, time.Now().Add(-time.Minute).Unix(), time.Now().Add(ttl).Unix(), "")
+	blob, err := signature.Sign(signer, sub, time.Now().Add(-time.Minute).Unix(), time.Now().Add(ttl).Unix(), "", nil)
 	must.NoError(t, err)
 	return writeFile(t, base64.StdEncoding.EncodeToString(blob))
 }
@@ -415,7 +415,7 @@ func grantFile(t *testing.T, pub string, routes ...netip.Prefix) string {
 	t.Helper()
 	sub, err := base64.StdEncoding.DecodeString(pub)
 	must.NoError(t, err)
-	blob, err := signature.Sign(meshSigner, sub, time.Now().Add(-time.Minute).Unix(), time.Now().Add(time.Hour).Unix(), "", routes...)
+	blob, err := signature.Sign(meshSigner, sub, time.Now().Add(-time.Minute).Unix(), time.Now().Add(time.Hour).Unix(), "", nil, routes...)
 	must.NoError(t, err)
 	return writeFile(t, base64.StdEncoding.EncodeToString(blob))
 }
@@ -763,7 +763,7 @@ func TestMesh_SelfSignatureExpiryHaltsDNS(t *testing.T) {
 	sub, err := base64.StdEncoding.DecodeString(pub)
 	must.NoError(t, err)
 	// short-lived self grant: valid now, expires in ~18s.
-	blob, err := signature.Sign(signerPriv, sub, time.Now().Add(-time.Minute).Unix(), time.Now().Add(18*time.Second).Unix(), "alpha")
+	blob, err := signature.Sign(signerPriv, sub, time.Now().Add(-time.Minute).Unix(), time.Now().Add(18*time.Second).Unix(), "alpha", nil)
 	must.NoError(t, err)
 	sigFile := writeFile(t, base64.StdEncoding.EncodeToString(blob))
 
@@ -838,7 +838,7 @@ func TestMesh_SelfGrantRenewal(t *testing.T) {
 	sub, err := base64.StdEncoding.DecodeString(pub)
 	must.NoError(t, err)
 	grant := func(ttl time.Duration) string {
-		blob, err := signature.Sign(signerPriv, sub, time.Now().Add(-time.Minute).Unix(), time.Now().Add(ttl).Unix(), "alpha")
+		blob, err := signature.Sign(signerPriv, sub, time.Now().Add(-time.Minute).Unix(), time.Now().Add(ttl).Unix(), "alpha", nil)
 		must.NoError(t, err)
 		return base64.StdEncoding.EncodeToString(blob)
 	}

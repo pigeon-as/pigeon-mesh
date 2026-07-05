@@ -71,7 +71,7 @@ func signedFixture(t *testing.T, now time.Time, routes ...netip.Prefix) (signers
 	priv, pub, sub := mkSig(t)
 	derived, err := DeriveAddr(testKey, testPrefix)
 	must.NoError(t, err)
-	grant, err = signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), "", routes...)
+	grant, err = signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), "", nil, routes...)
 	must.NoError(t, err)
 	return []ed25519.PublicKey{pub}, HostRoute(derived).String(), grant
 }
@@ -145,7 +145,7 @@ func TestReevaluate_NamePropagatesOnReadmit(t *testing.T) {
 	derived, err := DeriveAddr(testKey, testPrefix)
 	must.NoError(t, err)
 	ownRoute := HostRoute(derived).String()
-	grant, err := signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), "web01")
+	grant, err := signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), "web01", nil)
 	must.NoError(t, err)
 
 	m := newTestMesh()
@@ -167,7 +167,7 @@ func TestReevaluate_RejectReasonRefreshes(t *testing.T) {
 	// Stays rejected across a reload but for a DIFFERENT reason: must show the fresh reason.
 	now := time.Now()
 	priv, pub, sub := mkSig(t)
-	grant, err := signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), "")
+	grant, err := signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), "", nil)
 	must.NoError(t, err)
 	m := newTestMesh()
 	m.cfg = Config{Prefix: testPrefix}
@@ -276,17 +276,27 @@ func TestSetMember_ReannounceClearsFailed(t *testing.T) {
 func TestExpireGrants(t *testing.T) {
 	m := newTestMesh()
 	now := time.Now()
+	derived, err := DeriveAddr(testKey, testPrefix)
+	must.NoError(t, err)
+	identity := HostRoute(derived).String()
 	m.members["accepted-noexpiry"] = member{grantExpiry: 0}
 	m.members["accepted-valid"] = member{grantExpiry: now.Add(time.Hour).Unix()}
-	m.members["accepted-expired"] = member{grantExpiry: now.Add(-time.Second).Unix(), refusedRoutes: []string{"192.168.0.0/16"}, unauthorizedRoutes: []string{"10.0.0.0/8"}}
+	m.members["accepted-expired"] = member{
+		addr:          derived,
+		peer:          Peer{Endpoint: "203.0.113.1:51820"},
+		grantExpiry:   now.Add(-time.Second).Unix(),
+		wgPeer:        wgPeer{key: "accepted-expired", routes: []string{identity, "10.0.0.0/8"}},
+		refusedRoutes: []string{"192.168.0.0/16"}, unauthorizedRoutes: []string{"10.0.0.0/8"},
+	}
 	m.members["already-rejected"] = member{admitErr: errors.New("no signature")}
-	m.members["failed-expired"] = member{failed: true, grantExpiry: now.Add(-time.Hour).Unix()}
+	m.members["failed-expired"] = member{addr: derived, failed: true, grantExpiry: now.Add(-time.Hour).Unix()}
 
-	must.True(t, m.expireGrants(now), must.Sprint("an expiry reports a change, so maintain can trigger a reconcile"))
+	must.True(t, m.expireGrants(now), must.Sprint("an expiry reports a change, so maintenanceLoop can trigger a reconcile"))
 
 	must.NoError(t, m.members["accepted-noexpiry"].admitErr, must.Sprint("a member with no expiry stays admitted"))
 	must.NoError(t, m.members["accepted-valid"].admitErr, must.Sprint("a member with a future expiry stays admitted"))
 	must.EqOp(t, "signature expired", m.members["accepted-expired"].admitErr.Error())
+	must.Eq(t, []string{identity}, m.members["accepted-expired"].wgPeer.routes, must.Sprint("soft expiry keeps the identity /128 and drops transit routes"))
 	must.SliceEmpty(t, m.members["accepted-expired"].unauthorizedRoutes, must.Sprint("expiry clears the unauthorized-route register"))
 	must.SliceEmpty(t, m.members["accepted-expired"].refusedRoutes, must.Sprint("expiry clears the refused-route register"))
 	must.EqOp(t, "no signature", m.members["already-rejected"].admitErr.Error())
@@ -296,7 +306,7 @@ func TestExpireGrants(t *testing.T) {
 func TestCheckSelfExpiry(t *testing.T) {
 	priv, pub, sub := mkSig(t)
 	now := time.Now()
-	blob, err := signature.Sign(priv, sub, now.Add(-time.Hour).Unix(), now.Add(-time.Minute).Unix(), "")
+	blob, err := signature.Sign(priv, sub, now.Add(-time.Hour).Unix(), now.Add(-time.Minute).Unix(), "", nil)
 	must.NoError(t, err)
 	m := &Mesh{cfg: Config{Self: Peer{PublicKey: "self", Signature: blob}}}
 	storeConfig(m, []ed25519.PublicKey{pub}, nil)
@@ -306,7 +316,7 @@ func TestCheckSelfExpiry(t *testing.T) {
 	m.checkSelfExpiry(now)
 	must.True(t, m.selfExpired.Load(), must.Sprint("an expired own signature halts self participation"))
 
-	valid, err := signature.Sign(priv, sub, now.Add(-time.Hour).Unix(), now.Add(time.Hour).Unix(), "")
+	valid, err := signature.Sign(priv, sub, now.Add(-time.Hour).Unix(), now.Add(time.Hour).Unix(), "", nil)
 	must.NoError(t, err)
 	ok := &Mesh{cfg: Config{Self: Peer{PublicKey: "self", Signature: valid}}}
 	storeConfig(ok, []ed25519.PublicKey{pub}, nil)
@@ -333,7 +343,7 @@ func TestAdmit(t *testing.T) {
 	signers := []ed25519.PublicKey{pub}
 	now := time.Unix(1_000_000, 0)
 	sign := func(notBefore, notAfter int64) []byte {
-		blob, err := signature.Sign(priv, sub, notBefore, notAfter, "")
+		blob, err := signature.Sign(priv, sub, notBefore, notAfter, "", nil)
 		must.NoError(t, err)
 		return blob
 	}
@@ -360,7 +370,6 @@ func TestAdmit(t *testing.T) {
 	}{
 		{name: "valid signature and derived route accepted", signers: signers, peer: prefixPeer(validSig), wantAddr: true, wantExpiry: true},
 		{name: "unsigned peer rejected", signers: signers, peer: prefixPeer(nil), wantReject: "no signature"},
-		{name: "expired signature rejected", signers: signers, peer: prefixPeer(expiredSig), wantReject: "expired"},
 		{name: "unknown signer rejected", signers: []ed25519.PublicKey{otherPub}, peer: prefixPeer(validSig), wantReject: "unknown signer"},
 		{name: "non-derived route rejected", signers: signers, peer: prefixPeer(validSig, "fdcc::dead/128"), wantReject: "derives"},
 		{name: "malformed endpoint rejected", signers: signers, peer: Peer{PublicKey: testKey, AllowedIPs: []string{ownRoute}, Signature: validSig}, wantReject: "invalid peer config"},
@@ -379,6 +388,13 @@ func TestAdmit(t *testing.T) {
 			must.EqOp(t, tc.wantExpiry, r.grantExpiry != 0)
 		})
 	}
+
+	// Soft expiry (DS1): an expired grant keeps the self-certified identity /128 so the tunnel and in-band
+	// gossip renewal survive, but drops transit routes; only revocation removes the peer.
+	exp := admit(member{}, prefixPeer(expiredSig, ownRoute, "10.0.0.0/8"), testKey, &signers, nil, prefix, nil, now)
+	must.StrContains(t, exp.admitErr.Error(), "expired")
+	must.True(t, exp.addr.IsValid(), must.Sprint("identity is still self-certified on expiry"))
+	must.Eq(t, []string{HostRoute(exp.addr).String()}, exp.wgPeer.routes, must.Sprint("expiry keeps only the identity /128, no transit"))
 }
 
 func TestAdmit_PolicyFiltersRoutes(t *testing.T) {
@@ -422,15 +438,15 @@ func TestAdmit_BroadGrantAuthorizesSubprefixes(t *testing.T) {
 	must.SliceEmpty(t, r.unauthorizedRoutes)
 }
 
-// TestNodeMetaHeadroom pins how much room the 512-byte NodeMeta cap leaves for advertised routes and tags
-// once a realistic named, route-authorizing grant is packed in, so a regression that bloats the encoding
-// (or the documented operator limit drifting from reality) fails here. The numbers are logged with -v.
+// TestNodeMetaHeadroom pins how much room the 512-byte NodeMeta cap leaves for advertised routes and the
+// grant's operator-signed tags once a realistic named, route-authorizing grant is packed in, so a regression
+// that bloats the encoding (or the documented operator limit drifting from reality) fails here. Logged with -v.
 func TestNodeMetaHeadroom(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
 	priv, _, sub := mkSig(t)
 	// A grant with a hostname-length name and two authorized transit routes (identity + an exit).
 	grant, err := signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(720*time.Hour).Unix(),
-		"node-worstcase.example.internal", netip.MustParsePrefix("10.0.0.0/16"), netip.MustParsePrefix("0.0.0.0/0"))
+		"node-worstcase.example.internal", nil, netip.MustParsePrefix("10.0.0.0/16"), netip.MustParsePrefix("0.0.0.0/0"))
 	must.NoError(t, err)
 	derived, err := DeriveAddr(testKey, testPrefix)
 	must.NoError(t, err)
@@ -460,20 +476,24 @@ func TestNodeMetaHeadroom(t *testing.T) {
 	}
 	t.Logf("extra advertised /24 routes beyond the baseline that fit: %d", routes)
 
-	// Short tags (k=v) that still fit.
+	// Short operator-signed tags (k=v) in the grant that still fit, re-signing as the tag set grows.
 	tags := 0
 	for {
-		p := base
-		p.Tags = Tags{}
+		tagMap := map[string]string{}
 		for i := 0; i <= tags; i++ {
-			p.Tags[fmt.Sprintf("k%d", i)] = "v"
+			tagMap[fmt.Sprintf("k%d", i)] = "v"
 		}
+		g, err := signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(720*time.Hour).Unix(),
+			"node-worstcase.example.internal", tagMap, netip.MustParsePrefix("10.0.0.0/16"), netip.MustParsePrefix("0.0.0.0/0"))
+		must.NoError(t, err)
+		p := base
+		p.Signature = g
 		if !fits(p) {
 			break
 		}
 		tags++
 	}
-	t.Logf("short tags beyond the baseline that fit: %d", tags)
+	t.Logf("short signed tags beyond the baseline that fit: %d", tags)
 
 	must.True(t, routes >= 10, must.Sprintf("NodeMeta headroom shrank: only %d extra /24 routes fit past a named 2-route grant (was ~17)", routes))
 }

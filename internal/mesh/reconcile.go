@@ -29,13 +29,10 @@ func (m *Mesh) peersInKernel() (map[string]bool, error) {
 }
 
 // dropContestedRoutes installs a route for no one when more than one node claims the EXACT same prefix
-// (returned as contested for status/logging). Overlap alone is NOT a conflict: WireGuard keeps every
-// peer's AllowedIPs in one longest-prefix-match trie, so a broad route (an exit's 0.0.0.0/0, a hub's
-// fdcc::/48) and a more-specific peer route coexist and the kernel routes each correctly, and a peer's
-// identity /128 is the tightest match so no aggregate can ever swallow it. Only an exact-prefix
-// collision is ambiguous. This node's own advertised routes (selfName) count as a claimant, so a peer
-// re-advertising a route we already serve is surfaced and dropped like any other contest, never silently.
-// Grant authorization, not route dropping, is what stops a peer carving into a subnet it was not granted.
+// (surfaced as contested). Overlap is fine: WireGuard's longest-prefix-match trie routes a broad and a
+// specific route correctly, and an identity /128 is always the tightest match, so only an exact collision
+// is ambiguous. This node's own routes count as a claimant; grant authorization, not dropping, is what
+// stops a peer carving into a subnet it was not granted.
 func dropContestedRoutes(peers map[string]wgPeer, selfName string, selfRoutes []string) (map[string]wgPeer, map[string][]string) {
 	claimants := make(map[string][]string)
 	for name, w := range peers {
@@ -136,6 +133,11 @@ func (m *Mesh) reconcile() error {
 	admitted := 0
 	for name, e := range m.members {
 		if !e.admitted() {
+			// A soft-expired grant keeps only its identity /128 (tunnel + in-band renewal survive); other
+			// rejections install nothing. Not counted as admitted for the isolation check below.
+			if len(e.wgPeer.routes) > 0 {
+				desired[name] = e.wgPeer
+			}
 			continue
 		}
 		admitted++
@@ -147,8 +149,8 @@ func (m *Mesh) reconcile() error {
 	}
 	rev := *m.revoked.Load()
 	for name := range m.kernelPeers {
-		// Keep a kernel peer until it gossips; setMember drops gossiped ones. Skip revoked keys: a
-		// not-yet-gossiped seed never reaches admit(), so this is the only place revocation cuts it.
+		// Keep a kernel peer until it gossips (setMember drops gossiped ones). Skip revoked keys: a pre-gossip
+		// seed never reaches admit(), so this is the only place revocation cuts it.
 		if _, ok := rev[name]; ok {
 			continue
 		}
@@ -181,8 +183,15 @@ func (m *Mesh) reconcile() error {
 	}
 
 	m.mu.Lock()
-	if len(changes) > 0 {
-		m.applied = effective
+	// Apply the diff to m.applied, don't replace it wholesale: a concurrent reseedUnrevokedKernelPeers during
+	// the lock-free Apply above adds an entry absent from `effective`, and a blind replace would drop it.
+	for _, c := range changes {
+		name := c.PublicKey.String()
+		if c.Remove {
+			delete(m.applied, name)
+		} else {
+			m.applied[name] = effective[name]
+		}
 	}
 	var newlyContested []string
 	for route := range contested {
@@ -205,6 +214,7 @@ func (m *Mesh) reconcile() error {
 	if len(changes) > 0 {
 		m.persistManaged() // record daemon-added peers so leave stays correct across a restart
 	}
+	m.reconcileFirewall() // refresh --firewall-rules sets as membership/tags change (no-op if unchanged)
 	return nil
 }
 
@@ -215,13 +225,15 @@ func (m *Mesh) adoptKernelPeers() error {
 		return err
 	}
 	adopted := make(map[string]wgPeer, len(peers))
+	original := make(map[string][]net.IPNet, len(peers)) // operator's allowed-ips before we touch them, for leave
 	revoked := *m.revoked.Load()
 	var routes []wgtypes.PeerConfig
 	for _, p := range peers {
 		name := p.PublicKey.String()
+		original[name] = p.AllowedIPs
 		w := wgPeer{key: name}
 		if _, isRevoked := revoked[name]; !isRevoked {
-			if route, pc, ok := m.overlaySeed(p); ok {
+			if route, pc, ok := m.deriveHostRoute(p); ok {
 				w.routes = []string{route}
 				routes = append(routes, pc)
 			}
@@ -233,13 +245,13 @@ func (m *Mesh) adoptKernelPeers() error {
 			slog.Warn("seed kernel-peer overlay addresses", "err", err)
 		}
 	}
-	// A peer present at startup is an operator seed UNLESS a prior run of this daemon recorded that it
-	// added it (gossip-discovered). Without this, an ungraceful restart would re-classify daemon-added
-	// peers as operator config and a later leave would leak them. The record lives in /run, which clears
-	// on reboot exactly as the kernel WireGuard peers do, so a fresh boot correctly treats survivors as seeds.
+	// A startup peer is an operator seed UNLESS a prior run recorded the daemon added it (gossip-discovered);
+	// else an ungraceful restart reclassifies daemon-added peers as operator config and leaks them on leave.
+	// The record lives in /run, cleared on reboot like the kernel peers, so a fresh boot treats survivors as seeds.
 	managed := loadManaged(m.cfg.StatePath)
 	m.mu.Lock()
 	m.applied = adopted
+	m.seedAllowedIPs = original
 	for name := range adopted {
 		m.kernelPeers[name] = true
 		if !managed[name] {
@@ -250,9 +262,8 @@ func (m *Mesh) adoptKernelPeers() error {
 	return nil
 }
 
-// managedPeers returns the keys of kernel peers the daemon itself installed (everything it applied that is
-// not an operator seed). Persisted to StatePath so leave can still tell its own additions from operator
-// config after a restart.
+// managedPeers returns the kernel peers the daemon installed (applied minus operator seeds), persisted to
+// StatePath so leave can tell its own additions from operator config after a restart.
 func (m *Mesh) managedPeers() []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -306,9 +317,9 @@ func loadManaged(path string) map[string]bool {
 	return out
 }
 
-// overlaySeed derives peer p's key-based overlay /128 route plus the WG config that installs it, or
+// deriveHostRoute computes peer p's key-based overlay /128 route plus the WG config that installs it, or
 // ok=false when there is no prefix, the key is underivable, or the peer already carries a host route.
-func (m *Mesh) overlaySeed(p wgtypes.Peer) (route string, pc wgtypes.PeerConfig, ok bool) {
+func (m *Mesh) deriveHostRoute(p wgtypes.Peer) (route string, pc wgtypes.PeerConfig, ok bool) {
 	if !m.cfg.Prefix.IsValid() || hasHostRoute(p.AllowedIPs) {
 		return "", wgtypes.PeerConfig{}, false
 	}
@@ -323,9 +334,8 @@ func (m *Mesh) overlaySeed(p wgtypes.Peer) (route string, pc wgtypes.PeerConfig,
 	}, true
 }
 
-// reseedUnrevokedKernelPeers re-derives the overlay /128 for any still-pre-gossip seed peer that was
-// adopted while revoked (so it carries no route) and is no longer on the denylist, so removing a boot-time
-// seed from --revoked and reloading restores its reachability at once, not only after it gossips or a restart.
+// reseedUnrevokedKernelPeers re-derives the overlay /128 for a still-pre-gossip seed adopted while revoked
+// (so routeless) and now off the denylist, restoring reachability at once on un-revoke + reload.
 func (m *Mesh) reseedUnrevokedKernelPeers() {
 	revoked := *m.revoked.Load()
 	// Skip the netlink dump entirely unless some pre-gossip seed is now un-revoked but still routeless.
@@ -358,7 +368,7 @@ func (m *Mesh) reseedUnrevokedKernelPeers() {
 		if w, ok := m.applied[name]; !ok || len(w.routes) > 0 {
 			continue // already gossiped or already seeded
 		}
-		if route, pc, ok := m.overlaySeed(p); ok {
+		if route, pc, ok := m.deriveHostRoute(p); ok {
 			m.applied[name] = wgPeer{key: name, routes: []string{route}}
 			routes = append(routes, pc)
 		}
@@ -371,18 +381,20 @@ func (m *Mesh) reseedUnrevokedKernelPeers() {
 	}
 }
 
-// removeAddedPeers removes, on graceful leave, the kernel peers the daemon itself installed (gossip-
-// discovered), leaving every operator-provisioned seed peer in place. pigeon-mesh is a guest on the
-// operator's interface, so it cleans up its own additions but never the operator's kernel config.
+// removeAddedPeers removes, on graceful leave, only the kernel peers the daemon installed, leaving operator
+// seeds in place: pigeon-mesh is a guest on the operator's interface and cleans up only its own additions.
 func (m *Mesh) removeAddedPeers() {
 	m.mu.RLock()
 	var rm []wgtypes.PeerConfig
 	for name := range m.applied {
-		if m.seedPeers[name] {
-			continue
-		}
 		key, err := wgtypes.ParseKey(name)
 		if err != nil {
+			continue
+		}
+		if m.seedPeers[name] {
+			// Never remove a seed, but restore the operator's adopt-time allowed-ips to undo any route the
+			// daemon expanded onto it (a no-op if untouched).
+			rm = append(rm, wgtypes.PeerConfig{PublicKey: key, UpdateOnly: true, ReplaceAllowedIPs: true, AllowedIPs: m.seedAllowedIPs[name]})
 			continue
 		}
 		rm = append(rm, wgtypes.PeerConfig{PublicKey: key, Remove: true})

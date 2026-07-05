@@ -31,7 +31,7 @@ func (m *Mesh) dnsRecords() map[string]netip.Addr {
 	}
 	members, contested := m.liveMembers()
 	self := m.selfAddr
-	// Expiry is a known-future event, so the maintain-tick latch lag is immaterial; the --revoked denylist
+	// Expiry is a known-future event, so the maintenanceLoop-tick latch lag is immaterial; the --revoked denylist
 	// can change on SIGHUP, so read it live (like status) to drop self from its own zone at once.
 	if m.selfExpired.Load() {
 		self = netip.Addr{}

@@ -63,9 +63,9 @@ func validateOverlayAddr(pubkey string, p Peer, prefix netip.Prefix) (netip.Addr
 	return want, nil
 }
 
-// guardOverlayRoute is the sole owner of the overlay-prefix route; reconcile must not touch it.
+// reassertOverlayRoute is the sole owner of the overlay-prefix route; reconcile must not touch it.
 // Re-asserts on resubscribe (catches deletes missed while down) and on external delete.
-func (m *Mesh) guardOverlayRoute(ctx context.Context) {
+func (m *Mesh) reassertOverlayRoute(ctx context.Context) {
 	if !m.cfg.Prefix.IsValid() {
 		return
 	}

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/pigeon-as/pigeon-mesh/internal/dns"
+	"github.com/pigeon-as/pigeon-mesh/internal/mesh"
 	"github.com/pigeon-as/pigeon-mesh/internal/signature"
 )
 
@@ -58,18 +59,20 @@ func runSign(args []string) int {
 	skew := fs.Duration("not-before-skew", time.Minute, "tolerance before now to absorb clock skew")
 	var routeFlags stringList
 	fs.Var(&routeFlags, "route", "a transit CIDR the node may advertise beyond its identity /128; repeatable")
+	var tagFlags stringList
+	fs.Var(&tagFlags, "tag", "an operator-signed tag k=v bound into the grant; repeatable. Verified at every peer, unlike a self-declared label")
 	fs.Parse(args)
 
 	if *sig != "" {
-		if *keyFile != "" || *pubkey != "" || *ttl != 0 || *name != "" || len(routeFlags) > 0 {
-			fmt.Fprintln(os.Stderr, "sign: --signature only completes a --pubkey body read from stdin; it takes no --key/--pubkey/--ttl/--name/--route")
+		if *keyFile != "" || *pubkey != "" || *ttl != 0 || *name != "" || len(routeFlags) > 0 || len(tagFlags) > 0 {
+			fmt.Fprintln(os.Stderr, "sign: --signature only completes a --pubkey body read from stdin; it takes no --key/--pubkey/--ttl/--name/--route/--tag")
 			return 2
 		}
 		return runAttach(*sig)
 	}
 	node := fs.Arg(0)
 	if node == "" || fs.NArg() != 1 || (*keyFile == "") == (*pubkey == "") {
-		fmt.Fprintln(os.Stderr, "usage: pigeon-mesh sign (--key <key> | --pubkey <b64>) --ttl <dur> [--name <n>] [--route <cidr> ...] <node-wg-pubkey>")
+		fmt.Fprintln(os.Stderr, "usage: pigeon-mesh sign (--key <key> | --pubkey <b64>) --ttl <dur> [--name <n>] [--route <cidr> ...] [--tag <k=v> ...] <node-wg-pubkey>")
 		return 2
 	}
 	if *ttl <= 0 {
@@ -89,6 +92,11 @@ func runSign(args []string) int {
 		}
 		routes = append(routes, p)
 	}
+	tags, err := mesh.ParseTags(tagFlags)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "sign:", err)
+		return 1
+	}
 	subRaw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(node))
 	if err != nil || len(subRaw) != 32 {
 		fmt.Fprintln(os.Stderr, "node must be a base64 32-byte WireGuard public key")
@@ -103,7 +111,7 @@ func runSign(args []string) int {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
-		body, err := signature.SigningBody(pub, subRaw, now.Add(-*skew).Unix(), notAfter, *name, routes...)
+		body, err := signature.SigningBody(pub, subRaw, now.Add(-*skew).Unix(), notAfter, *name, tags, routes...)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
@@ -116,7 +124,7 @@ func runSign(args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	blob, err := signature.Sign(priv, subRaw, now.Add(-*skew).Unix(), notAfter, *name, routes...)
+	blob, err := signature.Sign(priv, subRaw, now.Add(-*skew).Unix(), notAfter, *name, tags, routes...)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
