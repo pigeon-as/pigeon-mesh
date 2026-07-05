@@ -32,7 +32,7 @@ func mint(t *testing.T, priv ed25519.PrivateKey, c claims, dom string) []byte {
 
 func TestAttach_RejectsNonCanonicalBody(t *testing.T) {
 	priv, pub, sub := newSigner(t)
-	body, err := SigningBody(pub, sub, time.Now().Add(-time.Minute).Unix(), time.Now().Add(time.Hour).Unix(), "web01")
+	body, err := SigningBody(pub, sub, time.Now().Add(-time.Minute).Unix(), time.Now().Add(time.Hour).Unix(), "web01", nil)
 	must.NoError(t, err)
 	if _, err := Attach(body, ed25519.Sign(priv, body)); err != nil {
 		t.Fatalf("a canonical SigningBody must attach: %v", err)
@@ -46,7 +46,7 @@ func TestAttach_RejectsNonCanonicalBody(t *testing.T) {
 
 func TestSignerKey(t *testing.T) {
 	priv, pub, sub := newSigner(t)
-	blob, err := Sign(priv, sub, time.Now().Add(-time.Minute).Unix(), time.Now().Add(time.Hour).Unix(), "")
+	blob, err := Sign(priv, sub, time.Now().Add(-time.Minute).Unix(), time.Now().Add(time.Hour).Unix(), "", nil)
 	must.NoError(t, err)
 
 	got, err := SignerKey(blob)
@@ -60,7 +60,7 @@ func TestSignerKey(t *testing.T) {
 func TestVerify_RoundTrip(t *testing.T) {
 	priv, pub, sub := newSigner(t)
 	now := time.Now()
-	blob, err := Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), "")
+	blob, err := Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), "", nil)
 	must.NoError(t, err)
 	g, err := Verify([]ed25519.PublicKey{pub}, testKey, blob, now)
 	must.NoError(t, err)
@@ -70,7 +70,7 @@ func TestVerify_RoundTrip(t *testing.T) {
 func TestVerify_Name(t *testing.T) {
 	priv, pub, sub := newSigner(t)
 	now := time.Now()
-	blob, err := Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), "alpha")
+	blob, err := Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), "alpha", nil)
 	must.NoError(t, err)
 
 	g, err := Verify([]ed25519.PublicKey{pub}, testKey, blob, now)
@@ -86,6 +86,28 @@ func TestVerify_Name(t *testing.T) {
 	must.NoError(t, err)
 	_, err = Verify([]ed25519.PublicKey{pub}, testKey, tampered, now)
 	must.ErrorContains(t, err, "bad signature", must.Sprint("forging the name is rejected"))
+}
+
+func TestVerify_Tags(t *testing.T) {
+	priv, pub, sub := newSigner(t)
+	now := time.Now()
+	tags := map[string]string{"role": "db", "region": "eu"}
+	blob, err := Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), "", tags)
+	must.NoError(t, err)
+
+	g, err := Verify([]ed25519.PublicKey{pub}, testKey, blob, now)
+	must.NoError(t, err)
+	must.MapEq(t, tags, g.Tags, must.Sprint("signed tags round-trip through Verify"))
+	must.MapEq(t, tags, GrantTags(blob), must.Sprint("the GrantTags accessor reads the signed tags"))
+
+	// tags are signed, so an admitted node cannot forge them: tampering breaks the signature.
+	s, err := parse(blob)
+	must.NoError(t, err)
+	s.Claims.Tags["role"] = "admin"
+	tampered, err := enc.Marshal(s)
+	must.NoError(t, err)
+	_, err = Verify([]ed25519.PublicKey{pub}, testKey, tampered, now)
+	must.ErrorContains(t, err, "bad signature", must.Sprint("forging a tag is rejected"))
 }
 
 func TestVerify_Rejections(t *testing.T) {
@@ -128,7 +150,7 @@ func TestVerify_RequiresExpiry(t *testing.T) {
 	priv, pub, sub := newSigner(t)
 	now := time.Now()
 
-	_, err := Sign(priv, sub, now.Add(-time.Minute).Unix(), 0, "")
+	_, err := Sign(priv, sub, now.Add(-time.Minute).Unix(), 0, "", nil)
 	must.ErrorContains(t, err, "expiry", must.Sprint("Sign refuses a no-expiry grant"))
 
 	// defense in depth: a hand-minted no-expiry grant is rejected by Verify too.
@@ -141,7 +163,7 @@ func TestExpiryBoundary(t *testing.T) {
 	priv, pub, sub := newSigner(t)
 	signers := []ed25519.PublicKey{pub}
 	const nb, na = int64(1_000_000), int64(2_000_000)
-	blob, err := Sign(priv, sub, nb, na, "")
+	blob, err := Sign(priv, sub, nb, na, "", nil)
 	must.NoError(t, err)
 
 	// expiry is inclusive: valid strictly before NotAfter, expired at and after it.
@@ -165,7 +187,7 @@ func TestSignRoutes(t *testing.T) {
 	r2 := netip.MustParsePrefix("192.168.0.0/16")
 
 	// unordered + duplicate input; the grant stores them masked, deduped, and bytewise-sorted.
-	blob, err := Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), "", r2, r1, r1)
+	blob, err := Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), "", nil, r2, r1, r1)
 	must.NoError(t, err)
 	g, err := Verify(signers, testKey, blob, now)
 	must.NoError(t, err)
@@ -178,7 +200,7 @@ func TestDetachedSigning(t *testing.T) {
 
 	// emit the to-be-signed body for an external signer holding pub, sign it as-is (pure ed25519, as
 	// Vault Transit does), and assemble: the result must verify exactly like a locally-signed grant.
-	body, err := SigningBody(pub, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), "alpha", netip.MustParsePrefix("10.0.0.0/8"))
+	body, err := SigningBody(pub, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), "alpha", nil, netip.MustParsePrefix("10.0.0.0/8"))
 	must.NoError(t, err)
 	grant, err := Attach(body, ed25519.Sign(priv, body))
 	must.NoError(t, err)
@@ -197,7 +219,7 @@ func TestVerifyRoutes_TamperBreaksSignature(t *testing.T) {
 	priv, pub, sub := newSigner(t)
 	signers := []ed25519.PublicKey{pub}
 	now := time.Now()
-	blob, err := Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), "", netip.MustParsePrefix("10.0.0.0/8"))
+	blob, err := Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), "", nil, netip.MustParsePrefix("10.0.0.0/8"))
 	must.NoError(t, err)
 
 	s, err := parse(blob)
@@ -211,7 +233,7 @@ func TestVerifyRoutes_TamperBreaksSignature(t *testing.T) {
 
 func TestNotAfter(t *testing.T) {
 	priv, _, sub := newSigner(t)
-	blob, err := Sign(priv, sub, 1_000, 2_000, "")
+	blob, err := Sign(priv, sub, 1_000, 2_000, "", nil)
 	must.NoError(t, err)
 	must.EqOp(t, int64(2_000), NotAfter(blob))
 	must.EqOp(t, int64(0), NotAfter([]byte{0, 1, 2}), must.Sprint("garbage is not read as expiry"))

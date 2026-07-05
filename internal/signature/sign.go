@@ -20,13 +20,14 @@ const domain = "wg-mesh-signature-v1"
 var ErrExpired = errors.New("signature expired")
 
 type claims struct {
-	Ctx       string   `cbor:"1,keyasint"`
-	Sub       []byte   `cbor:"2,keyasint"`
-	KeyID     []byte   `cbor:"3,keyasint"`
-	NotBefore int64    `cbor:"4,keyasint"`
-	NotAfter  int64    `cbor:"5,keyasint"`
-	Routes    [][]byte `cbor:"6,keyasint,omitempty"` // transit CIDRs as Prefix.MarshalBinary
-	Name      string   `cbor:"7,keyasint,omitempty"` // operator-attested DNS name
+	Ctx       string            `cbor:"1,keyasint"`
+	Sub       []byte            `cbor:"2,keyasint"`
+	KeyID     []byte            `cbor:"3,keyasint"`
+	NotBefore int64             `cbor:"4,keyasint"`
+	NotAfter  int64             `cbor:"5,keyasint"`
+	Routes    [][]byte          `cbor:"6,keyasint,omitempty"` // transit CIDRs as Prefix.MarshalBinary
+	Name      string            `cbor:"7,keyasint,omitempty"` // operator-attested DNS name
+	Tags      map[string]string `cbor:"8,keyasint,omitempty"` // operator-attested k=v labels
 }
 
 type Grant struct {
@@ -34,6 +35,7 @@ type Grant struct {
 	NotAfter int64
 	Routes   []netip.Prefix
 	Name     string
+	Tags     map[string]string
 }
 
 type signedClaims struct {
@@ -68,7 +70,7 @@ func mustDec() cbor.DecMode {
 }
 
 // Every grant carries an expiry so passive de-authorization is bounded without an explicit denylist entry.
-func Sign(key ed25519.PrivateKey, sub []byte, notBefore, notAfter int64, name string, routes ...netip.Prefix) ([]byte, error) {
+func Sign(key ed25519.PrivateKey, sub []byte, notBefore, notAfter int64, name string, tags map[string]string, routes ...netip.Prefix) ([]byte, error) {
 	if notAfter == 0 {
 		return nil, errors.New("a grant must carry an expiry")
 	}
@@ -76,13 +78,13 @@ func Sign(key ed25519.PrivateKey, sub []byte, notBefore, notAfter int64, name st
 	if err != nil {
 		return nil, err
 	}
-	return signClaims(key, claims{Sub: sub, NotBefore: notBefore, NotAfter: notAfter, Routes: encRoutes, Name: name}, domain)
+	return signClaims(key, claims{Sub: sub, NotBefore: notBefore, NotAfter: notAfter, Routes: encRoutes, Name: name, Tags: tags}, domain)
 }
 
 // SigningBody builds a grant's to-be-signed body for an external signer (e.g. Vault Transit) that holds
 // pubkey. The bytes are signed as-is with pure ed25519; pass the signature to Attach. This is the seam
 // for sign-as-a-service: the operator key never has to leave the vault.
-func SigningBody(pubkey ed25519.PublicKey, sub []byte, notBefore, notAfter int64, name string, routes ...netip.Prefix) ([]byte, error) {
+func SigningBody(pubkey ed25519.PublicKey, sub []byte, notBefore, notAfter int64, name string, tags map[string]string, routes ...netip.Prefix) ([]byte, error) {
 	if notAfter == 0 {
 		return nil, errors.New("a grant must carry an expiry")
 	}
@@ -90,7 +92,7 @@ func SigningBody(pubkey ed25519.PublicKey, sub []byte, notBefore, notAfter int64
 	if err != nil {
 		return nil, err
 	}
-	c := claims{Ctx: domain, Sub: sub, KeyID: pubkey, NotBefore: notBefore, NotAfter: notAfter, Routes: encRoutes, Name: name}
+	c := claims{Ctx: domain, Sub: sub, KeyID: pubkey, NotBefore: notBefore, NotAfter: notAfter, Routes: encRoutes, Name: name, Tags: tags}
 	return enc.Marshal(c)
 }
 
@@ -204,7 +206,7 @@ func Verify(signers []ed25519.PublicKey, pubkey string, blob []byte, now time.Ti
 	if err != nil {
 		return Grant{}, err
 	}
-	return Grant{Sub: c.Sub, NotAfter: c.NotAfter, Routes: routes, Name: c.Name}, nil
+	return Grant{Sub: c.Sub, NotAfter: c.NotAfter, Routes: routes, Name: c.Name, Tags: c.Tags}, nil
 }
 
 // verifySig checks domain, signer-set membership, and signature, returning the authenticated claims.
@@ -257,6 +259,16 @@ func Name(blob []byte) string {
 		return ""
 	}
 	return s.Claims.Name
+}
+
+// GrantTags returns the grant's signed tags; nil if absent or unparseable. Unverified accessor: a node
+// reads its own already-verified grant, and peers get the tags from Verify.
+func GrantTags(blob []byte) map[string]string {
+	s, err := parse(blob)
+	if err != nil {
+		return nil
+	}
+	return s.Claims.Tags
 }
 
 // The grant's claimed (unverified) signer key; caller must still Verify.

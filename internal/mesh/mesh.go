@@ -49,6 +49,7 @@ type Config struct {
 	Prefix           netip.Prefix
 	Policy           *PeerPolicy
 	DNSZone          string
+	Firewall         bool // manage an nftables table scoping the gossip port to the wg device (default on)
 	Signers          []ed25519.PublicKey
 	Revoked          map[string]struct{}
 	ReconnectTimeout time.Duration
@@ -101,7 +102,7 @@ func New(cfg Config) (*Mesh, error) {
 		return nil, err
 	}
 	if len(meta) > memberlist.MetaMaxSize {
-		return nil, fmt.Errorf("this node's gossip metadata is %d bytes, over the %d-byte limit; trim advertised routes (--allowed-ips), tags (--tag), or the signed name", len(meta), memberlist.MetaMaxSize)
+		return nil, fmt.Errorf("this node's gossip metadata is %d bytes, over the %d-byte limit; trim advertised routes (--allowed-ips) or the grant's signed name, tags, and routes", len(meta), memberlist.MetaMaxSize)
 	}
 
 	// Floor to 2 probe cycles: reaping sooner tears down a tunnel a brief partition/restart would restore.
@@ -206,6 +207,9 @@ func (m *Mesh) Run(ctx context.Context) error {
 		// addr+route we assigned. After runCtx cancel so the route monitor won't re-assert it.
 		if leaving {
 			m.removeAddedPeers()
+			if m.cfg.Firewall {
+				m.removeGossipFirewall()
+			}
 			if err := m.cfg.WG.DelRoute(m.cfg.Iface, m.cfg.Prefix); err != nil {
 				slog.Warn("remove overlay route on leave", "err", err)
 			}
@@ -223,6 +227,13 @@ func (m *Mesh) Run(ctx context.Context) error {
 		cancel()
 		teardownWG.Wait()
 	}()
+
+	// Scope the gossip port to the wg device: reachable through the tunnels, not from a local process.
+	if m.cfg.Firewall {
+		if err := m.installGossipFirewall(); err != nil {
+			slog.Warn("install gossip firewall", "err", err)
+		}
+	}
 
 	go m.serveStatus(runCtx)
 	teardownWG.Go(func() { m.guardOverlayRoute(runCtx) })

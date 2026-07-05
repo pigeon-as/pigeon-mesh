@@ -88,6 +88,9 @@ programs systemd-resolved to route the zone to it.
 
 - **Transport:** WireGuard's Noise handshake is the only encryption, and gossip rides
   inside the tunnels. The private key is never read or persisted.
+- **Daemon:** it never handles tunnel plaintext, only WireGuard's kernel does the crypto,
+  so a compromised daemon leaks no traffic and no data-plane keys. Short grant TTLs that
+  renew hitlessly bound a stolen grant to hours; [revocation](#revocation) is the backstop.
 - **Membership:** no control plane, so addresses are key-derived (self-certifying)
   and every node carries an offline operator signature. A node cannot claim another's
   address. A route two members both claim is installed for neither and shown in
@@ -155,8 +158,8 @@ gossip membership reconverges.
 
 ## Limitations
 
-A node's advertised routes and tags share a 512-byte gossip budget, roughly 15 routes or 35 short tags past
-its signed grant; a node over the cap fails to start.
+A node's signed grant and advertised routes share a 512-byte gossip budget: past a typical named grant there
+is room for roughly 15 more routes or 35 short tags. A node over the cap fails to start.
 
 ## Build
 

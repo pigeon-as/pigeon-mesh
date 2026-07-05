@@ -172,7 +172,7 @@ func (m *Mesh) status() Status {
 		pv := PeerView{
 			Endpoint:   e.peer.Endpoint,
 			AllowedIPs: e.peer.AllowedIPs,
-			Tags:       e.peer.Tags,
+			Tags:       e.tags,
 			Status:     memberStatus(e.admitted(), e.failed),
 		}
 		if !e.admitted() {
@@ -195,7 +195,7 @@ func (m *Mesh) status() Status {
 	selfPV := PeerView{
 		Endpoint:   m.cfg.Self.Endpoint,
 		AllowedIPs: m.cfg.Self.AllowedIPs,
-		Tags:       m.cfg.Self.Tags,
+		Tags:       m.selfTags(),
 		Status:     "alive",
 	}
 	if err := selfSignatureError(*m.selfGrant.Load(), now); err != nil {

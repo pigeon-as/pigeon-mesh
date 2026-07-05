@@ -56,11 +56,7 @@ func main() {
 	signatureFile := flag.String("signature", "", "path to this node's base64 operator-signed grant (required); advertised to peers for admission (SIGHUP-reloadable for hitless renewal)")
 	revoked := flag.String("revoked", "", "path to a denylist file of base64 node public keys, one per line; each listed key is denied at admission while present. SIGHUP reloads; remove a line to re-admit")
 	reconnectTimeout := flag.Duration("reconnect-timeout", 10*time.Minute, "grace window to keep a failed peer's tunnel before reaping it; survives restarts and brief partitions")
-	var tagFlags []string
-	flag.Func("tag", "tag for this node, repeatable as k=v", func(v string) error {
-		tagFlags = append(tagFlags, v)
-		return nil
-	})
+	firewall := flag.Bool("firewall", true, "manage a dedicated nftables table that scopes the gossip port to the wg device, so it is reachable through the tunnels but not from a local process; --firewall=false to opt out and manage nftables yourself")
 	flag.Parse()
 
 	if flag.NArg() > 0 {
@@ -142,12 +138,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	tags, err := mesh.ParseTags(tagFlags)
-	if err != nil {
-		slog.Error("tag", "err", err)
-		os.Exit(2)
-	}
-
 	sig, err := signature.LoadSignature(*signatureFile)
 	if err != nil {
 		slog.Error("signature file", "err", err)
@@ -159,7 +149,6 @@ func main() {
 		Endpoint:            ep,
 		AllowedIPs:          allowed,
 		PersistentKeepalive: *persistentKeepalive,
-		Tags:                tags,
 		Signature:           sig,
 	}
 
@@ -179,6 +168,7 @@ func main() {
 		Self:             self,
 		Prefix:           overlayPrefix,
 		DNSZone:          *dnsZone,
+		Firewall:         *firewall,
 		ReconnectTimeout: *reconnectTimeout,
 		WG:               wgc,
 	}

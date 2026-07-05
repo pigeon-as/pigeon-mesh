@@ -30,6 +30,7 @@ type member struct {
 	unauthorizedRoutes []string
 	grantExpiry        int64                // unix seconds; 0 = none
 	name               string               // operator-signed DNS name from the grant
+	tags               Tags                 // operator-signed tags from the grant
 	grantRoutes        []netip.Prefix       // authorized transit routes from the verified grant, cached for reuse
 	verifiedUnder      *[]ed25519.PublicKey // signer set the grant was verified under; nil until verified
 	failed             bool
@@ -69,7 +70,7 @@ func admit(prev member, p Peer, name string, signersPtr *[]ed25519.PublicKey, re
 	}
 	kept, refused := policyFilter(p, authorized, addr, policy)
 	pc.routes = kept
-	return member{addr: addr, wgPeer: pc, refusedRoutes: refused, unauthorizedRoutes: unauthorized, grantExpiry: grant.NotAfter, name: grant.Name, grantRoutes: grant.Routes, verifiedUnder: signersPtr}
+	return member{addr: addr, wgPeer: pc, refusedRoutes: refused, unauthorizedRoutes: unauthorized, grantExpiry: grant.NotAfter, name: grant.Name, tags: grant.Tags, grantRoutes: grant.Routes, verifiedUnder: signersPtr}
 }
 
 // reuseGrant returns prev's verified grant when the signer set and signature are unchanged, so a re-verify
@@ -82,7 +83,7 @@ func reuseGrant(prev member, sig []byte, signersPtr *[]ed25519.PublicKey, now ti
 	if prev.grantExpiry != 0 && now.Unix() >= prev.grantExpiry {
 		return signature.Grant{}, false // expired since last verify; re-verify to produce the proper error
 	}
-	return signature.Grant{NotAfter: prev.grantExpiry, Name: prev.name, Routes: prev.grantRoutes}, true
+	return signature.Grant{NotAfter: prev.grantExpiry, Name: prev.name, Tags: prev.tags, Routes: prev.grantRoutes}, true
 }
 
 // identityOnly is the soft-expiry verdict: the grant lapsed, but the overlay address is self-certified, so
@@ -259,7 +260,7 @@ func (m *Mesh) reevaluate(now time.Time) {
 		if !e.wgPeer.equal(nv.wgPeer) {
 			changed = true
 		}
-		e.addr, e.wgPeer, e.admitErr, e.refusedRoutes, e.unauthorizedRoutes, e.grantExpiry, e.name, e.grantRoutes, e.verifiedUnder = nv.addr, nv.wgPeer, nv.admitErr, nv.refusedRoutes, nv.unauthorizedRoutes, nv.grantExpiry, nv.name, nv.grantRoutes, nv.verifiedUnder
+		e.addr, e.wgPeer, e.admitErr, e.refusedRoutes, e.unauthorizedRoutes, e.grantExpiry, e.name, e.tags, e.grantRoutes, e.verifiedUnder = nv.addr, nv.wgPeer, nv.admitErr, nv.refusedRoutes, nv.unauthorizedRoutes, nv.grantExpiry, nv.name, nv.tags, nv.grantRoutes, nv.verifiedUnder
 		m.members[name] = e
 	}
 	m.mu.Unlock()

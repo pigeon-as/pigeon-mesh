@@ -29,6 +29,12 @@ func (m *Mesh) selfGrantExpiry() int64 {
 	return signature.NotAfter(*m.selfGrant.Load())
 }
 
+// selfTags reads this node's own operator-signed tags from its current grant, so status reflects a
+// SIGHUP-renewed grant. Unverified read of our own already-verified grant.
+func (m *Mesh) selfTags() Tags {
+	return Tags(signature.GrantTags(*m.selfGrant.Load()))
+}
+
 func selfSignatureError(grant []byte, now time.Time) error {
 	na := signature.NotAfter(grant)
 	if na != 0 && now.Unix() >= na {
