@@ -81,9 +81,8 @@ func Sign(key ed25519.PrivateKey, sub []byte, notBefore, notAfter int64, name st
 	return signClaims(key, claims{Sub: sub, NotBefore: notBefore, NotAfter: notAfter, Routes: encRoutes, Name: name, Tags: tags}, domain)
 }
 
-// SigningBody builds a grant's to-be-signed body for an external signer (e.g. Vault Transit) that holds
-// pubkey. The bytes are signed as-is with pure ed25519; pass the signature to Attach. This is the seam
-// for sign-as-a-service: the operator key never has to leave the vault.
+// SigningBody builds a grant's to-be-signed body for an external signer (e.g. Vault Transit) holding pubkey.
+// Sign it as-is with pure ed25519 and pass to Attach, so the operator key never leaves the vault.
 func SigningBody(pubkey ed25519.PublicKey, sub []byte, notBefore, notAfter int64, name string, tags map[string]string, routes ...netip.Prefix) ([]byte, error) {
 	if notAfter == 0 {
 		return nil, errors.New("a grant must carry an expiry")
@@ -168,9 +167,8 @@ func signClaims(key ed25519.PrivateKey, c claims, dom string) ([]byte, error) {
 	return enc.Marshal(signedClaims{Claims: c, Sig: ed25519.Sign(key, body)})
 }
 
-// ErrMalformed marks a blob that could not be decoded at all, distinct from one that decodes but does
-// not verify (unknown signer or bad signature). Callers can fail closed on the former (corruption) and
-// tolerate the latter (an inert, untrusted blob).
+// ErrMalformed marks a blob that could not be decoded at all, distinct from one that decodes but does not
+// verify. Callers fail closed on the former (corruption) and tolerate the latter (an inert, untrusted blob).
 var ErrMalformed = errors.New("malformed signature blob")
 
 func parse(b []byte) (signedClaims, error) {
@@ -181,9 +179,8 @@ func parse(b []byte) (signedClaims, error) {
 	return s, nil
 }
 
-// Verify returns the grant only if signed by a trusted signer, bound to node pubkey, carrying an
-// expiry, and unexpired. Routes are decoded only after the signature passes, so an unauthenticated
-// reader never obtains them.
+// Verify returns the grant only if signed by a trusted signer, bound to pubkey, carrying an expiry, and
+// unexpired. Routes decode only after the signature passes, so an unauthenticated reader never obtains them.
 func Verify(signers []ed25519.PublicKey, pubkey string, blob []byte, now time.Time) (Grant, error) {
 	c, err := verifySig(signers, blob, domain)
 	if err != nil {

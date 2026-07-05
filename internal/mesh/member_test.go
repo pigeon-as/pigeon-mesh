@@ -291,7 +291,7 @@ func TestExpireGrants(t *testing.T) {
 	m.members["already-rejected"] = member{admitErr: errors.New("no signature")}
 	m.members["failed-expired"] = member{addr: derived, failed: true, grantExpiry: now.Add(-time.Hour).Unix()}
 
-	must.True(t, m.expireGrants(now), must.Sprint("an expiry reports a change, so maintain can trigger a reconcile"))
+	must.True(t, m.expireGrants(now), must.Sprint("an expiry reports a change, so maintenanceLoop can trigger a reconcile"))
 
 	must.NoError(t, m.members["accepted-noexpiry"].admitErr, must.Sprint("a member with no expiry stays admitted"))
 	must.NoError(t, m.members["accepted-valid"].admitErr, must.Sprint("a member with a future expiry stays admitted"))

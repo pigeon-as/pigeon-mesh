@@ -39,10 +39,9 @@ type member struct {
 
 func (m member) admitted() bool { return m.admitErr == nil }
 
-// admit computes the admission verdict for peer p. It reuses prev's already-verified grant when the signer
-// set (signersPtr identity) and signature are unchanged, skipping the ed25519 + CBOR verify; a SIGHUP that
-// swaps the signer set changes the pointer and forces a fresh verify. The overlay address is always
-// re-derived because it is self-certified, not signed. Runs under m.mu.
+// admit computes the admission verdict for peer p, reusing prev's verified grant when the signer set
+// (signersPtr identity) and signature are unchanged (a SIGHUP that swaps signers forces a fresh verify).
+// The overlay address is always re-derived: it is self-certified, not signed. Runs under m.mu.
 func admit(prev member, p Peer, name string, signersPtr *[]ed25519.PublicKey, revoked map[string]struct{}, prefix netip.Prefix, policy *PeerPolicy, now time.Time) member {
 	if _, ok := revoked[name]; ok {
 		return member{admitErr: errRevoked}
@@ -52,7 +51,7 @@ func admit(prev member, p Peer, name string, signersPtr *[]ed25519.PublicKey, re
 		g, err := verifyGrant(p, name, *signersPtr, now)
 		if err != nil {
 			if errors.Is(err, signature.ErrExpired) {
-				return identityOnly(name, p, prefix) // soft expiry: keep the self-certified /128, drop transit
+				return reachableOnly(name, p, prefix) // soft expiry: keep the self-certified /128, drop transit
 			}
 			return member{admitErr: err}
 		}
@@ -68,14 +67,13 @@ func admit(prev member, p Peer, name string, signersPtr *[]ed25519.PublicKey, re
 	if _, err := pc.toWG(); err != nil {
 		return member{admitErr: fmt.Errorf("invalid peer config: %w", err)}
 	}
-	kept, refused := policyFilter(p, authorized, addr, policy)
+	kept, refused := policyFilter(p, grant.Tags, authorized, addr, policy)
 	pc.routes = kept
 	return member{addr: addr, wgPeer: pc, refusedRoutes: refused, unauthorizedRoutes: unauthorized, grantExpiry: grant.NotAfter, name: grant.Name, tags: grant.Tags, grantRoutes: grant.Routes, verifiedUnder: signersPtr}
 }
 
-// reuseGrant returns prev's verified grant when the signer set and signature are unchanged, so a re-verify
-// would yield identical claims; only expiry (the sole time-dependent input) is re-checked against now. A
-// signer rotation swaps m.signers's pointer, which fails the identity check and forces a fresh verify.
+// reuseGrant returns prev's verified grant when signer set and signature are unchanged; only expiry (the one
+// time-dependent input) is re-checked. A signer rotation swaps the pointer and forces a fresh verify.
 func reuseGrant(prev member, sig []byte, signersPtr *[]ed25519.PublicKey, now time.Time) (signature.Grant, bool) {
 	if prev.verifiedUnder != signersPtr || !prev.admitted() || !bytes.Equal(prev.peer.Signature, sig) {
 		return signature.Grant{}, false
@@ -86,12 +84,10 @@ func reuseGrant(prev member, sig []byte, signersPtr *[]ed25519.PublicKey, now ti
 	return signature.Grant{NotAfter: prev.grantExpiry, Name: prev.name, Tags: prev.tags, Routes: prev.grantRoutes}, true
 }
 
-// identityOnly is the soft-expiry verdict: the grant lapsed, but the overlay address is self-certified, so
-// keep the identity /128 (the tunnel and in-band gossip renewal survive) and install no transit routes. A
-// renewed grant re-admits the peer with full routes; only revocation (--revoked) removes the /128. Every
-// reference (nebula/tailscale/spire) hard-tears-down on expiry only because renewal is out-of-band; pigeon's
-// renewal rides inside the tunnel, so a hard teardown would sever the very path the renewal travels over.
-func identityOnly(name string, p Peer, prefix netip.Prefix) member {
+// reachableOnly is the soft-expiry verdict: the grant lapsed but the address is self-certified, so keep the
+// identity /128 (the tunnel and in-band renewal survive) and install no transit. A renewal re-admits with
+// full routes; only --revoked removes the /128. A hard teardown would sever the path the renewal rides over.
+func reachableOnly(name string, p Peer, prefix netip.Prefix) member {
 	addr, err := validateOverlayAddr(name, p, prefix)
 	if err != nil {
 		return member{admitErr: err} // cannot even certify the identity: install nothing
@@ -269,7 +265,7 @@ func (m *Mesh) reevaluate(now time.Time) {
 	}
 }
 
-func (m *Mesh) maintain(ctx context.Context) {
+func (m *Mesh) maintenanceLoop(ctx context.Context) {
 	ticker := time.NewTicker(reapInterval)
 	defer ticker.Stop()
 	for {
@@ -295,8 +291,7 @@ func (m *Mesh) expireGrants(now time.Time) (changed bool) {
 		if !e.admitted() || e.grantExpiry == 0 || ts < e.grantExpiry {
 			continue
 		}
-		// Soft expiry: keep the self-certified identity /128 (tunnel + in-band renewal survive), drop only
-		// the grant-authorized transit routes. A renewal re-admits the peer with its full route set.
+		// Soft expiry: keep the identity /128, drop grant-authorized transit; a renewal re-admits with full routes.
 		e.admitErr = errSignatureExpired
 		e.wgPeer = wgPeer{key: name, endpoint: e.peer.Endpoint, routes: []string{HostRoute(e.addr).String()}, keepalive: e.peer.PersistentKeepalive}
 		e.refusedRoutes, e.unauthorizedRoutes = nil, nil

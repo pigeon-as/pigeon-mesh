@@ -88,9 +88,9 @@ programs systemd-resolved to route the zone to it.
 
 - **Transport:** WireGuard's Noise handshake is the only encryption, and gossip rides
   inside the tunnels. The private key is never read or persisted.
-- **Daemon:** it never handles tunnel plaintext, only WireGuard's kernel does the crypto,
-  so a compromised daemon leaks no traffic and no data-plane keys. Short grant TTLs that
-  renew hitlessly bound a stolen grant to hours; [revocation](#revocation) is the backstop.
+- **Daemon:** it runs the control plane only; WireGuard's kernel moves the data, so a
+  compromised daemon leaks no traffic or private keys. Grants are short-lived, so a stolen
+  one lapses within hours, and [revocation](#revocation) evicts it sooner.
 - **Membership:** no control plane, so addresses are key-derived (self-certifying)
   and every node carries an offline operator signature. A node cannot claim another's
   address. A route two members both claim is installed for neither and shown in
@@ -109,9 +109,9 @@ shows in `status`. The policy applies only to this node. Leave it unset to insta
 everything; pass it inline or as `@file`, reloaded with `SIGHUP`.
 
 In scope: `peer.key`, `peer.endpoint`, `peer.address` (the peer's identity `/128`),
-`peer.allowedips`, the candidate `route`, and `cidrSubset(outer, inner)`. Only
-`peer.key` and `peer.address` are trustworthy for blocking; `endpoint` and
-`allowedips` are peer-advertised and forgeable.
+`peer.allowedips`, `peer.tags` (operator-signed), the candidate `route`, and
+`cidrSubset(outer, inner)`. Only `peer.key`, `peer.address`, and `peer.tags` are
+trustworthy for blocking; `endpoint` and `allowedips` are peer-advertised and forgeable.
 
 ```sh
 # identity only: each peer's /128, no transit routes
@@ -136,6 +136,34 @@ its grant expire. Because gossip rides inside the tunnels, blocking a peer's `/1
 this node's gossip path to it; a policy that installs nothing for any peer isolates
 this node, and the daemon warns.
 
+## Firewall
+
+A dedicated nftables table is managed automatically, so there are no manual rules. By default
+it only scopes the gossip port to the wg device (reachable through the tunnels, not from a
+local process). `--firewall-rules` adds microsegmentation: an [expr](https://expr-lang.org) that
+returns a list of `allow(proto, ports, cond?)` rules deciding which overlay traffic to this
+node to accept. Set it and traffic to this node's overlay address is default-deny except what
+the rules admit; ICMPv6, gossip, and established flows stay open so the mesh and IPv6 keep
+working. Like `--peer-policy` it is a per-node file (inline or `@file`, `SIGHUP`-reloaded),
+never gossiped.
+
+Each `allow` takes a proto (`tcp` or `udp`), ports (an int, a `"lo-hi"` string, or a list),
+and an optional condition. `peer` exposes the verified `.key`, `.address`, `.endpoint`, and
+operator-signed `.tags`, so the condition can use the whole language.
+
+```sh
+# postgres only from db-clients; ssh and bgp from any peer
+--firewall-rules '[allow("tcp", 5432, peer.tags["role"] == "db-client"), allow("tcp", [22, 179])]'
+
+# a tcp port range for one zone
+--firewall-rules '[allow("tcp", "8000-8100", peer.tags["zone"] == "eu")]'
+```
+
+Each rule runs per admitted peer at reconcile and compiles to nftables rules keyed on the
+peer's `/128`, so the daemon only updates rules at reconcile and never sits in the datapath.
+It governs inbound traffic to this node. `--disable-firewall` turns the whole subsystem off,
+gossip guard included.
+
 ## Operations
 
 `pigeon-mesh status` (`--json`) shows the gossip view (endpoints, tags, SWIM state,
@@ -158,8 +186,8 @@ gossip membership reconverges.
 
 ## Limitations
 
-A node's signed grant and advertised routes share a 512-byte gossip budget: past a typical named grant there
-is room for roughly 15 more routes or 35 short tags. A node over the cap fails to start.
+A node's grant and advertised routes share a 512-byte gossip budget, room for roughly 15 extra routes or 35
+short tags past a typical grant; over the cap it fails to start.
 
 ## Build
 

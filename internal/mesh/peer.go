@@ -15,9 +15,8 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
-// canonicalKey reports whether name is the canonical base64 encoding of a 32-byte WireGuard key. Non-strict
-// base64 would decode a non-canonical variant to the same bytes yet track it under a different string,
-// churning reconcile against the kernel's canonical form; requiring canonical form at intake matches --revoked.
+// canonicalKey reports whether name is the canonical base64 of a 32-byte WireGuard key. Non-strict base64
+// would track a non-canonical variant under a different string, churning reconcile against the kernel's form.
 func canonicalKey(name string) bool {
 	raw, err := base64.StdEncoding.Strict().DecodeString(name)
 	return err == nil && len(raw) == ed25519.PublicKeySize
