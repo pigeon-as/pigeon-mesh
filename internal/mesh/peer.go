@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/netip"
 	"slices"
-	"time"
 
 	"github.com/hashicorp/go-msgpack/v2/codec"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
@@ -24,11 +23,9 @@ func canonicalKey(name string) bool {
 
 // PublicKey is identity, not encoded; it is the node name, filled in on decode.
 type Peer struct {
-	PublicKey           string   `codec:"-"`
-	Endpoint            string   `codec:"ep"`
-	AllowedIPs          []string `codec:"ai"`
-	PersistentKeepalive int      `codec:"k,omitempty"`
-	Signature           []byte   `codec:"s,omitempty"`
+	PublicKey  string   `codec:"-"`
+	AllowedIPs []string `codec:"ai"`
+	Signature  []byte   `codec:"s,omitempty"`
 }
 
 var msgpackHandle = &codec.MsgpackHandle{}
@@ -67,10 +64,9 @@ func decodePeer(name string, meta []byte) (Peer, error) {
 }
 
 type wgPeer struct {
-	key       string
-	endpoint  string
-	routes    []string
-	keepalive int
+	key      string
+	endpoint string
+	routes   []string
 }
 
 func (w wgPeer) toWG() (wgtypes.PeerConfig, error) {
@@ -96,17 +92,14 @@ func (w wgPeer) toWG() (wgtypes.PeerConfig, error) {
 		}
 		nets = append(nets, net.IPNet{IP: pfx.Addr().AsSlice(), Mask: net.CIDRMask(pfx.Bits(), pfx.Addr().BitLen())})
 	}
-	d := time.Duration(w.keepalive) * time.Second
 	return wgtypes.PeerConfig{
-		PublicKey:                   key,
-		Endpoint:                    net.UDPAddrFromAddrPort(ap),
-		ReplaceAllowedIPs:           true,
-		AllowedIPs:                  nets,
-		PersistentKeepaliveInterval: &d,
+		PublicKey:         key,
+		Endpoint:          net.UDPAddrFromAddrPort(ap),
+		ReplaceAllowedIPs: true,
+		AllowedIPs:        nets,
 	}, nil
 }
 
 func (w wgPeer) equal(o wgPeer) bool {
-	return w.key == o.key && w.endpoint == o.endpoint && w.keepalive == o.keepalive &&
-		slices.Equal(w.routes, o.routes)
+	return w.key == o.key && w.endpoint == o.endpoint && slices.Equal(w.routes, o.routes)
 }

@@ -6,6 +6,7 @@ BREAKING CHANGES:
 * Every grant must now carry an expiry: `sign --ttl` is required (previously optional, needed only for route grants). This bounds passive de-authorization.
 * A node's DNS name is now the operator-signed `sign --name` carried in its grant, not the daemon `--tag name=` or hostname default (both removed). Names are unspoofable as a result; re-sign nodes with `--name` to keep them named.
 * A node's tags are now operator-signed via `sign --tag k=v` in its grant, not the daemon `--tag` flag (removed). Verified at every peer like the signed name, so they can be trusted and are usable in `--peer-policy` and `--firewall-rules` (`peer.tags["role"]`); re-sign nodes with `--tag` to keep them tagged.
+* A node's WireGuard endpoint is now the operator-signed `sign --endpoint <host:port>` carried in its grant, not the daemon `--endpoint` flag (removed), so a peer cannot redirect a node's tunnel; re-sign nodes with `--endpoint` to keep them reachable. The `--persistent-keepalive` flag is also removed.
 
 FEATURES:
 

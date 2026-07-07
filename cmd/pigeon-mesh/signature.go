@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	sockaddr "github.com/hashicorp/go-sockaddr/template"
 	"github.com/pigeon-as/pigeon-mesh/internal/dns"
 	"github.com/pigeon-as/pigeon-mesh/internal/mesh"
 	"github.com/pigeon-as/pigeon-mesh/internal/signature"
@@ -61,18 +62,19 @@ func runSign(args []string) int {
 	fs.Var(&routeFlags, "route", "a transit CIDR the node may advertise beyond its identity /128; repeatable")
 	var tagFlags stringList
 	fs.Var(&tagFlags, "tag", "an operator-signed tag k=v bound into the grant; repeatable. Verified at every peer, unlike a self-declared label")
+	endpoint := fs.String("endpoint", "", "this node's WireGuard endpoint as host:port, signed into the grant (required); hostnames resolve and go-sockaddr templates evaluate now")
 	fs.Parse(args)
 
 	if *sig != "" {
-		if *keyFile != "" || *pubkey != "" || *ttl != 0 || *name != "" || len(routeFlags) > 0 || len(tagFlags) > 0 {
-			fmt.Fprintln(os.Stderr, "sign: --signature only completes a --pubkey body read from stdin; it takes no --key/--pubkey/--ttl/--name/--route/--tag")
+		if *keyFile != "" || *pubkey != "" || *ttl != 0 || *name != "" || *endpoint != "" || len(routeFlags) > 0 || len(tagFlags) > 0 {
+			fmt.Fprintln(os.Stderr, "sign: --signature only completes a --pubkey body read from stdin; it takes no --key/--pubkey/--ttl/--name/--endpoint/--route/--tag")
 			return 2
 		}
 		return runAttach(*sig)
 	}
 	node := fs.Arg(0)
 	if node == "" || fs.NArg() != 1 || (*keyFile == "") == (*pubkey == "") {
-		fmt.Fprintln(os.Stderr, "usage: pigeon-mesh sign (--key <key> | --pubkey <b64>) --ttl <dur> [--name <n>] [--route <cidr> ...] [--tag <k=v> ...] <node-wg-pubkey>")
+		fmt.Fprintln(os.Stderr, "usage: pigeon-mesh sign (--key <key> | --pubkey <b64>) --ttl <dur> --endpoint <host:port> [--name <n>] [--route <cidr> ...] [--tag <k=v> ...] <node-wg-pubkey>")
 		return 2
 	}
 	if *ttl <= 0 {
@@ -82,6 +84,20 @@ func runSign(args []string) int {
 	if *name != "" && dns.SanitizeLabel(*name) == "" {
 		fmt.Fprintf(os.Stderr, "sign: --name %q is not a usable DNS label (a-z 0-9 and -, <=63 chars, no leading/trailing -)\n", *name)
 		return 2
+	}
+	if *endpoint == "" {
+		fmt.Fprintln(os.Stderr, "sign: --endpoint is required (the node's WireGuard endpoint, signed into the grant)")
+		return 2
+	}
+	endpointStr, err := sockaddr.Parse(*endpoint)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "sign: --endpoint template:", err)
+		return 1
+	}
+	ep, err := mesh.NormalizeEndpoint(endpointStr)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "sign: --endpoint:", err)
+		return 1
 	}
 	routes := make([]netip.Prefix, 0, len(routeFlags))
 	for _, r := range routeFlags {
@@ -104,6 +120,7 @@ func runSign(args []string) int {
 	}
 	now := time.Now()
 	notAfter := now.Add(*ttl).Unix()
+	grant := signature.GrantClaims{Name: *name, Endpoint: ep, Tags: tags, Routes: routes}
 
 	if *pubkey != "" {
 		pub, err := parsePubkey(*pubkey)
@@ -111,7 +128,7 @@ func runSign(args []string) int {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
-		body, err := signature.SigningBody(pub, subRaw, now.Add(-*skew).Unix(), notAfter, *name, tags, routes...)
+		body, err := signature.SigningBody(pub, subRaw, now.Add(-*skew).Unix(), notAfter, grant)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
@@ -124,7 +141,7 @@ func runSign(args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	blob, err := signature.Sign(priv, subRaw, now.Add(-*skew).Unix(), notAfter, *name, tags, routes...)
+	blob, err := signature.Sign(priv, subRaw, now.Add(-*skew).Unix(), notAfter, grant)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1

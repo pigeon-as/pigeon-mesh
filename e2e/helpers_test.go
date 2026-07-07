@@ -87,6 +87,7 @@ type node struct {
 	underlay string
 	overlay  string
 	pub      string
+	endpoint string
 }
 
 func run(t *testing.T, name string, args ...string) string {
@@ -179,7 +180,7 @@ func newPrefixNode(t *testing.T, name, underlay string, port int, bridge, prefix
 		exec.Command("ip", "link", "del", hostVeth).Run()
 	})
 
-	return &node{ns: name, underlay: underlay, overlay: overlay.String(), pub: pub}
+	return &node{ns: name, underlay: underlay, overlay: overlay.String(), pub: pub, endpoint: fmt.Sprintf("%s:%d", underlay, port)}
 }
 
 func startMesh(t *testing.T, n *node, peers []*node, port int, extraArgs ...string) *exec.Cmd {
@@ -195,7 +196,7 @@ func startMesh(t *testing.T, n *node, peers []*node, port int, extraArgs ...stri
 				routes = append(routes, netip.MustParsePrefix(strings.TrimSpace(c)))
 			}
 		}
-		extraArgs = append([]string{"--signature", grantFile(t, n.pub, routes...)}, extraArgs...)
+		extraArgs = append([]string{"--signature", grantFile(t, n.pub, n.endpoint, routes...)}, extraArgs...)
 	}
 	// Prefix mode is the only addressing model: kernel peers carry just an endpoint, and the
 	// daemon's adoptKernelPeers derives and installs each peer's overlay /128.
@@ -206,7 +207,6 @@ func startMesh(t *testing.T, n *node, peers []*node, port int, extraArgs ...stri
 
 	args := []string{"netns", "exec", n.ns, meshBin,
 		"--interface", "wg0",
-		"--endpoint", fmt.Sprintf("%s:%d", n.underlay, port),
 	}
 	args = append(args, extraArgs...)
 	cmd := exec.Command("ip", args...)

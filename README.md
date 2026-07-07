@@ -15,20 +15,21 @@ You need a WireGuard interface and an operator signing key (`pigeon-mesh keygen 
 signer.key`, once per mesh). Sign a node's key, then run it:
 
 ```sh
-pigeon-mesh sign --key signer.key --ttl 720h --name "$(hostname)" "$(wg show wg0 public-key)" > node.sig
-pigeon-mesh --interface wg0 --endpoint 203.0.113.1:51820 --signature node.sig
+pigeon-mesh sign --key signer.key --ttl 720h --name "$(hostname)" --endpoint 203.0.113.1:51820 "$(wg show wg0 public-key)" > node.sig
+pigeon-mesh --interface wg0 --signature node.sig
 ```
 
-The node derives its overlay address from its key (`--prefix`, default `fdcc::/48`)
-and trusts whoever signed its grant. It runs as systemd `Type=notify` (see
-[systemd](docs/systemd.md)). `pigeon-mesh --help` lists every flag. See the
+The node's WireGuard endpoint is signed into the grant, so a peer cannot redirect
+its tunnel. The node derives its overlay address from its key (`--prefix`, default
+`fdcc::/48`) and trusts whoever signed its grant. It runs as systemd `Type=notify`
+(see [systemd](docs/systemd.md)). `pigeon-mesh --help` lists every flag. See the
 [quickstart](docs/quickstart.md).
 
-`--endpoint` accepts [go-sockaddr](https://github.com/hashicorp/go-sockaddr)
-templates for runtime resolution:
+`sign --endpoint` accepts [go-sockaddr](https://github.com/hashicorp/go-sockaddr)
+templates, resolved when the grant is signed:
 
 ```sh
---endpoint '[{{ GetPublicInterfaces | include "type" "IPv6" | limit 1 | attr "address" }}]:51820'
+sign --endpoint '[{{ GetPublicInterfaces | include "type" "IPv6" | limit 1 | attr "address" }}]:51820'
 ```
 
 ## Initial peers
@@ -88,7 +89,7 @@ programs systemd-resolved to route the zone to it.
 
 - **Transport:** WireGuard's Noise handshake is the only encryption, and gossip rides
   inside the tunnels. The private key is never read or persisted.
-- **Daemon:** it runs the control plane only; WireGuard's kernel moves the data, so a
+- **Daemon:** it never sits in the datapath; WireGuard's kernel moves the data, so a
   compromised daemon leaks no traffic or private keys. Grants are short-lived, so a stolen
   one lapses within hours, and [revocation](#revocation) evicts it sooner.
 - **Membership:** no control plane, so addresses are key-derived (self-certifying)
@@ -188,6 +189,11 @@ gossip membership reconverges.
 
 A node's grant and advertised routes share a 512-byte gossip budget, room for roughly 15 extra routes or 35
 short tags past a typical grant; over the cap it fails to start.
+
+## Future improvements
+
+- **Signer delegation / constrained signers:** limit a sub-signer to issue grants only within given routes, names, or tags.
+- **Federation:** split a large mesh into interconnected zones so it scales past a single full mesh.
 
 ## Build
 

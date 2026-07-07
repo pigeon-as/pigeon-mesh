@@ -2,7 +2,6 @@ package mesh
 
 import (
 	"testing"
-	"time"
 
 	"github.com/shoenig/test/must"
 )
@@ -11,19 +10,15 @@ const testKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 
 func TestEncodeDecodeMeta_RoundTrip(t *testing.T) {
 	in := Peer{
-		PublicKey:           testKey,
-		Endpoint:            "203.0.113.7:51820",
-		AllowedIPs:          []string{"fd00::1/128", "fd01::/64"},
-		PersistentKeepalive: 25,
+		PublicKey:  testKey,
+		AllowedIPs: []string{"fd00::1/128", "fd01::/64"},
 	}
 	b, err := encodeMeta(in)
 	must.NoError(t, err)
 	must.Less(t, 512, len(b), must.Sprintf("meta exceeds memberlist MetaMaxSize=512: %d", len(b)))
 	var out Peer
 	must.NoError(t, decodeMeta(b, &out))
-	must.EqOp(t, in.Endpoint, out.Endpoint)
 	must.SliceLen(t, 2, out.AllowedIPs)
-	must.EqOp(t, in.PersistentKeepalive, out.PersistentKeepalive)
 }
 
 func TestCanonicalKey(t *testing.T) {
@@ -55,33 +50,14 @@ func TestWgPeer_ConfigIPv6(t *testing.T) {
 	must.SliceLen(t, 1, wp.AllowedIPs)
 }
 
-func TestWgPeer_ConfigKeepalive(t *testing.T) {
-	wp, err := wgPeer{key: testKey, endpoint: "203.0.113.7:51820", routes: []string{"fd00::1/128"}, keepalive: 25}.toWG()
-	must.NoError(t, err)
-	must.NotNil(t, wp.PersistentKeepaliveInterval)
-	must.EqOp(t, 25*time.Second, *wp.PersistentKeepaliveInterval)
-}
-
-func TestWgPeer_ConfigKeepaliveZeroClears(t *testing.T) {
-	// keepalive 0 must still set a non-nil &0 so a previously-set interval is cleared.
-	wp, err := wgPeer{key: testKey, endpoint: "203.0.113.7:51820", routes: []string{"fd00::1/128"}}.toWG()
-	must.NoError(t, err)
-	must.NotNil(t, wp.PersistentKeepaliveInterval, must.Sprint("0 keepalive is sent as &0, not nil"))
-	must.EqOp(t, time.Duration(0), *wp.PersistentKeepaliveInterval)
-}
-
 // wgPeer carries no tags; a tag-only change is invisible to equal.
 func TestWgPeerEqual(t *testing.T) {
-	base := wgPeer{key: testKey, endpoint: "203.0.113.7:51820", routes: []string{"fd00::1/128"}, keepalive: 25}
+	base := wgPeer{key: testKey, endpoint: "203.0.113.7:51820", routes: []string{"fd00::1/128"}}
 	must.True(t, base.equal(base))
 
 	withEndpoint := base
 	withEndpoint.endpoint = "203.0.113.8:51820"
 	must.False(t, base.equal(withEndpoint))
-
-	withKeepalive := base
-	withKeepalive.keepalive = 0
-	must.False(t, base.equal(withKeepalive))
 
 	withRoutes := base
 	withRoutes.routes = []string{"fd00::2/128"}

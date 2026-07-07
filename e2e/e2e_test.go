@@ -64,9 +64,8 @@ func TestRejectsMissingInterface(t *testing.T) {
 	_, pub := genKeypair(t)
 	cmd := exec.Command(meshBin,
 		"--interface", "wg-nonexistent",
-		"--endpoint", "127.0.0.1:51820",
 		"--signers", meshSignerArg,
-		"--signature", grantFile(t, pub),
+		"--signature", grantFile(t, pub, "127.0.0.1:51820"),
 	)
 	out, err := cmd.CombinedOutput()
 	must.Error(t, err, must.Sprintf("expected non-zero exit; output: %s", out))
@@ -97,10 +96,9 @@ func TestPreservesPrivateKey(t *testing.T) {
 
 	cmd := exec.Command(meshBin,
 		"--interface", iface,
-		"--endpoint", fmt.Sprintf("[%s]:%d", addr, port),
 		"--gossip-port", fmt.Sprint(gossip),
 		"--signers", meshSignerArg,
-		"--signature", grantFile(t, pub),
+		"--signature", grantFile(t, pub, fmt.Sprintf("[%s]:%d", addr, port)),
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -136,11 +134,10 @@ func TestPrefixSetsAddress(t *testing.T) {
 
 	cmd := exec.Command(meshBin,
 		"--interface", iface,
-		"--endpoint", fmt.Sprintf("[%s]:%d", want, port),
 		"--gossip-port", fmt.Sprint(gossip),
 		"--prefix", prefix,
 		"--signers", meshSignerArg,
-		"--signature", grantFile(t, pub),
+		"--signature", grantFile(t, pub, fmt.Sprintf("[%s]:%d", want, port)),
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -181,13 +178,12 @@ func TestMesh_DNS(t *testing.T) {
 
 	sub, err := base64.StdEncoding.DecodeString(pub)
 	must.NoError(t, err)
-	named, err := signature.Sign(meshSigner, sub, time.Now().Add(-time.Minute).Unix(), time.Now().Add(time.Hour).Unix(), name, nil)
+	named, err := signature.Sign(meshSigner, sub, time.Now().Add(-time.Minute).Unix(), time.Now().Add(time.Hour).Unix(), signature.GrantClaims{Name: name, Endpoint: fmt.Sprintf("[%s]:%d", want, port)})
 	must.NoError(t, err)
 	nameGrant := writeFile(t, base64.StdEncoding.EncodeToString(named))
 
 	cmd := exec.Command(meshBin,
 		"--interface", iface,
-		"--endpoint", fmt.Sprintf("[%s]:%d", want, port),
 		"--gossip-port", fmt.Sprint(gossip),
 		"--prefix", prefix,
 		"--dns", zone,
@@ -241,11 +237,10 @@ func TestMesh_RouteSelfHeal(t *testing.T) {
 
 	cmd := exec.Command(meshBin,
 		"--interface", iface,
-		"--endpoint", "203.0.113.1:"+fmt.Sprint(port),
 		"--gossip-port", fmt.Sprint(gossip),
 		"--prefix", prefix,
 		"--signers", meshSignerArg,
-		"--signature", grantFile(t, pub),
+		"--signature", grantFile(t, pub, "203.0.113.1:"+fmt.Sprint(port)),
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -404,18 +399,18 @@ func signNode(t *testing.T, signer ed25519.PrivateKey, n *node, ttl time.Duratio
 	t.Helper()
 	sub, err := base64.StdEncoding.DecodeString(n.pub)
 	must.NoError(t, err)
-	blob, err := signature.Sign(signer, sub, time.Now().Add(-time.Minute).Unix(), time.Now().Add(ttl).Unix(), "", nil)
+	blob, err := signature.Sign(signer, sub, time.Now().Add(-time.Minute).Unix(), time.Now().Add(ttl).Unix(), signature.GrantClaims{Endpoint: n.endpoint})
 	must.NoError(t, err)
 	return writeFile(t, base64.StdEncoding.EncodeToString(blob))
 }
 
 // grantFile signs pub with the package signer and returns a --signature file path. Tests that build
 // the daemon command directly (not via startMesh) use it together with meshSignerArg for --signers.
-func grantFile(t *testing.T, pub string, routes ...netip.Prefix) string {
+func grantFile(t *testing.T, pub, endpoint string, routes ...netip.Prefix) string {
 	t.Helper()
 	sub, err := base64.StdEncoding.DecodeString(pub)
 	must.NoError(t, err)
-	blob, err := signature.Sign(meshSigner, sub, time.Now().Add(-time.Minute).Unix(), time.Now().Add(time.Hour).Unix(), "", nil, routes...)
+	blob, err := signature.Sign(meshSigner, sub, time.Now().Add(-time.Minute).Unix(), time.Now().Add(time.Hour).Unix(), signature.GrantClaims{Endpoint: endpoint, Routes: routes})
 	must.NoError(t, err)
 	return writeFile(t, base64.StdEncoding.EncodeToString(blob))
 }
@@ -763,14 +758,13 @@ func TestMesh_SelfSignatureExpiryHaltsDNS(t *testing.T) {
 	sub, err := base64.StdEncoding.DecodeString(pub)
 	must.NoError(t, err)
 	// short-lived self grant: valid now, expires in ~18s.
-	blob, err := signature.Sign(signerPriv, sub, time.Now().Add(-time.Minute).Unix(), time.Now().Add(18*time.Second).Unix(), "alpha", nil)
+	blob, err := signature.Sign(signerPriv, sub, time.Now().Add(-time.Minute).Unix(), time.Now().Add(18*time.Second).Unix(), signature.GrantClaims{Name: "alpha", Endpoint: fmt.Sprintf("[%s]:%d", overlay, port)})
 	must.NoError(t, err)
 	sigFile := writeFile(t, base64.StdEncoding.EncodeToString(blob))
 
 	sock := filepath.Join(t.TempDir(), "a.sock")
 	cmd := exec.Command(meshBin,
 		"--interface", iface,
-		"--endpoint", fmt.Sprintf("[%s]:%d", overlay, port),
 		"--prefix", prefix,
 		"--gossip-port", fmt.Sprint(gossip),
 		"--dns", zone,
@@ -838,7 +832,7 @@ func TestMesh_SelfGrantRenewal(t *testing.T) {
 	sub, err := base64.StdEncoding.DecodeString(pub)
 	must.NoError(t, err)
 	grant := func(ttl time.Duration) string {
-		blob, err := signature.Sign(signerPriv, sub, time.Now().Add(-time.Minute).Unix(), time.Now().Add(ttl).Unix(), "alpha", nil)
+		blob, err := signature.Sign(signerPriv, sub, time.Now().Add(-time.Minute).Unix(), time.Now().Add(ttl).Unix(), signature.GrantClaims{Name: "alpha", Endpoint: fmt.Sprintf("[%s]:%d", overlay, port)})
 		must.NoError(t, err)
 		return base64.StdEncoding.EncodeToString(blob)
 	}
@@ -848,7 +842,6 @@ func TestMesh_SelfGrantRenewal(t *testing.T) {
 	sock := filepath.Join(t.TempDir(), "a.sock")
 	cmd := exec.Command(meshBin,
 		"--interface", iface,
-		"--endpoint", fmt.Sprintf("[%s]:%d", overlay, port),
 		"--prefix", prefix,
 		"--gossip-port", fmt.Sprint(gossip),
 		"--dns", zone,

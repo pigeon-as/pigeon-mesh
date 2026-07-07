@@ -46,7 +46,7 @@ func TestRunSign_TTLExactNoJitter(t *testing.T) {
 	keyPath, signerPub, node := writeSignerKey(t)
 	before := time.Now()
 	out := captureStdout(t, func() {
-		must.EqOp(t, 0, runSign([]string{"--key", keyPath, "--ttl", "1h", node}))
+		must.EqOp(t, 0, runSign([]string{"--key", keyPath, "--ttl", "1h", "--endpoint", "203.0.113.1:51820", node}))
 	})
 	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(out))
 	must.NoError(t, err)
@@ -70,7 +70,7 @@ func TestRunSign_RequiresTTL(t *testing.T) {
 func TestRunSign_Routes(t *testing.T) {
 	keyPath, signerPub, node := writeSignerKey(t)
 	out := captureStdout(t, func() {
-		must.EqOp(t, 0, runSign([]string{"--key", keyPath, "--ttl", "1h", "--route", "10.0.0.0/8", "--route", "192.168.0.0/16", node}))
+		must.EqOp(t, 0, runSign([]string{"--key", keyPath, "--ttl", "1h", "--route", "10.0.0.0/8", "--route", "192.168.0.0/16", "--endpoint", "203.0.113.1:51820", node}))
 	})
 	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(out))
 	must.NoError(t, err)
@@ -79,7 +79,7 @@ func TestRunSign_Routes(t *testing.T) {
 	must.Eq(t, []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8"), netip.MustParsePrefix("192.168.0.0/16")}, g.Routes, must.Sprint("the grant carries the authorized routes"))
 
 	must.EqOp(t, 2, runSign([]string{"--key", keyPath, "--route", "10.0.0.0/8", node}), must.Sprint("a grant without --ttl is refused"))
-	must.EqOp(t, 1, runSign([]string{"--key", keyPath, "--ttl", "1h", "--route", "not-a-cidr", node}), must.Sprint("a malformed --route exits 1"))
+	must.EqOp(t, 1, runSign([]string{"--key", keyPath, "--ttl", "1h", "--endpoint", "203.0.113.1:51820", "--route", "not-a-cidr", node}), must.Sprint("a malformed --route exits 1"))
 }
 
 func loadSignerPriv(t *testing.T, path string) ed25519.PrivateKey {
@@ -109,7 +109,7 @@ func TestRunSign_Detached(t *testing.T) {
 
 	// --pubkey emits the to-be-signed body; an external signer (here the raw key) signs it as-is.
 	tbs := strings.TrimSpace(captureStdout(t, func() {
-		must.EqOp(t, 0, runSign([]string{"--pubkey", pub, "--ttl", "1h", "--name", "alpha", node}))
+		must.EqOp(t, 0, runSign([]string{"--pubkey", pub, "--ttl", "1h", "--name", "alpha", "--endpoint", "203.0.113.1:51820", node}))
 	}))
 	body, err := base64.StdEncoding.DecodeString(tbs)
 	must.NoError(t, err)
@@ -135,7 +135,7 @@ func TestRunSign_Rejects(t *testing.T) {
 	must.EqOp(t, 2, runSign([]string{"--key", keyPath, "--ttl", "-1s", node}), must.Sprint("negative ttl"))
 	must.EqOp(t, 2, runSign([]string{"--key", keyPath}), must.Sprint("missing node arg"))
 	must.EqOp(t, 2, runSign([]string{node}), must.Sprint("missing --key"))
-	must.EqOp(t, 1, runSign([]string{"--key", keyPath, "--ttl", "1h", "not-base64!"}), must.Sprint("node not base64"))
+	must.EqOp(t, 1, runSign([]string{"--key", keyPath, "--ttl", "1h", "--endpoint", "203.0.113.1:51820", "not-base64!"}), must.Sprint("node not base64"))
 	short := base64.StdEncoding.EncodeToString(make([]byte, 31))
-	must.EqOp(t, 1, runSign([]string{"--key", keyPath, "--ttl", "1h", short}), must.Sprint("node wrong byte length"))
+	must.EqOp(t, 1, runSign([]string{"--key", keyPath, "--ttl", "1h", "--endpoint", "203.0.113.1:51820", short}), must.Sprint("node wrong byte length"))
 }

@@ -217,11 +217,11 @@ func newNode(t *testing.T, name, underlay string, port int, bridge, prefix strin
 
 // grantFile signs a routeless grant for pub from the package signer and returns the file path.
 // Perf nodes are identity-only, so the grant needs no routes and no mandatory expiry.
-func grantFile(t *testing.T, pub string) string {
+func grantFile(t *testing.T, pub, endpoint string) string {
 	t.Helper()
 	sub, err := base64.StdEncoding.DecodeString(pub)
 	must.NoError(t, err)
-	blob, err := signature.Sign(meshSigner, sub, time.Now().Add(-time.Minute).Unix(), time.Now().Add(6*time.Hour).Unix(), "", nil)
+	blob, err := signature.Sign(meshSigner, sub, time.Now().Add(-time.Minute).Unix(), time.Now().Add(6*time.Hour).Unix(), signature.GrantClaims{Endpoint: endpoint})
 	must.NoError(t, err)
 	return writeFile(t, base64.StdEncoding.EncodeToString(blob))
 }
@@ -236,7 +236,7 @@ func startMesh(t *testing.T, n *node, peers []*node, port int, extraArgs ...stri
 	// --signature is mandatory; provision a grant from the package signer unless the caller manages it.
 	if !slices.Contains(extraArgs, "--signature") {
 		extraArgs = append([]string{
-			"--signature", grantFile(t, n.pub),
+			"--signature", grantFile(t, n.pub, fmt.Sprintf("%s:%d", n.underlay, port)),
 			"--signers", meshSignerArg,
 			"--prefix", clusterPrefix,
 		}, extraArgs...)
@@ -247,7 +247,6 @@ func startMesh(t *testing.T, n *node, peers []*node, port int, extraArgs ...stri
 	}
 	args := []string{"netns", "exec", n.ns, meshBin,
 		"--interface", "wg0",
-		"--endpoint", fmt.Sprintf("%s:%d", n.underlay, port),
 	}
 	args = append(args, extraArgs...)
 	cmd := exec.Command("ip", args...)
