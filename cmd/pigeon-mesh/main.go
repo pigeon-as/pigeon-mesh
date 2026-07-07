@@ -15,7 +15,6 @@ import (
 	"syscall"
 	"time"
 
-	sockaddr "github.com/hashicorp/go-sockaddr/template"
 	"github.com/pigeon-as/pigeon-mesh/internal/mesh"
 	"github.com/pigeon-as/pigeon-mesh/internal/sdnotify"
 	"github.com/pigeon-as/pigeon-mesh/internal/signature"
@@ -43,11 +42,9 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
 	iface := flag.String("interface", "", "existing WireGuard interface (required); kernel peers need a /128 or /32 first in AllowedIPs")
-	endpoint := flag.String("endpoint", "", "this node's Endpoint as host:port; hostnames resolved at startup; go-sockaddr templates evaluated (required)")
 	allowedIPs := flag.String("allowed-ips", "", "additional AllowedIPs this node advertises to peers beyond its auto overlay /128, comma-separated")
 	peerPolicy := flag.String("peer-policy", "", "expr predicate accept(peer, route) bool, evaluated per advertised CIDR including a peer's identity /128 (no exemption); true installs the route, false drops it (empty accepts all). Block a peer with 'peer.key != \"K=\"', a route with 'route != \"C\"'; reachability-only is 'route == peer.address'. In scope: peer (.key/.endpoint/.address/.allowedips/.tags, where .tags are operator-signed), route, cidrSubset(outer,inner). Inline or @file (SIGHUP-reloadable)")
 	gossipPort := flag.Int("gossip-port", 7946, "port to listen on for gossip (TCP and UDP)")
-	persistentKeepalive := flag.Int("persistent-keepalive", 0, "PersistentKeepalive interval in seconds advertised to peers (0 disables)")
 	profile := flag.String("profile", "wan", "memberlist timing profile: lan, wan, or local")
 	socket := flag.String("socket", mesh.DefaultSocketPath, "path to the status query socket served for the status command; empty disables")
 	dnsZone := flag.String("dns", "", "serve AAAA records for peers' operator-signed sign --name and program systemd-resolved split-DNS for this zone (e.g. mesh.internal)")
@@ -68,14 +65,6 @@ func main() {
 		slog.Error("missing required flag --interface")
 		os.Exit(2)
 	}
-	if *endpoint == "" {
-		slog.Error("missing required flag --endpoint")
-		os.Exit(2)
-	}
-	if *persistentKeepalive < 0 || *persistentKeepalive > 65535 {
-		slog.Error("persistent-keepalive out of range", "got", *persistentKeepalive, "range", "0-65535")
-		os.Exit(2)
-	}
 	if *signatureFile == "" {
 		slog.Error("missing required flag --signature (every node presents its own operator-signed grant)")
 		os.Exit(2)
@@ -85,11 +74,6 @@ func main() {
 		os.Exit(2)
 	}
 
-	endpointStr, err := sockaddr.Parse(*endpoint)
-	if err != nil {
-		slog.Error("endpoint template", "err", err)
-		os.Exit(1)
-	}
 	wgc, err := wg.New()
 	if err != nil {
 		slog.Error("open wgctrl", "err", err)
@@ -137,12 +121,6 @@ func main() {
 		}
 	}
 
-	ep, err := mesh.NormalizeEndpoint(endpointStr)
-	if err != nil {
-		slog.Error("endpoint", "err", err)
-		os.Exit(1)
-	}
-
 	sig, err := signature.LoadSignature(*signatureFile)
 	if err != nil {
 		slog.Error("signature file", "err", err)
@@ -150,11 +128,9 @@ func main() {
 	}
 
 	self := mesh.Peer{
-		PublicKey:           publicKey.String(),
-		Endpoint:            ep,
-		AllowedIPs:          allowed,
-		PersistentKeepalive: *persistentKeepalive,
-		Signature:           sig,
+		PublicKey:  publicKey.String(),
+		AllowedIPs: allowed,
+		Signature:  sig,
 	}
 
 	// The daemon-added-peers record lives next to the socket under /run, so it clears on reboot like the
@@ -221,6 +197,10 @@ func main() {
 		slog.Error("re-sign this node's grant with --route for every route it advertises", "err", err)
 		os.Exit(1)
 	}
+	if g.Endpoint == "" {
+		slog.Error("this node's grant carries no endpoint; re-sign it with sign --endpoint <host:port>")
+		os.Exit(1)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -245,7 +225,7 @@ func main() {
 	}
 	go reloadOnSIGHUP(ctx, m, *signatureFile, signersFile, policyFile, firewallFile, *revoked)
 
-	slog.Info("pigeon-mesh up", "interface", *iface, "endpoint", ep, "address", ip.String())
+	slog.Info("pigeon-mesh up", "interface", *iface, "endpoint", g.Endpoint, "address", ip.String())
 	if err := m.Run(ctx); err != nil {
 		slog.Error("pigeon-mesh stopped", "err", err)
 		os.Exit(1)

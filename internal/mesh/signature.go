@@ -34,6 +34,11 @@ func (m *Mesh) selfTags() Tags {
 	return Tags(signature.GrantTags(*m.selfGrant.Load()))
 }
 
+// selfEndpoint reads our own signed WireGuard endpoint from the current grant.
+func (m *Mesh) selfEndpoint() string {
+	return signature.GrantEndpoint(*m.selfGrant.Load())
+}
+
 func selfSignatureError(grant []byte, now time.Time) error {
 	na := signature.NotAfter(grant)
 	if na != 0 && now.Unix() >= na {
@@ -76,6 +81,11 @@ func (m *Mesh) applySelfGrant(grant []byte) error {
 	}
 	if err := CheckSelfRoutes(m.cfg.Self.AllowedIPs, m.selfAddr, g.Routes); err != nil {
 		return fmt.Errorf("self grant: %w; re-sign with --route", err)
+	}
+	// Mirror the boot-time endpoint gate: a grant re-signed without --endpoint would be accepted here but
+	// rejected by every peer's toWG (empty endpoint), leaving the node "alive" locally yet dark to the mesh.
+	if g.Endpoint == "" {
+		return errors.New("self grant carries no endpoint; re-sign with --endpoint <host:port>")
 	}
 	self := m.cfg.Self
 	self.Signature = grant

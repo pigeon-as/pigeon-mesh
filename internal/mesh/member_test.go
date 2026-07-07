@@ -71,7 +71,7 @@ func signedFixture(t *testing.T, now time.Time, routes ...netip.Prefix) (signers
 	priv, pub, sub := mkSig(t)
 	derived, err := DeriveAddr(testKey, testPrefix)
 	must.NoError(t, err)
-	grant, err = signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), "", nil, routes...)
+	grant, err = signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), signature.GrantClaims{Endpoint: "203.0.113.1:51820", Routes: routes})
 	must.NoError(t, err)
 	return []ed25519.PublicKey{pub}, HostRoute(derived).String(), grant
 }
@@ -85,7 +85,7 @@ func TestReevaluate_StricterPolicyEvictsRoute(t *testing.T) {
 	m.cfg = Config{Prefix: testPrefix}
 	storeConfig(m, signers, pol)
 	m.members[testKey] = member{
-		peer:   Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute, "10.0.0.0/8"}, Signature: grant},
+		peer:   Peer{PublicKey: testKey, AllowedIPs: []string{ownRoute, "10.0.0.0/8"}, Signature: grant},
 		wgPeer: wgPeer{key: testKey, endpoint: "203.0.113.1:51820", routes: []string{ownRoute, "10.0.0.0/8"}},
 		meta:   []byte("m"),
 	}
@@ -106,7 +106,7 @@ func TestReevaluate_BlockPeerEvictsAll(t *testing.T) {
 	m.cfg = Config{Prefix: testPrefix}
 	storeConfig(m, signers, pol)
 	m.members[testKey] = member{
-		peer:   Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute, "10.0.0.0/8"}, Signature: grant},
+		peer:   Peer{PublicKey: testKey, AllowedIPs: []string{ownRoute, "10.0.0.0/8"}, Signature: grant},
 		wgPeer: wgPeer{key: testKey, endpoint: "203.0.113.1:51820", routes: []string{ownRoute, "10.0.0.0/8"}},
 		meta:   []byte("m"),
 	}
@@ -125,7 +125,7 @@ func TestReevaluate_LooserPolicyRestoresRoute(t *testing.T) {
 	m.cfg = Config{Prefix: testPrefix}
 	storeConfig(m, signers, nil)
 	m.members[testKey] = member{
-		peer:          Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute, "10.0.0.0/8"}, Signature: grant},
+		peer:          Peer{PublicKey: testKey, AllowedIPs: []string{ownRoute, "10.0.0.0/8"}, Signature: grant},
 		wgPeer:        wgPeer{key: testKey, endpoint: "203.0.113.1:51820", routes: []string{ownRoute}},
 		refusedRoutes: []string{"10.0.0.0/8"},
 		meta:          []byte("m"),
@@ -145,7 +145,7 @@ func TestReevaluate_NamePropagatesOnReadmit(t *testing.T) {
 	derived, err := DeriveAddr(testKey, testPrefix)
 	must.NoError(t, err)
 	ownRoute := HostRoute(derived).String()
-	grant, err := signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), "web01", nil)
+	grant, err := signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), signature.GrantClaims{Name: "web01", Endpoint: "203.0.113.1:51820"})
 	must.NoError(t, err)
 
 	m := newTestMesh()
@@ -153,7 +153,7 @@ func TestReevaluate_NamePropagatesOnReadmit(t *testing.T) {
 	storeConfig(m, []ed25519.PublicKey{pub}, nil)
 	// Stored as if previously rejected: no name, no routes, an admit error.
 	m.members[testKey] = member{
-		peer:     Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute}, Signature: grant},
+		peer:     Peer{PublicKey: testKey, AllowedIPs: []string{ownRoute}, Signature: grant},
 		admitErr: errors.New("unknown signer"),
 		meta:     []byte("m"),
 	}
@@ -167,14 +167,14 @@ func TestReevaluate_RejectReasonRefreshes(t *testing.T) {
 	// Stays rejected across a reload but for a DIFFERENT reason: must show the fresh reason.
 	now := time.Now()
 	priv, pub, sub := mkSig(t)
-	grant, err := signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), "", nil)
+	grant, err := signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), signature.GrantClaims{Endpoint: "203.0.113.1:51820"})
 	must.NoError(t, err)
 	m := newTestMesh()
 	m.cfg = Config{Prefix: testPrefix}
 	storeConfig(m, []ed25519.PublicKey{pub}, nil)
 	// signed-valid but advertises a non-derived /128: re-admission rejects for address mismatch, not the seeded "unknown signer".
 	m.members[testKey] = member{
-		peer:     Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{"fdcc::dead/128"}, Signature: grant},
+		peer:     Peer{PublicKey: testKey, AllowedIPs: []string{"fdcc::dead/128"}, Signature: grant},
 		admitErr: errors.New("unknown signer"),
 		meta:     []byte("m"),
 	}
@@ -192,7 +192,7 @@ func TestReevaluate_RejectClearsUnauthorizedRoutes(t *testing.T) {
 	m.cfg = Config{Prefix: testPrefix}
 	storeConfig(m, signers, nil)
 	m.members[testKey] = member{
-		peer:               Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute, "10.0.0.0/8"}, Signature: grant},
+		peer:               Peer{PublicKey: testKey, AllowedIPs: []string{ownRoute, "10.0.0.0/8"}, Signature: grant},
 		wgPeer:             wgPeer{key: testKey, endpoint: "203.0.113.1:51820", routes: []string{ownRoute}},
 		unauthorizedRoutes: []string{"10.0.0.0/8"},
 		meta:               []byte("m"),
@@ -212,7 +212,7 @@ func TestReevaluate_NoopWhenConsistent(t *testing.T) {
 	m.cfg = Config{Prefix: testPrefix}
 	storeConfig(m, signers, nil)
 	in := member{
-		peer:   Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute}, Signature: grant},
+		peer:   Peer{PublicKey: testKey, AllowedIPs: []string{ownRoute}, Signature: grant},
 		wgPeer: wgPeer{key: testKey, endpoint: "203.0.113.1:51820", routes: []string{ownRoute}},
 		meta:   []byte("m"),
 	}
@@ -223,29 +223,38 @@ func TestReevaluate_NoopWhenConsistent(t *testing.T) {
 	must.False(t, reconcileTriggered(m.reconcileCh), must.Sprint("no change => no reconcile churn"))
 }
 
-func TestSetMember_RoamReresolvesEndpoint(t *testing.T) {
+func TestSetMember_ReresolvesChangedEndpoint(t *testing.T) {
 	now := time.Now()
-	signers, ownRoute, grant := signedFixture(t, now)
+	priv, pub, sub := mkSig(t)
+	derived, err := DeriveAddr(testKey, testPrefix)
+	must.NoError(t, err)
+	ownRoute := HostRoute(derived).String()
+	signAt := func(endpoint string) []byte {
+		g, err := signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), signature.GrantClaims{Endpoint: endpoint})
+		must.NoError(t, err)
+		return g
+	}
 	m := newTestMesh()
 	m.cfg = Config{Prefix: testPrefix}
-	storeConfig(m, signers, nil)
+	storeConfig(m, []ed25519.PublicKey{pub}, nil)
 
-	advertise := func(endpoint string) *memberlist.Node {
-		meta, err := encodeMeta(Peer{Endpoint: endpoint, AllowedIPs: []string{ownRoute}, Signature: grant})
+	advertise := func(grant []byte) *memberlist.Node {
+		meta, err := encodeMeta(Peer{AllowedIPs: []string{ownRoute}, Signature: grant})
 		must.NoError(t, err)
 		return &memberlist.Node{Name: testKey, Meta: meta}
 	}
 
-	m.setMember(advertise("203.0.113.1:51820"))
+	m.setMember(advertise(signAt("203.0.113.1:51820")))
 	must.EqOp(t, "203.0.113.1:51820", m.members[testKey].wgPeer.endpoint)
 	must.True(t, reconcileTriggered(m.reconcileCh), must.Sprint("a first advertisement triggers a reconcile"))
 
-	// A roam changes the meta, so unchanged() must not suppress it: the member re-resolves with the new endpoint.
-	m.setMember(advertise("203.0.113.2:51820"))
-	must.EqOp(t, "203.0.113.2:51820", m.members[testKey].wgPeer.endpoint, must.Sprint("a roamed endpoint is re-resolved into the kernel config"))
-	must.True(t, reconcileTriggered(m.reconcileCh), must.Sprint("an endpoint roam triggers a reconcile"))
+	// A re-signed grant carrying a new endpoint changes the meta, so the member re-resolves with it.
+	roamed := signAt("203.0.113.2:51820")
+	m.setMember(advertise(roamed))
+	must.EqOp(t, "203.0.113.2:51820", m.members[testKey].wgPeer.endpoint, must.Sprint("a re-signed endpoint is re-resolved into the kernel config"))
+	must.True(t, reconcileTriggered(m.reconcileCh), must.Sprint("an endpoint change triggers a reconcile"))
 
-	m.setMember(advertise("203.0.113.2:51820"))
+	m.setMember(advertise(roamed))
 	must.False(t, reconcileTriggered(m.reconcileCh), must.Sprint("an unchanged advertisement is skipped"))
 }
 
@@ -256,7 +265,7 @@ func TestSetMember_ReannounceClearsFailed(t *testing.T) {
 	m.cfg = Config{Prefix: testPrefix}
 	storeConfig(m, signers, nil)
 
-	meta, err := encodeMeta(Peer{Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute}, Signature: grant})
+	meta, err := encodeMeta(Peer{AllowedIPs: []string{ownRoute}, Signature: grant})
 	must.NoError(t, err)
 	node := &memberlist.Node{Name: testKey, Meta: meta}
 
@@ -283,7 +292,7 @@ func TestExpireGrants(t *testing.T) {
 	m.members["accepted-valid"] = member{grantExpiry: now.Add(time.Hour).Unix()}
 	m.members["accepted-expired"] = member{
 		addr:          derived,
-		peer:          Peer{Endpoint: "203.0.113.1:51820"},
+		endpoint:      "203.0.113.1:51820",
 		grantExpiry:   now.Add(-time.Second).Unix(),
 		wgPeer:        wgPeer{key: "accepted-expired", routes: []string{identity, "10.0.0.0/8"}},
 		refusedRoutes: []string{"192.168.0.0/16"}, unauthorizedRoutes: []string{"10.0.0.0/8"},
@@ -306,7 +315,7 @@ func TestExpireGrants(t *testing.T) {
 func TestCheckSelfExpiry(t *testing.T) {
 	priv, pub, sub := mkSig(t)
 	now := time.Now()
-	blob, err := signature.Sign(priv, sub, now.Add(-time.Hour).Unix(), now.Add(-time.Minute).Unix(), "", nil)
+	blob, err := signature.Sign(priv, sub, now.Add(-time.Hour).Unix(), now.Add(-time.Minute).Unix(), signature.GrantClaims{Endpoint: "203.0.113.1:51820"})
 	must.NoError(t, err)
 	m := &Mesh{cfg: Config{Self: Peer{PublicKey: "self", Signature: blob}}}
 	storeConfig(m, []ed25519.PublicKey{pub}, nil)
@@ -316,7 +325,7 @@ func TestCheckSelfExpiry(t *testing.T) {
 	m.checkSelfExpiry(now)
 	must.True(t, m.selfExpired.Load(), must.Sprint("an expired own signature halts self participation"))
 
-	valid, err := signature.Sign(priv, sub, now.Add(-time.Hour).Unix(), now.Add(time.Hour).Unix(), "", nil)
+	valid, err := signature.Sign(priv, sub, now.Add(-time.Hour).Unix(), now.Add(time.Hour).Unix(), signature.GrantClaims{Endpoint: "203.0.113.1:51820"})
 	must.NoError(t, err)
 	ok := &Mesh{cfg: Config{Self: Peer{PublicKey: "self", Signature: valid}}}
 	storeConfig(ok, []ed25519.PublicKey{pub}, nil)
@@ -343,12 +352,15 @@ func TestAdmit(t *testing.T) {
 	signers := []ed25519.PublicKey{pub}
 	now := time.Unix(1_000_000, 0)
 	sign := func(notBefore, notAfter int64) []byte {
-		blob, err := signature.Sign(priv, sub, notBefore, notAfter, "", nil)
+		blob, err := signature.Sign(priv, sub, notBefore, notAfter, signature.GrantClaims{Endpoint: "203.0.113.1:51820"})
 		must.NoError(t, err)
 		return blob
 	}
 	validSig := sign(now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix())
 	expiredSig := sign(now.Add(-time.Hour).Unix(), now.Add(-time.Minute).Unix())
+	// A grant whose signed endpoint is not a host:port: valid signature, unusable kernel config.
+	badEndpointSig, err := signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(time.Hour).Unix(), signature.GrantClaims{Endpoint: "not-a-host-port"})
+	must.NoError(t, err)
 
 	otherPub, _, err := ed25519.GenerateKey(nil)
 	must.NoError(t, err)
@@ -357,7 +369,7 @@ func TestAdmit(t *testing.T) {
 		if len(routes) == 0 {
 			routes = []string{ownRoute}
 		}
-		return Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: routes, Signature: sig}
+		return Peer{PublicKey: testKey, AllowedIPs: routes, Signature: sig}
 	}
 
 	cases := []struct {
@@ -372,7 +384,7 @@ func TestAdmit(t *testing.T) {
 		{name: "unsigned peer rejected", signers: signers, peer: prefixPeer(nil), wantReject: "no signature"},
 		{name: "unknown signer rejected", signers: []ed25519.PublicKey{otherPub}, peer: prefixPeer(validSig), wantReject: "unknown signer"},
 		{name: "non-derived route rejected", signers: signers, peer: prefixPeer(validSig, "fdcc::dead/128"), wantReject: "derives"},
-		{name: "malformed endpoint rejected", signers: signers, peer: Peer{PublicKey: testKey, AllowedIPs: []string{ownRoute}, Signature: validSig}, wantReject: "invalid peer config"},
+		{name: "malformed endpoint rejected", signers: signers, peer: prefixPeer(badEndpointSig), wantReject: "invalid peer config"},
 	}
 
 	for _, tc := range cases {
@@ -402,7 +414,7 @@ func TestAdmit_PolicyFiltersRoutes(t *testing.T) {
 	signers, ownRoute, grant := signedFixture(t, now, netip.MustParsePrefix("10.0.0.0/8"), netip.MustParsePrefix("192.168.0.0/16"))
 	pol, err := ParsePeerPolicy(`route == peer.address || cidrSubset("10.0.0.0/8", route)`)
 	must.NoError(t, err)
-	p := Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute, "10.1.0.0/16", "192.168.0.0/16"}, Signature: grant}
+	p := Peer{PublicKey: testKey, AllowedIPs: []string{ownRoute, "10.1.0.0/16", "192.168.0.0/16"}, Signature: grant}
 
 	r := admit(member{}, p, testKey, &signers, nil, testPrefix, pol, now)
 	must.NoError(t, r.admitErr)
@@ -420,7 +432,7 @@ func TestAdmit_AuthorizesRoutes(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
 	// grant authorizes only 10.0.0.0/8
 	signers, ownRoute, grant := signedFixture(t, now, netip.MustParsePrefix("10.0.0.0/8"))
-	p := Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute, "10.1.0.0/16", "192.168.0.0/16"}, Signature: grant}
+	p := Peer{PublicKey: testKey, AllowedIPs: []string{ownRoute, "10.1.0.0/16", "192.168.0.0/16"}, Signature: grant}
 
 	r := admit(member{}, p, testKey, &signers, nil, testPrefix, nil, now)
 	must.True(t, r.admitted(), must.Sprint("an unauthorized extra route does not reject the peer"))
@@ -432,7 +444,7 @@ func TestAdmit_BroadGrantAuthorizesSubprefixes(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
 	// a 0.0.0.0/0 grant authorizes the default and any sub-prefix by containment.
 	signers, ownRoute, grant := signedFixture(t, now, netip.MustParsePrefix("0.0.0.0/0"))
-	p := Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute, "0.0.0.0/0", "10.0.0.0/8"}, Signature: grant}
+	p := Peer{PublicKey: testKey, AllowedIPs: []string{ownRoute, "0.0.0.0/0", "10.0.0.0/8"}, Signature: grant}
 	r := admit(member{}, p, testKey, &signers, nil, testPrefix, nil, now)
 	must.Eq(t, []string{ownRoute, "0.0.0.0/0", "10.0.0.0/8"}, r.wgPeer.routes, must.Sprint("a default-route grant authorizes the default and any sub-prefix"))
 	must.SliceEmpty(t, r.unauthorizedRoutes)
@@ -446,11 +458,11 @@ func TestNodeMetaHeadroom(t *testing.T) {
 	priv, _, sub := mkSig(t)
 	// A grant with a hostname-length name and two authorized transit routes (identity + an exit).
 	grant, err := signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(720*time.Hour).Unix(),
-		"node-worstcase.example.internal", nil, netip.MustParsePrefix("10.0.0.0/16"), netip.MustParsePrefix("0.0.0.0/0"))
+		signature.GrantClaims{Name: "node-worstcase.example.internal", Endpoint: "203.0.113.1:51820", Routes: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/16"), netip.MustParsePrefix("0.0.0.0/0")}})
 	must.NoError(t, err)
 	derived, err := DeriveAddr(testKey, testPrefix)
 	must.NoError(t, err)
-	base := Peer{Endpoint: "203.0.113.1:51820", AllowedIPs: []string{HostRoute(derived).String()}, Signature: grant}
+	base := Peer{AllowedIPs: []string{HostRoute(derived).String()}, Signature: grant}
 	bmeta, err := encodeMeta(base)
 	must.NoError(t, err)
 	t.Logf("baseline NodeMeta (named 2-route grant + identity /128) = %d / %d bytes", len(bmeta), memberlist.MetaMaxSize)
@@ -484,7 +496,7 @@ func TestNodeMetaHeadroom(t *testing.T) {
 			tagMap[fmt.Sprintf("k%d", i)] = "v"
 		}
 		g, err := signature.Sign(priv, sub, now.Add(-time.Minute).Unix(), now.Add(720*time.Hour).Unix(),
-			"node-worstcase.example.internal", tagMap, netip.MustParsePrefix("10.0.0.0/16"), netip.MustParsePrefix("0.0.0.0/0"))
+			signature.GrantClaims{Name: "node-worstcase.example.internal", Endpoint: "203.0.113.1:51820", Tags: tagMap, Routes: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/16"), netip.MustParsePrefix("0.0.0.0/0")}})
 		must.NoError(t, err)
 		p := base
 		p.Signature = g
@@ -540,7 +552,7 @@ func TestSetMemberDropsKernelPeers(t *testing.T) {
 	storeConfig(m, signers, nil)
 	m.kernelPeers[testKey] = true
 
-	meta, err := encodeMeta(Peer{Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute}, Signature: grant})
+	meta, err := encodeMeta(Peer{AllowedIPs: []string{ownRoute}, Signature: grant})
 	must.NoError(t, err)
 	m.setMember(&memberlist.Node{Name: testKey, Meta: meta})
 

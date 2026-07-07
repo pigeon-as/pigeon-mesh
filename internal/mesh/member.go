@@ -30,6 +30,7 @@ type member struct {
 	unauthorizedRoutes []string
 	grantExpiry        int64                // unix seconds; 0 = none
 	name               string               // operator-signed DNS name from the grant
+	endpoint           string               // operator-signed WireGuard endpoint from the grant
 	tags               Tags                 // operator-signed tags from the grant
 	grantRoutes        []netip.Prefix       // authorized transit routes from the verified grant, cached for reuse
 	verifiedUnder      *[]ed25519.PublicKey // signer set the grant was verified under; nil until verified
@@ -63,13 +64,13 @@ func admit(prev member, p Peer, name string, signersPtr *[]ed25519.PublicKey, re
 	}
 	// Authorize against the grant before policy; unauthorized routes drop but the peer stays admitted.
 	authorized, unauthorized := authorizeRoutes(p.AllowedIPs, addr, grant.Routes)
-	pc := wgPeer{key: name, endpoint: p.Endpoint, routes: authorized, keepalive: p.PersistentKeepalive}
+	pc := wgPeer{key: name, endpoint: grant.Endpoint, routes: authorized}
 	if _, err := pc.toWG(); err != nil {
 		return member{admitErr: fmt.Errorf("invalid peer config: %w", err)}
 	}
-	kept, refused := policyFilter(p, grant.Tags, authorized, addr, policy)
+	kept, refused := policyFilter(p, grant.Tags, grant.Endpoint, authorized, addr, policy)
 	pc.routes = kept
-	return member{addr: addr, wgPeer: pc, refusedRoutes: refused, unauthorizedRoutes: unauthorized, grantExpiry: grant.NotAfter, name: grant.Name, tags: grant.Tags, grantRoutes: grant.Routes, verifiedUnder: signersPtr}
+	return member{addr: addr, wgPeer: pc, refusedRoutes: refused, unauthorizedRoutes: unauthorized, grantExpiry: grant.NotAfter, name: grant.Name, endpoint: grant.Endpoint, tags: grant.Tags, grantRoutes: grant.Routes, verifiedUnder: signersPtr}
 }
 
 // reuseGrant returns prev's verified grant when signer set and signature are unchanged; only expiry (the one
@@ -81,7 +82,7 @@ func reuseGrant(prev member, sig []byte, signersPtr *[]ed25519.PublicKey, now ti
 	if prev.grantExpiry != 0 && now.Unix() >= prev.grantExpiry {
 		return signature.Grant{}, false // expired since last verify; re-verify to produce the proper error
 	}
-	return signature.Grant{NotAfter: prev.grantExpiry, Name: prev.name, Tags: prev.tags, Routes: prev.grantRoutes}, true
+	return signature.Grant{NotAfter: prev.grantExpiry, Name: prev.name, Tags: prev.tags, Endpoint: prev.endpoint, Routes: prev.grantRoutes}, true
 }
 
 // reachableOnly is the soft-expiry verdict: the grant lapsed but the address is self-certified, so keep the
@@ -92,10 +93,12 @@ func reachableOnly(name string, p Peer, prefix netip.Prefix) member {
 	if err != nil {
 		return member{admitErr: err} // cannot even certify the identity: install nothing
 	}
+	ep := signature.GrantEndpoint(p.Signature) // grant is expired but still signed, so its endpoint stands
 	return member{
 		admitErr: errSignatureExpired,
 		addr:     addr,
-		wgPeer:   wgPeer{key: name, endpoint: p.Endpoint, routes: []string{HostRoute(addr).String()}, keepalive: p.PersistentKeepalive},
+		endpoint: ep,
+		wgPeer:   wgPeer{key: name, endpoint: ep, routes: []string{HostRoute(addr).String()}},
 	}
 }
 
@@ -256,7 +259,7 @@ func (m *Mesh) reevaluate(now time.Time) {
 		if !e.wgPeer.equal(nv.wgPeer) {
 			changed = true
 		}
-		e.addr, e.wgPeer, e.admitErr, e.refusedRoutes, e.unauthorizedRoutes, e.grantExpiry, e.name, e.tags, e.grantRoutes, e.verifiedUnder = nv.addr, nv.wgPeer, nv.admitErr, nv.refusedRoutes, nv.unauthorizedRoutes, nv.grantExpiry, nv.name, nv.tags, nv.grantRoutes, nv.verifiedUnder
+		e.addr, e.wgPeer, e.admitErr, e.refusedRoutes, e.unauthorizedRoutes, e.grantExpiry, e.name, e.endpoint, e.tags, e.grantRoutes, e.verifiedUnder = nv.addr, nv.wgPeer, nv.admitErr, nv.refusedRoutes, nv.unauthorizedRoutes, nv.grantExpiry, nv.name, nv.endpoint, nv.tags, nv.grantRoutes, nv.verifiedUnder
 		m.members[name] = e
 	}
 	m.mu.Unlock()
@@ -291,10 +294,13 @@ func (m *Mesh) expireGrants(now time.Time) (changed bool) {
 		if !e.admitted() || e.grantExpiry == 0 || ts < e.grantExpiry {
 			continue
 		}
-		// Soft expiry: keep the identity /128, drop grant-authorized transit; a renewal re-admits with full routes.
+		// Soft expiry: keep the identity /128, drop grant-authorized transit; a renewal re-admits with full
+		// routes. Clear the grant-derived fields so this matches reachableOnly (the admit-path soft expiry),
+		// which leaves an expired peer with no name/tags/expiry in status and DNS.
 		e.admitErr = errSignatureExpired
-		e.wgPeer = wgPeer{key: name, endpoint: e.peer.Endpoint, routes: []string{HostRoute(e.addr).String()}, keepalive: e.peer.PersistentKeepalive}
+		e.wgPeer = wgPeer{key: name, endpoint: e.endpoint, routes: []string{HostRoute(e.addr).String()}}
 		e.refusedRoutes, e.unauthorizedRoutes = nil, nil
+		e.name, e.tags, e.grantExpiry, e.grantRoutes = "", nil, 0, nil
 		m.members[name] = e
 		slog.Warn("peer grant expired; keeping identity /128, dropping transit routes", "pubkey", name)
 		changed = true

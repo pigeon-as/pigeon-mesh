@@ -28,6 +28,7 @@ type claims struct {
 	Routes    [][]byte          `cbor:"6,keyasint,omitempty"` // transit CIDRs as Prefix.MarshalBinary
 	Name      string            `cbor:"7,keyasint,omitempty"` // operator-attested DNS name
 	Tags      map[string]string `cbor:"8,keyasint,omitempty"` // operator-attested k=v labels
+	Endpoint  string            `cbor:"9,keyasint,omitempty"` // operator-attested WireGuard endpoint host:port
 }
 
 type Grant struct {
@@ -36,6 +37,30 @@ type Grant struct {
 	Routes   []netip.Prefix
 	Name     string
 	Tags     map[string]string
+	Endpoint string
+}
+
+// GrantClaims are the operator-attested attributes bound into a grant: what the signer says about the node.
+// Bundling them (rather than passing each positionally) keeps Sign and SigningBody in step and names the
+// same-typed Name/Endpoint at the call site so they cannot be transposed silently.
+type GrantClaims struct {
+	Name     string
+	Endpoint string
+	Tags     map[string]string
+	Routes   []netip.Prefix
+}
+
+// build assembles the CBOR claims from the attested attributes plus the subject/validity envelope. Ctx and
+// KeyID are left for the signer (Sign fills them from its key; SigningBody from the external pubkey).
+func (g GrantClaims) build(sub []byte, notBefore, notAfter int64) (claims, error) {
+	if notAfter == 0 {
+		return claims{}, errors.New("a grant must carry an expiry")
+	}
+	encRoutes, err := encodeRoutes(g.Routes)
+	if err != nil {
+		return claims{}, err
+	}
+	return claims{Sub: sub, NotBefore: notBefore, NotAfter: notAfter, Routes: encRoutes, Name: g.Name, Tags: g.Tags, Endpoint: g.Endpoint}, nil
 }
 
 type signedClaims struct {
@@ -69,29 +94,25 @@ func mustDec() cbor.DecMode {
 	return dm
 }
 
-// Every grant carries an expiry so passive de-authorization is bounded without an explicit denylist entry.
-func Sign(key ed25519.PrivateKey, sub []byte, notBefore, notAfter int64, name string, tags map[string]string, routes ...netip.Prefix) ([]byte, error) {
-	if notAfter == 0 {
-		return nil, errors.New("a grant must carry an expiry")
-	}
-	encRoutes, err := encodeRoutes(routes)
+// Every grant carries an expiry: transit authorization (routes, tags, name) lapses on its own without a
+// denylist entry, though the self-certified /128 itself persists until the key is on --revoked.
+func Sign(key ed25519.PrivateKey, sub []byte, notBefore, notAfter int64, g GrantClaims) ([]byte, error) {
+	c, err := g.build(sub, notBefore, notAfter)
 	if err != nil {
 		return nil, err
 	}
-	return signClaims(key, claims{Sub: sub, NotBefore: notBefore, NotAfter: notAfter, Routes: encRoutes, Name: name, Tags: tags}, domain)
+	return signClaims(key, c, domain)
 }
 
 // SigningBody builds a grant's to-be-signed body for an external signer (e.g. Vault Transit) holding pubkey.
 // Sign it as-is with pure ed25519 and pass to Attach, so the operator key never leaves the vault.
-func SigningBody(pubkey ed25519.PublicKey, sub []byte, notBefore, notAfter int64, name string, tags map[string]string, routes ...netip.Prefix) ([]byte, error) {
-	if notAfter == 0 {
-		return nil, errors.New("a grant must carry an expiry")
-	}
-	encRoutes, err := encodeRoutes(routes)
+func SigningBody(pubkey ed25519.PublicKey, sub []byte, notBefore, notAfter int64, g GrantClaims) ([]byte, error) {
+	c, err := g.build(sub, notBefore, notAfter)
 	if err != nil {
 		return nil, err
 	}
-	c := claims{Ctx: domain, Sub: sub, KeyID: pubkey, NotBefore: notBefore, NotAfter: notAfter, Routes: encRoutes, Name: name, Tags: tags}
+	c.Ctx = domain
+	c.KeyID = pubkey
 	return enc.Marshal(c)
 }
 
@@ -203,7 +224,7 @@ func Verify(signers []ed25519.PublicKey, pubkey string, blob []byte, now time.Ti
 	if err != nil {
 		return Grant{}, err
 	}
-	return Grant{Sub: c.Sub, NotAfter: c.NotAfter, Routes: routes, Name: c.Name, Tags: c.Tags}, nil
+	return Grant{Sub: c.Sub, NotAfter: c.NotAfter, Routes: routes, Name: c.Name, Tags: c.Tags, Endpoint: c.Endpoint}, nil
 }
 
 // verifySig checks domain, signer-set membership, and signature, returning the authenticated claims.
@@ -266,6 +287,17 @@ func GrantTags(blob []byte) map[string]string {
 		return nil
 	}
 	return s.Claims.Tags
+}
+
+// GrantEndpoint returns the grant's signed WireGuard endpoint; "" if absent or unparseable. Unverified
+// accessor: a node reads its own already-verified grant, and the soft-expiry path reads it to keep the
+// tunnel target while the (still cryptographically valid) grant is past its expiry.
+func GrantEndpoint(blob []byte) string {
+	s, err := parse(blob)
+	if err != nil {
+		return ""
+	}
+	return s.Claims.Endpoint
 }
 
 // The grant's claimed (unverified) signer key; caller must still Verify.

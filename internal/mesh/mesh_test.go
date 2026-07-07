@@ -45,7 +45,6 @@ func TestMesh_New_OversizedMeta(t *testing.T) {
 		BindAddr: "fd00::1",
 		Self: Peer{
 			PublicKey:  testKey,
-			Endpoint:   "203.0.113.1:51820",
 			AllowedIPs: manyAllowed,
 		},
 	})
@@ -56,7 +55,6 @@ func encodedMeta(t *testing.T, pubkey, hostRouteCIDR string) []byte {
 	t.Helper()
 	meta, err := encodeMeta(Peer{
 		PublicKey:  pubkey,
-		Endpoint:   "203.0.113.1:51820",
 		AllowedIPs: []string{hostRouteCIDR},
 	})
 	must.NoError(t, err)
@@ -85,7 +83,7 @@ func TestReloadPolicyFromFile(t *testing.T) {
 	m.cfg = Config{Prefix: testPrefix}
 	storeConfig(m, signers, nil)
 	m.members[testKey] = member{
-		peer:   Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute, "10.0.0.0/8"}, Signature: grant},
+		peer:   Peer{PublicKey: testKey, AllowedIPs: []string{ownRoute, "10.0.0.0/8"}, Signature: grant},
 		wgPeer: wgPeer{key: testKey, endpoint: "203.0.113.1:51820", routes: []string{ownRoute, "10.0.0.0/8"}},
 		meta:   []byte("m"),
 	}

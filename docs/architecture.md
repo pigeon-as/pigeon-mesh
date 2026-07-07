@@ -16,7 +16,7 @@ An operator signs a grant (ed25519) that binds a node's key with a mandatory exp
 
 ## Gossip and membership
 
-Peers discover each other over HashiCorp memberlist running inside the WireGuard tunnels, seeded from the existing kernel peers. Each node gossips its endpoint, AllowedIPs, keepalive, and signed grant (which carries its name, tags, and authorized routes); the gossip layer is hidden, with only `--gossip-port` and `--profile` (lan/wan/local timing) exposed.
+Peers discover each other over HashiCorp memberlist running inside the WireGuard tunnels, seeded from the existing kernel peers. Each node gossips its AllowedIPs and signed grant (which carries its endpoint, name, tags, and authorized routes); the gossip layer is hidden, with only `--gossip-port` and `--profile` (lan/wan/local timing) exposed.
 
 ## Route programming
 
@@ -38,6 +38,10 @@ A peer that fails is held for `--reconnect-timeout` (default 10m) before it is r
 
 A dedicated `ip6` nftables table, on by default, scopes the gossip port to the wg device. `--firewall-rules` adds an expr returning `allow(proto, ports, cond?)` rules: traffic to this node's overlay address is default-deny except what the rules admit, compiled per admitted peer at reconcile. ICMPv6, gossip, and established flows stay open; `--disable-firewall` removes the table.
 
+## Expiry
+
+Expiry lapses only what the operator granted: past a grant's `NotAfter`, a node's routes, name, and tags stop being honored, but its self-certified `/128` persists, so the tunnel stays up and the node re-admits itself on renewal. Expiry lapses authorization; `--revoked` evicts the node. A full time-based cut is both.
+
 ## Revocation
 
 `--revoked` is a denylist file of node public keys, one per line. A listed key is denied at admission and a `SIGHUP` reload evicts an already-admitted peer; remove the line and `SIGHUP` to re-admit.
@@ -56,8 +60,12 @@ A node's name and tags are operator-signed in its grant (`sign --name`, `sign --
 
 ## Operating
 
-The daemon adopts an existing WireGuard interface (`--interface`) that already holds a private key, and takes its endpoint (`--endpoint`) and its own grant (`--signature`); it assigns the overlay address itself. `status` and `leave` talk to the running daemon over an owner-only Unix socket (`--socket`).
+The daemon adopts an existing WireGuard interface (`--interface`) that already holds a private key, and takes its own grant (`--signature`), which carries its WireGuard endpoint; it assigns the overlay address itself. `status` and `leave` talk to the running daemon over an owner-only Unix socket (`--socket`).
 
 ## Reload
 
 SIGHUP reloads the node's own grant for hitless renewal, with no tunnel teardown, along with the `--revoked` file and the `@file` forms of `--signers`, `--peer-policy`, and `--firewall-rules`.
+
+## Threat model
+
+Trust rests on the offline operator key and the WireGuard transport; the daemon never sits in the datapath. Only admitted nodes reach the gossip layer, and a member cannot forge another's grant or describe another node (meta is self-reported). It can still relay SWIM suspicion about a peer, but that is bounded by memberlist's incarnation refutation and the `--reconnect-timeout` grace that holds a failed peer's tunnel rather than tearing it down, so the worst case is membership-status churn, not eviction. A compromised key is handled by expiry and `--revoked`.

@@ -49,7 +49,7 @@ BindsTo=sys-subsystem-net-devices-wg0.device
 [Service]
 Type=notify
 LoadCredentialEncrypted=pigeon-grant
-ExecStart=/usr/local/bin/pigeon-mesh --interface wg0 --signature %d/pigeon-grant --endpoint '[{{ GetPublicInterfaces | include "type" "IPv6" | limit 1 | attr "address" }}]:51820'
+ExecStart=/usr/local/bin/pigeon-mesh --interface wg0 --signature %d/pigeon-grant
 Restart=on-failure
 WatchdogSec=30
 
@@ -84,7 +84,9 @@ into the credential store:
 ```sh
 umask 077
 wg genkey | tee wg0.key | wg pubkey > wg0.pub
-pigeon-mesh sign --key operator.key --ttl 720h --name "$(hostname)" "$(cat wg0.pub)" > node.grant
+pigeon-mesh sign --key operator.key --ttl 720h --name "$(hostname)" \
+  --endpoint '[{{ GetPublicInterfaces | include "type" "IPv6" | limit 1 | attr "address" }}]:51820' \
+  "$(cat wg0.pub)" > node.grant
 systemd-creds encrypt --name=network.wireguard.private.50-wg0 wg0.key /etc/credstore.encrypted/network.wireguard.private.50-wg0
 systemd-creds encrypt --name=pigeon-grant node.grant /etc/credstore.encrypted/pigeon-grant
 ```

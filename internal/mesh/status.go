@@ -170,7 +170,7 @@ func (m *Mesh) status() Status {
 	unauthorized := map[string][]string{}
 	for name, e := range members {
 		pv := PeerView{
-			Endpoint:   e.peer.Endpoint,
+			Endpoint:   e.endpoint,
 			AllowedIPs: e.peer.AllowedIPs,
 			Tags:       e.tags,
 			Status:     memberStatus(e.admitted(), e.failed),
@@ -193,7 +193,7 @@ func (m *Mesh) status() Status {
 	}
 	// self is never in the member table
 	selfPV := PeerView{
-		Endpoint:   m.cfg.Self.Endpoint,
+		Endpoint:   m.selfEndpoint(),
 		AllowedIPs: m.cfg.Self.AllowedIPs,
 		Tags:       m.selfTags(),
 		Status:     "alive",

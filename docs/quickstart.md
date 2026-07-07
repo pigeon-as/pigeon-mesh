@@ -12,12 +12,13 @@ ip link add wg0 type wireguard
 wg genkey | tee wg0.key | wg set wg0 private-key /dev/stdin listen-port 51820
 ip link set wg0 up
 
-pigeon-mesh sign --key signer.key --ttl 720h --name "$(hostname)" "$(wg show wg0 public-key)" > node.sig
+pigeon-mesh sign --key signer.key --ttl 720h --name "$(hostname)" \
+  --endpoint '[{{ GetPublicInterfaces | include "type" "IPv6" | limit 1 | attr "address" }}]:51820' \
+  "$(wg show wg0 public-key)" > node.sig
 pigeon-mesh \
   --interface wg0 \
   --prefix fdcc::/48 \
-  --signature node.sig \
-  --endpoint '[{{ GetPublicInterfaces | include "type" "IPv6" | limit 1 | attr "address" }}]:51820'
+  --signature node.sig
 ```
 
 The node trusts whoever signed its grant, so no `--signers` is needed.

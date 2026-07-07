@@ -16,7 +16,7 @@ import (
 func TestAdmit_Revoked(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
 	signers, ownRoute, grant := signedFixture(t, now)
-	peer := Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute}, Signature: grant}
+	peer := Peer{PublicKey: testKey, AllowedIPs: []string{ownRoute}, Signature: grant}
 	// A valid grant is still rejected: the denylist gate sits before verifyGrant, so it overrides admission.
 	r := admit(member{}, peer, testKey, &signers, map[string]struct{}{testKey: {}}, testPrefix, nil, now)
 	must.ErrorIs(t, r.admitErr, errRevoked)
@@ -59,7 +59,7 @@ func TestReloadRevokedFromFile_ReadmitsOnRemove(t *testing.T) {
 	m.cfg = Config{Prefix: testPrefix}
 	storeConfig(m, signers, nil)
 	m.members[testKey] = member{
-		peer:   Peer{PublicKey: testKey, Endpoint: "203.0.113.1:51820", AllowedIPs: []string{ownRoute}, Signature: grant},
+		peer:   Peer{PublicKey: testKey, AllowedIPs: []string{ownRoute}, Signature: grant},
 		wgPeer: wgPeer{key: testKey, endpoint: "203.0.113.1:51820", routes: []string{ownRoute}},
 		meta:   []byte("m"),
 	}

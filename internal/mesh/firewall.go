@@ -68,8 +68,10 @@ func (m *Mesh) firewallRuleset(rules *FirewallPolicy) (string, [][]expr.Any) {
 		return "guard:" + strconv.Itoa(m.cfg.GossipPort), out
 	}
 
-	// Preamble: leave non-overlay traffic alone, keep IPv6/return-path/gossip working, then default-deny.
+	// Preamble: allow loopback (this node reaching its own overlay services, e.g. self DNS), leave non-overlay
+	// traffic alone, keep IPv6/return-path/gossip working, then default-deny.
 	out := [][]expr.Any{
+		acceptLoopback(),
 		acceptOtherDests(self),
 		acceptEstablished(),
 		acceptICMPv6(),
@@ -110,7 +112,7 @@ func (m *Mesh) firewallPeers(rules *FirewallPolicy) []fwPeerRules {
 		pr, err := rules.compilePeer(fwPeer{
 			Key:      name,
 			Address:  HostRoute(e.addr).String(),
-			Endpoint: e.peer.Endpoint,
+			Endpoint: e.endpoint,
 			Tags:     e.tags,
 		})
 		if err != nil {
@@ -126,16 +128,15 @@ func (m *Mesh) firewallPeers(rules *FirewallPolicy) []fwPeerRules {
 	return out
 }
 
-// applyFirewall rebuilds our table atomically: drop any prior instance in its OWN flush (DelTable of a
-// nonexistent table returns ENOENT and would fail a combined create batch), then create table, chain, rules.
+// applyFirewall replaces the table's rules in one atomic transaction: AddTable/AddChain are idempotent
+// (create-or-no-op), FlushChain drops the previous rules, and the new rules append, all in a single Flush.
+// The table is never deleted, so there is no window where its default-deny is absent (a delete+recreate would
+// leave the node fail-open between flushes, and also tripped DelTable-ENOENT on the first run).
 func (m *Mesh) applyFirewall(ruleExprs [][]expr.Any) error {
 	c, err := nftables.New()
 	if err != nil {
 		return fmt.Errorf("nftables: %w", err)
 	}
-	c.DelTable(&nftables.Table{Family: nftables.TableFamilyIPv6, Name: nftTable})
-	_ = c.Flush()
-
 	t := c.AddTable(&nftables.Table{Family: nftables.TableFamilyIPv6, Name: nftTable})
 	accept := nftables.ChainPolicyAccept
 	ch := c.AddChain(&nftables.Chain{
@@ -146,6 +147,7 @@ func (m *Mesh) applyFirewall(ruleExprs [][]expr.Any) error {
 		Priority: nftables.ChainPriorityFilter,
 		Policy:   &accept,
 	})
+	c.FlushChain(ch) // clear prior rules; new ones append below, all in the one Flush
 	for _, ex := range ruleExprs {
 		c.AddRule(&nftables.Rule{Table: t, Chain: ch, Exprs: ex})
 	}
@@ -182,6 +184,16 @@ func gossipGuardRule(iface string, self [16]byte, l4proto byte, port uint16) []e
 		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 2, Len: 2}, // dport
 		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: binaryutil.BigEndian.PutUint16(port)},
 		&expr.Verdict{Kind: expr.VerdictDrop},
+	}
+}
+
+// acceptLoopback accepts traffic arriving on lo, so this node can reach its own overlay-bound services (like
+// self DNS on the overlay address) that would otherwise hit the default-deny.
+func acceptLoopback() []expr.Any {
+	return []expr.Any{
+		&expr.Meta{Key: expr.MetaKeyIIFNAME, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: ifname("lo")},
+		&expr.Verdict{Kind: expr.VerdictAccept},
 	}
 }
 
